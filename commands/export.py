@@ -21,6 +21,8 @@ from lib.common import (
     create_browser_context,
     login,
     dismiss_popup,
+    goto_receipt,
+    goto_yoriyori,
     goto_export_page,
     set_service_month,
     save_artifacts,
@@ -98,6 +100,12 @@ def run_export(
 
             # ポップアップを閉じる
             dismiss_popup(page)
+
+            # レセプト画面に遷移
+            goto_receipt(page)
+
+            # 訪問看護/よりより画面に遷移
+            goto_yoriyori(page)
 
             # 各種情報出力画面に遷移
             goto_export_page(page)

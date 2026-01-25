@@ -131,6 +131,28 @@ def dismiss_popup(page: Page) -> None:
         pass
 
 
+def goto_receipt(page: Page) -> None:
+    """
+    レセプト画面に遷移
+    """
+    print("レセプトボタンをクリックしています...")
+    page.click("text=レセプト")
+    page.wait_for_load_state("networkidle")
+    page.wait_for_timeout(1000)
+    print("レセプト画面を表示しました")
+
+
+def goto_yoriyori(page: Page) -> None:
+    """
+    訪問看護/よりより（1260192047）画面に遷移
+    """
+    print("訪問看護のリンクをクリックしています...")
+    page.click("text=訪問看護/1260192047")
+    page.wait_for_load_state("networkidle")
+    page.wait_for_timeout(1000)
+    print("訪問看護の詳細画面を表示しました")
+
+
 def goto_monthly_schedule(page: Page) -> None:
     """
     月間スケジュール管理画面に遷移

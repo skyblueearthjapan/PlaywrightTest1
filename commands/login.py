@@ -20,6 +20,8 @@ from lib.common import (
     create_browser_context,
     login,
     dismiss_popup,
+    goto_receipt,
+    goto_yoriyori,
     save_artifacts,
 )
 
@@ -50,9 +52,19 @@ def run_login(headless: bool = True) -> dict:
             # ポップアップを閉じる
             dismiss_popup(page)
 
+            # レセプト画面に遷移
+            goto_receipt(page)
+
+            # 訪問看護/よりより画面に遷移
+            goto_yoriyori(page)
+
             print("\n=== ログイン完了 ===")
             print("state.json にセッション状態を保存しました。")
             print("以降のコマンドでは自動的にログイン状態が復元されます。")
+
+            # 5秒待機（目視確認用）
+            print("5秒後にブラウザを閉じます...")
+            page.wait_for_timeout(5000)
 
             result["success"] = True
 
