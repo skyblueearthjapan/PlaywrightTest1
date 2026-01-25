@@ -1,4 +1,5 @@
 import os
+import argparse
 from pathlib import Path
 from playwright.sync_api import sync_playwright
 from dotenv import load_dotenv
@@ -7,8 +8,10 @@ from dotenv import load_dotenv
 load_dotenv()
 
 LOGIN_URL = "https://r.kaipoke.biz/biztop/"
+STATE_FILE = "state.json"
 
-def run_login():
+
+def run_login(save_state: bool = False, use_state: bool = False):
     """
     .env ファイルから認証情報を読み込んでログインを実行
     """
@@ -37,7 +40,15 @@ def run_login():
     with sync_playwright() as p:
         # Firefox を使用（Windows環境でより安定）
         browser = p.firefox.launch(headless=False)
-        page = browser.new_page()
+
+        # storage_state を使う場合（ログイン済み状態を再利用）
+        if use_state and Path(STATE_FILE).exists():
+            print(f"ログイン状態を復元しています: {STATE_FILE}")
+            context = browser.new_context(storage_state=STATE_FILE)
+        else:
+            context = browser.new_context()
+
+        page = context.new_page()
 
         print(f"ログインページを開いています: {LOGIN_URL}")
         page.goto(LOGIN_URL)
@@ -131,13 +142,25 @@ def run_login():
         page.wait_for_load_state("networkidle")
 
         print("訪問看護の詳細画面を表示しました！")
+
+        # storage_state を保存（次回ログインをスキップできる）
+        if save_state:
+            context.storage_state(path=STATE_FILE)
+            print(f"ログイン状態を保存しました: {STATE_FILE}")
+
         # 目視確認用に5秒待機
         print("5秒後にブラウザを閉じます...")
         page.wait_for_timeout(5000)
 
+        context.close()
         browser.close()
         print("完了しました。")
 
 
 if __name__ == "__main__":
-    run_login()
+    parser = argparse.ArgumentParser(description="カイポケ自動ログインスクリプト")
+    parser.add_argument("--save-state", action="store_true", help="ログイン状態を state.json に保存")
+    parser.add_argument("--use-state", action="store_true", help="保存済みのログイン状態を使用")
+    args = parser.parse_args()
+
+    run_login(save_state=args.save_state, use_state=args.use_state)

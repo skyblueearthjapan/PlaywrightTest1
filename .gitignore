@@ -16,6 +16,10 @@ env/
 playwright-report/
 test-results/
 traces/
+artifacts/
+
+# ログイン状態（セッション情報を含む）
+state.json
 
 # IDE
 .vscode/
