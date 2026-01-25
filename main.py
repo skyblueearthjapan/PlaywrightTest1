@@ -1,15 +1,18 @@
 """
 月間スケジュール自動化ツール
 
-3つのブロックに分かれた自動化コマンドを提供します:
+4つのコマンドに分かれています:
 
-Block 1 (expand): 週間訪問パターンを月間スケジュールに展開
+1. login  - ログインしてセッション状態を保存
+    python main.py login
+
+2. expand - 週間訪問パターンを月間スケジュールに展開
     python main.py expand --month 2026-04
 
-Block 2 (export): 月間スケジュールをCSVで出力
+3. export - 月間スケジュールをCSVで出力
     python main.py export --month 2026-04 --out data/current_202604.csv
 
-Block 3 (apply): 最適化されたスケジュールとの差分を適用
+4. apply  - 最適化されたスケジュールとの差分を適用
     python main.py apply --month 2026-04 --week-start 2026-04-20 --current data/current.csv --optimized data/opt_week.csv
 
 共通オプション:
@@ -27,9 +30,10 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 使用例:
-  python main.py expand --month 2026-04
-  python main.py export --month 2026-04 --out data/current_202604.csv
-  python main.py apply --month 2026-04 --week-start 2026-04-20 --current data/current.csv --optimized data/opt.csv
+  python main.py login                              # ログイン（初回のみ）
+  python main.py expand --month 2026-04             # 自動展開
+  python main.py export --month 2026-04             # CSV出力
+  python main.py apply --month 2026-04 ...          # 自動入力
 
 注意: デフォルトは4月(2026-04)です。他の月を指定すると警告が表示されます。
         """
@@ -37,28 +41,35 @@ def main():
 
     subparsers = parser.add_subparsers(dest="command", help="実行するコマンド")
 
-    # Block 1: expand
+    # 1. login
+    login_parser = subparsers.add_parser(
+        "login",
+        help="ログインしてセッション状態を保存"
+    )
+    login_parser.add_argument("--headed", action="store_true", help="ブラウザを表示")
+
+    # 2. expand
     expand_parser = subparsers.add_parser(
         "expand",
-        help="Block 1: 週間訪問パターンを月間スケジュールに展開"
+        help="週間訪問パターンを月間スケジュールに展開"
     )
     expand_parser.add_argument("--month", default="2026-04", help="対象月 (デフォルト: 2026-04)")
     expand_parser.add_argument("--headed", action="store_true", help="ブラウザを表示")
     expand_parser.add_argument("--dry-run", action="store_true", help="テスト実行")
 
-    # Block 2: export
+    # 3. export
     export_parser = subparsers.add_parser(
         "export",
-        help="Block 2: 月間スケジュールをCSVで出力"
+        help="月間スケジュールをCSVで出力"
     )
     export_parser.add_argument("--month", default="2026-04", help="対象月 (デフォルト: 2026-04)")
     export_parser.add_argument("--out", default=None, help="出力ファイルパス")
     export_parser.add_argument("--headed", action="store_true", help="ブラウザを表示")
 
-    # Block 3: apply
+    # 4. apply
     apply_parser = subparsers.add_parser(
         "apply",
-        help="Block 3: 差分を検出して適用"
+        help="差分を検出して自動入力"
     )
     apply_parser.add_argument("--month", default="2026-04", help="対象月 (デフォルト: 2026-04)")
     apply_parser.add_argument("--week-start", required=True, help="対象週の開始日 (例: 2026-04-20)")
@@ -73,8 +84,8 @@ def main():
         parser.print_help()
         sys.exit(1)
 
-    # 4月以外は警告
-    if hasattr(args, "month") and not args.month.endswith("-04"):
+    # 4月以外は警告（loginコマンド以外）
+    if args.command != "login" and hasattr(args, "month") and not args.month.endswith("-04"):
         print("警告: 4月以外の月が指定されています！")
         print("  1月・2月・3月はいじらないでください。")
         confirm = input("続行しますか？ (y/N): ")
@@ -82,7 +93,11 @@ def main():
             print("キャンセルしました")
             sys.exit(0)
 
-    if args.command == "expand":
+    if args.command == "login":
+        from commands.login import run_login
+        run_login(headless=not args.headed)
+
+    elif args.command == "expand":
         from commands.expand import run_expand
         run_expand(
             month=args.month,
