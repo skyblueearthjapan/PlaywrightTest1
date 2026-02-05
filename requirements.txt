@@ -1,0 +1,13 @@
+# Playwright自動化
+playwright>=1.40.0
+
+# Flask APIサーバー
+flask>=3.0.0
+flask-cors>=4.0.0
+
+# Google Drive連携（オプション）
+# google-api-python-client>=2.100.0
+# google-auth>=2.23.0
+
+# ヘルスチェック用
+requests>=2.31.0

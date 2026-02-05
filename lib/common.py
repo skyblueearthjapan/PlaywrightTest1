@@ -47,7 +47,7 @@ def create_browser_context(playwright, headless: bool = False, use_state: bool =
     return browser, context, page
 
 
-def login(page: Page, save_state: bool = False, context: BrowserContext = None) -> bool:
+def login(page: Page, save_state: bool = False, context: BrowserContext = None, timeout: int = 60000) -> bool:
     """
     カイポケにログイン
 
@@ -55,6 +55,7 @@ def login(page: Page, save_state: bool = False, context: BrowserContext = None) 
         page: Playwrightのページオブジェクト
         save_state: ログイン状態を保存するか
         context: storage_state保存用のコンテキスト
+        timeout: タイムアウト（ミリ秒、デフォルト60秒）
 
     Returns:
         bool: ログイン成功かどうか
@@ -67,24 +68,50 @@ def login(page: Page, save_state: bool = False, context: BrowserContext = None) 
         raise ValueError(".env ファイルに KAIPOKE_CORP_ID, KAIPOKE_USER_ID, KAIPOKE_PASSWORD が設定されていません")
 
     print(f"ログインページを開いています: {LOGIN_URL}")
-    page.goto(LOGIN_URL)
-    page.wait_for_load_state("networkidle")
+    page.goto(LOGIN_URL, timeout=timeout)
+
+    # ページの読み込みを待つ
+    try:
+        page.wait_for_load_state("networkidle", timeout=timeout)
+    except Exception:
+        print("  (networkidle待機がタイムアウト、続行)")
+        page.wait_for_load_state("domcontentloaded", timeout=timeout)
 
     # すでにログイン済みかチェック
-    if "biztop" not in page.url and "error" not in page.url:
-        print("すでにログイン済みです")
+    # biztopはログインページ、ログイン後はリダイレクトされる
+    current_url = page.url
+    if "biztop" not in current_url and "error" not in current_url:
+        print(f"すでにログイン済みです（URL: {current_url}）")
         return True
+
+    # ログインフォームが表示されているか確認
+    corp_id_field = page.locator("#form\\:corporation_id")
+    if not corp_id_field.is_visible(timeout=3000):
+        # フォームがない場合、ダッシュボードにいる可能性
+        if "kaipoke" in page.url or "common" in page.url:
+            print("すでにログイン済みです（ダッシュボード検出）")
+            return True
 
     # エラーページの場合は「トップへ戻る」をクリック
     if "error" in page.url or "nonmember" in page.url:
         print("エラーページが表示されました。トップへ戻るをクリックします...")
-        page.click("text=トップへ戻る")
-        page.wait_for_load_state("networkidle")
+        try:
+            page.click("text=トップへ戻る", timeout=5000)
+            page.wait_for_load_state("domcontentloaded", timeout=timeout)
+        except Exception:
+            pass
+
+    # ログインフォームが必要かどうか再確認
+    corp_id_field = page.locator("#form\\:corporation_id")
+    if not corp_id_field.is_visible(timeout=5000):
+        # フォームがないので、ログイン済みと判断
+        print("ログインフォームが見つかりません。ログイン済みと判断します。")
+        return True
 
     print("認証情報を入力しています...")
 
     # 法人ID を入力
-    page.fill("#form\\:corporation_id", corp_id)
+    corp_id_field.fill(corp_id)
     page.wait_for_timeout(300)
 
     # ユーザーID を入力
@@ -123,51 +150,115 @@ def login(page: Page, save_state: bool = False, context: BrowserContext = None) 
 
 
 def dismiss_popup(page: Page) -> None:
-    """ポップアップを閉じる（表示されている場合）"""
+    """ポップアップや通知バーを閉じる（表示されている場合）"""
     try:
+        # 黄色い通知バー「ログアウト発生をともなうリリースについて」のXボタンを閉じる
+        close_buttons = [
+            "button.close",
+            "a.close",
+            ".notification-close",
+            "[aria-label='Close']",
+            "text=×",
+        ]
+        for selector in close_buttons:
+            try:
+                close_btn = page.locator(selector).first
+                if close_btn.is_visible(timeout=1000):
+                    close_btn.click()
+                    page.wait_for_timeout(300)
+            except Exception:
+                continue
+
+        # 画面中央のポップアップを閉じるためにクリック
         page.mouse.click(400, 650)
         page.wait_for_timeout(500)
     except Exception:
         pass
 
 
-def goto_receipt(page: Page) -> None:
+def goto_receipt(page: Page, timeout: int = 60000) -> None:
     """
     レセプト画面に遷移
+
+    Args:
+        page: Playwrightのページオブジェクト
+        timeout: タイムアウト（ミリ秒、デフォルト60秒）
     """
     print("レセプトボタンをクリックしています...")
     page.click("text=レセプト")
-    page.wait_for_load_state("networkidle")
+    try:
+        page.wait_for_load_state("networkidle", timeout=timeout)
+    except Exception:
+        print("  (networkidle待機がタイムアウト、domcontentloadedで続行)")
+        page.wait_for_load_state("domcontentloaded", timeout=timeout)
     page.wait_for_timeout(1000)
     print("レセプト画面を表示しました")
 
 
-def goto_yoriyori(page: Page) -> None:
+def goto_yoriyori(page: Page, timeout: int = 60000) -> None:
     """
     訪問看護/よりより（1260192047）画面に遷移
+
+    Args:
+        page: Playwrightのページオブジェクト
+        timeout: タイムアウト（ミリ秒、デフォルト60秒）
     """
     print("訪問看護のリンクをクリックしています...")
     page.click("text=訪問看護/1260192047")
-    page.wait_for_load_state("networkidle")
+    try:
+        page.wait_for_load_state("networkidle", timeout=timeout)
+    except Exception:
+        # networkidleがタイムアウトした場合はdomcontentloadedで代替
+        print("  (networkidle待機がタイムアウト、domcontentloadedで続行)")
+        page.wait_for_load_state("domcontentloaded", timeout=timeout)
     page.wait_for_timeout(1000)
     print("訪問看護の詳細画面を表示しました")
 
 
-def goto_monthly_schedule(page: Page) -> None:
+def goto_monthly_schedule(page: Page, timeout: int = 60000) -> None:
     """
     月間スケジュール管理画面に遷移
 
-    ナビゲーション: ホーム → スケジュール → 月間スケジュール管理
+    ナビゲーション: スケジュール管理（ドロップダウン）→ 月間スケジュール管理
+
+    Args:
+        page: Playwrightのページオブジェクト
+        timeout: タイムアウト（ミリ秒、デフォルト60秒）
     """
     print("月間スケジュール管理画面に遷移しています...")
 
-    # スケジュールメニューをクリック
-    page.click("text=スケジュール")
-    page.wait_for_timeout(500)
+    # 複数の方法を試す
+    monthly_link = page.locator("text=月間スケジュール管理").first
 
-    # 月間スケジュール管理をクリック
-    page.click("text=月間スケジュール管理")
-    page.wait_for_load_state("networkidle")
+    # 方法1: すでに見えている場合はそのままクリック
+    if monthly_link.is_visible(timeout=2000):
+        monthly_link.click()
+    else:
+        # 方法2: スケジュール管理メニューをクリックしてドロップダウンを開く
+        schedule_menu = page.locator("a:has-text('スケジュール管理')").first
+        if schedule_menu.is_visible():
+            # ホバーでドロップダウンを開く
+            schedule_menu.hover()
+            page.wait_for_timeout(800)
+
+            # まだ見えない場合はクリック
+            if not monthly_link.is_visible(timeout=1000):
+                schedule_menu.click()
+                page.wait_for_timeout(800)
+
+        # 月間スケジュール管理をクリック
+        if monthly_link.is_visible(timeout=3000):
+            monthly_link.click()
+        else:
+            # 方法3: JavaScriptでナビゲート
+            print("  ドロップダウンが開かないため、直接URLに移動します")
+            page.goto("https://r.kaipoke.biz/bizhnc/monthlyShiftsList?isFromMenuBizhnc=true", timeout=timeout)
+
+    try:
+        page.wait_for_load_state("networkidle", timeout=timeout)
+    except Exception:
+        print("  (networkidle待機がタイムアウト、domcontentloadedで続行)")
+        page.wait_for_load_state("domcontentloaded", timeout=timeout)
     page.wait_for_timeout(1000)
 
     print("月間スケジュール管理画面を表示しました")
@@ -175,18 +266,31 @@ def goto_monthly_schedule(page: Page) -> None:
 
 def goto_export_page(page: Page) -> None:
     """
-    各種情報出力画面に遷移
+    出力対象選択画面に遷移
 
-    ナビゲーション: ホーム → 各種情報出力
+    ナビゲーション: 上部ナビゲーションバー「各種情報出力▼」→「出力対象選択」
     """
-    print("各種情報出力画面に遷移しています...")
+    print("出力対象選択画面に遷移しています...")
 
-    # 各種情報出力メニューをクリック
-    page.click("text=各種情報出力")
+    # 上部ナビゲーションバーの「各種情報出力▼」プルダウンをホバー/クリック
+    # ※サイドメニューではなく、上部のナビゲーションバーにあるプルダウン
+    export_menu = page.locator("a:has-text('各種情報出力')").first
+    export_menu.hover()
+    page.wait_for_timeout(500)
+
+    # プルダウンが開かない場合はクリック
+    output_select = page.locator("text=出力対象選択")
+    if not output_select.is_visible():
+        export_menu.click()
+        page.wait_for_timeout(500)
+
+    # 「出力対象選択」をクリック
+    print("出力対象選択をクリックしています...")
+    page.click("text=出力対象選択")
     page.wait_for_load_state("networkidle")
     page.wait_for_timeout(1000)
 
-    print("各種情報出力画面を表示しました")
+    print("出力対象選択画面を表示しました")
 
 
 def parse_month(month_str: str) -> tuple[int, int]:
@@ -223,54 +327,61 @@ def set_service_month(page: Page, month_str: str) -> None:
     """
     サービス提供月を設定
 
+    月間スケジュール一覧画面で「次月」ボタンをクリックして目標の月に移動する。
+    スクリーンショットによると、令和8年1月から4月へは「次月」ボタン3回クリック。
+
     Args:
         page: Playwrightのページオブジェクト
         month_str: "2026-04" 形式の月文字列
     """
     year, month = parse_month(month_str)
     reiwa_year = to_reiwa(year)
+    target_text = f"令和{reiwa_year}年{month}月"
 
-    print(f"サービス提供月を設定しています: 令和{reiwa_year}年{month}月 ({year}-{month:02d})")
+    print(f"サービス提供月を設定しています: {target_text} ({year}-{month:02d})")
 
-    # 年のプルダウンを選択（令和8年 = 2026年）
-    # セレクタは画面によって異なる可能性があるため、複数パターンを試す
-    year_selectors = [
-        "select[name*='year']",
-        "select[id*='year']",
-        "#year",
-        ".year-select",
-    ]
-
-    for selector in year_selectors:
+    # 現在の月を確認する関数
+    def get_current_month_text():
+        # ページ内の「令和X年Y月」テキストを探す
         try:
-            year_select = page.locator(selector).first
-            if year_select.is_visible():
-                year_select.select_option(str(reiwa_year))
-                break
+            # DevToolsから見ると #tdNextServiceOffer 付近に年月がある
+            month_elem = page.locator("text=/令和\\d+年\\d+月/").first
+            if month_elem.is_visible():
+                return month_elem.text_content().strip()
         except Exception:
-            continue
+            pass
+        return ""
 
-    page.wait_for_timeout(300)
+    # 現在の月をチェック
+    current_text = get_current_month_text()
+    print(f"  現在の月: {current_text}")
 
-    # 月のプルダウンを選択
-    month_selectors = [
-        "select[name*='month']",
-        "select[id*='month']",
-        "#month",
-        ".month-select",
-    ]
+    if target_text in current_text:
+        print(f"  すでに目標の月です: {target_text}")
+        return
 
-    for selector in month_selectors:
-        try:
-            month_select = page.locator(selector).first
-            if month_select.is_visible():
-                month_select.select_option(str(month))
-                break
-        except Exception:
-            continue
+    # 「次月」ボタンで移動（最大12回）
+    for i in range(12):
+        next_btn = page.locator("a.next, a:has-text('次月')").first
+        if not next_btn.is_visible():
+            # 別のセレクタを試す
+            next_btn = page.locator("text=次月").first
 
-    page.wait_for_timeout(500)
-    print(f"サービス提供月を設定しました")
+        if not next_btn.is_visible():
+            print("  「次月」ボタンが見つかりません")
+            break
+
+        next_btn.click()
+        page.wait_for_timeout(1500)
+
+        current_text = get_current_month_text()
+        print(f"  → {current_text}")
+
+        if f"{month}月" in current_text:
+            print(f"サービス提供月を設定しました: {current_text}")
+            return
+
+    print(f"警告: 目標の月({target_text})に到達できませんでした")
 
 
 def save_artifacts(page: Page, out_dir: Path, prefix: str = "") -> None:

@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  kaipoke-api:
+    build: .
+    container_name: kaipoke-api
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    volumes:
+      # データ永続化（セッション情報、CSV等）
+      - ./data:/app/data
+      - ./artifacts:/app/artifacts
+      - ./state.json:/app/state.json
+    environment:
+      - TZ=Asia/Tokyo
+      - PYTHONUNBUFFERED=1
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/api/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+# Cloudflare Tunnel を使う場合は以下を追加
+#  cloudflared:
+#    image: cloudflare/cloudflared:latest
+#    container_name: cloudflared
+#    restart: unless-stopped
+#    command: tunnel --no-autoupdate run --token YOUR_TUNNEL_TOKEN
+#    depends_on:
+#      - kaipoke-api

@@ -32,22 +32,43 @@ from lib.common import (
 
 
 class ScheduleEntry(NamedTuple):
-    """スケジュールエントリ"""
-    user_id: str
-    user_name: str
-    date: str  # YYYY-MM-DD
-    time_start: str  # HH:MM
-    time_end: str  # HH:MM
-    service_type: str
-    staff: str
+    """
+    スケジュールエントリ（カイポケCSVフォーマット）
+
+    列構成:
+        A: 職員名1, B: 職種1, C: 職員名2, D: 職種2, E: 同行2,
+        F: 職員名3, G: 職種3, H: 同行3, I: 事業所名,
+        J: 日付, K: 曜日, L: 利用者, M: 業務種別, N: サービス内容,
+        O: 開始時間, P: 終了時間, Q: 提供時間, R: 備考
+    """
+    staff1_name: str       # A: 職員名1
+    staff1_type: str       # B: 職種1
+    staff2_name: str       # C: 職員名2
+    staff2_type: str       # D: 職種2
+    staff2_accompany: str  # E: 同行2
+    staff3_name: str       # F: 職員名3
+    staff3_type: str       # G: 職種3
+    staff3_accompany: str  # H: 同行3
+    facility: str          # I: 事業所名
+    date: str              # J: 日付
+    weekday: str           # K: 曜日
+    user_name: str         # L: 利用者
+    work_type: str         # M: 業務種別
+    service_content: str   # N: サービス内容
+    time_start: str        # O: 開始時間
+    time_end: str          # P: 終了時間
+    duration: str          # Q: 提供時間
+    remarks: str           # R: 備考
 
 
 def load_csv(file_path: str) -> list[ScheduleEntry]:
     """
     CSVファイルを読み込んでScheduleEntryのリストを返す
 
-    CSVの想定フォーマット:
-        利用者ID, 利用者名, 日付, 開始時刻, 終了時刻, サービス種類, 担当者
+    CSVの想定フォーマット（カイポケ出力）:
+        職員名1, 職種1, 職員名2, 職種2, 同行2, 職員名3, 職種3, 同行3,
+        事業所名, 日付, 曜日, 利用者, 業務種別, サービス内容,
+        開始時間, 終了時間, 提供時間, 備考
     """
     entries = []
     path = Path(file_path)
@@ -55,20 +76,46 @@ def load_csv(file_path: str) -> list[ScheduleEntry]:
     if not path.exists():
         raise FileNotFoundError(f"CSVファイルが見つかりません: {file_path}")
 
-    with open(path, "r", encoding="utf-8-sig") as f:
+    # エンコーディングを自動判定（cp932 または utf-8）
+    encodings = ["cp932", "utf-8-sig", "utf-8", "shift_jis"]
+    content = None
+    for enc in encodings:
+        try:
+            with open(path, "r", encoding=enc) as f:
+                content = f.read()
+            break
+        except UnicodeDecodeError:
+            continue
+
+    if content is None:
+        raise ValueError(f"CSVファイルのエンコーディングを判定できません: {file_path}")
+
+    import io
+    with io.StringIO(content) as f:
         reader = csv.reader(f)
         header = next(reader, None)  # ヘッダーをスキップ
 
         for row in reader:
-            if len(row) >= 7:
+            if len(row) >= 18:
                 entries.append(ScheduleEntry(
-                    user_id=row[0].strip(),
-                    user_name=row[1].strip(),
-                    date=row[2].strip(),
-                    time_start=row[3].strip(),
-                    time_end=row[4].strip(),
-                    service_type=row[5].strip(),
-                    staff=row[6].strip(),
+                    staff1_name=row[0].strip(),
+                    staff1_type=row[1].strip(),
+                    staff2_name=row[2].strip(),
+                    staff2_type=row[3].strip(),
+                    staff2_accompany=row[4].strip(),
+                    staff3_name=row[5].strip(),
+                    staff3_type=row[6].strip(),
+                    staff3_accompany=row[7].strip(),
+                    facility=row[8].strip(),
+                    date=row[9].strip(),
+                    weekday=row[10].strip(),
+                    user_name=row[11].strip(),
+                    work_type=row[12].strip(),
+                    service_content=row[13].strip(),
+                    time_start=row[14].strip(),
+                    time_end=row[15].strip(),
+                    duration=row[16].strip(),
+                    remarks=row[17].strip() if len(row) > 17 else "",
                 ))
 
     return entries
@@ -98,10 +145,38 @@ def compute_diff(
     start_date = datetime.strptime(week_start, "%Y-%m-%d")
     end_date = start_date + timedelta(days=6)
 
+    # 日付を正規化する関数（日のみの場合は月を補完）
+    def normalize_date(date_str: str, year_month: str) -> str:
+        """
+        日付を YYYY-MM-DD 形式に正規化
+
+        Args:
+            date_str: 日付文字列（"21" や "2026-04-21" など）
+            year_month: 対象月（"2026-04" 形式）
+
+        Returns:
+            str: YYYY-MM-DD 形式の日付
+        """
+        date_str = date_str.strip()
+        if "-" in date_str and len(date_str) >= 8:
+            # すでに YYYY-MM-DD 形式
+            return date_str
+        else:
+            # 日のみの場合、月を補完
+            try:
+                day = int(date_str)
+                return f"{year_month}-{day:02d}"
+            except ValueError:
+                return date_str
+
+    # week_start から年月を取得
+    year_month = week_start[:7]  # "2026-04"
+
     # 対象週のエントリのみ抽出
     def is_in_week(entry: ScheduleEntry) -> bool:
         try:
-            entry_date = datetime.strptime(entry.date, "%Y-%m-%d")
+            normalized = normalize_date(entry.date, year_month)
+            entry_date = datetime.strptime(normalized, "%Y-%m-%d")
             return start_date <= entry_date <= end_date
         except ValueError:
             return False
@@ -109,9 +184,10 @@ def compute_diff(
     current_week = [e for e in current if is_in_week(e)]
     optimized_week = [e for e in optimized if is_in_week(e)]
 
-    # キーを作成（利用者ID + 日付 + 開始時刻）
+    # キーを作成（利用者名 + 日付 + 開始時刻）
     def make_key(e: ScheduleEntry) -> str:
-        return f"{e.user_id}_{e.date}_{e.time_start}"
+        normalized_date = normalize_date(e.date, year_month)
+        return f"{e.user_name}_{normalized_date}_{e.time_start}"
 
     current_dict = {make_key(e): e for e in current_week}
     optimized_dict = {make_key(e): e for e in optimized_week}
@@ -197,15 +273,15 @@ def add_schedule_entry(page, entry: ScheduleEntry) -> bool:
         if end_input.is_visible():
             end_input.fill(entry.time_end)
 
-        # サービス種類を選択
+        # サービス内容を選択
         service_select = page.locator("select[name*='service']").first
         if service_select.is_visible():
-            service_select.select_option(label=entry.service_type)
+            service_select.select_option(label=entry.service_content)
 
-        # 担当者を選択
+        # 担当者1を選択
         staff_select = page.locator("select[name*='staff']").first
-        if staff_select.is_visible():
-            staff_select.select_option(label=entry.staff)
+        if staff_select.is_visible() and entry.staff1_name:
+            staff_select.select_option(label=entry.staff1_name)
 
         # 保存ボタンをクリック
         save_button = page.locator("button:has-text('保存'), button:has-text('登録')").first

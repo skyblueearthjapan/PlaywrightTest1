@@ -21,6 +21,13 @@ artifacts/
 # ログイン状態（セッション情報を含む）
 state.json
 
+# Google Drive認証情報（機密）
+credentials/
+config/drive_config.json
+
+# データファイル
+data/
+
 # IDE
 .vscode/
 .idea/
@@ -34,3 +41,8 @@ Thumbs.db
 
 # ログファイル
 *.log
+server_log.txt
+
+# 一時ファイル
+nul
+*.zip
