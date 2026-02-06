@@ -37,10 +37,24 @@ def create_browser_context(playwright, headless: bool = False, use_state: bool =
     """
     browser = playwright.firefox.launch(headless=headless)
 
+    # state.jsonが有効かどうか確認
+    state_valid = False
     if use_state and Path(STATE_FILE).exists():
-        print(f"ログイン状態を復元しています: {STATE_FILE}")
-        context = browser.new_context(storage_state=STATE_FILE)
-    else:
+        try:
+            import json
+            with open(STATE_FILE, 'r') as f:
+                state_data = json.load(f)
+            # cookiesが存在し、空でないことを確認
+            if state_data.get("cookies") and len(state_data["cookies"]) > 0:
+                print(f"ログイン状態を復元しています: {STATE_FILE}")
+                context = browser.new_context(storage_state=STATE_FILE)
+                state_valid = True
+            else:
+                print("state.jsonにセッション情報がありません。新規ログインします。")
+        except (json.JSONDecodeError, Exception) as e:
+            print(f"state.jsonの読み込みに失敗: {e}。新規ログインします。")
+
+    if not state_valid:
         context = browser.new_context()
 
     page = context.new_page()
