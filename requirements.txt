@@ -11,3 +11,6 @@ flask-cors>=4.0.0
 
 # ヘルスチェック用
 requests>=2.31.0
+
+# 環境変数
+python-dotenv>=1.0.0
