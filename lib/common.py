@@ -91,36 +91,58 @@ def login(page: Page, save_state: bool = False, context: BrowserContext = None, 
         print("  (networkidle待機がタイムアウト、続行)")
         page.wait_for_load_state("domcontentloaded", timeout=timeout)
 
-    # すでにログイン済みかチェック
-    # biztopはログインページ、ログイン後はリダイレクトされる
+    # エラーページチェック（最優先）
+    # エラーページのURLには "kaipokebiz" や "nonmember" が含まれることがある
     current_url = page.url
-    if "biztop" not in current_url and "error" not in current_url:
-        print(f"すでにログイン済みです（URL: {current_url}）")
-        return True
+    page_content = page.content()
 
-    # ログインフォームが表示されているか確認
-    corp_id_field = page.locator("#form\\:corporation_id")
-    if not corp_id_field.is_visible(timeout=3000):
-        # フォームがない場合、ダッシュボードにいる可能性
-        if "kaipoke" in page.url or "common" in page.url:
-            print("すでにログイン済みです（ダッシュボード検出）")
-            return True
+    # エラーページの特徴的なテキストをチェック
+    is_error_page = (
+        "error" in current_url.lower() or
+        "nonmember" in current_url.lower() or
+        "システムエラー" in page_content or
+        "処理を続行できませんでした" in page_content or
+        "トップへ戻る" in page_content and "ブラウザの「戻る」" in page_content
+    )
 
-    # エラーページの場合は「トップへ戻る」をクリック
-    if "error" in page.url or "nonmember" in page.url:
-        print("エラーページが表示されました。トップへ戻るをクリックします...")
+    if is_error_page:
+        print("エラーページが検出されました。ログインページに戻ります...")
+        # トップへ戻るボタンをクリックするか、直接ログインURLへ
         try:
             page.click("text=トップへ戻る", timeout=5000)
             page.wait_for_load_state("domcontentloaded", timeout=timeout)
+            page.wait_for_timeout(1000)
+        except Exception:
+            # ボタンがない場合は直接ログインURLへ
+            page.goto(LOGIN_URL, timeout=timeout)
+            page.wait_for_load_state("domcontentloaded", timeout=timeout)
+
+    # すでにログイン済みかチェック（エラーページでないことを確認後）
+    current_url = page.url
+    if "biztop" not in current_url and "error" not in current_url.lower() and "nonmember" not in current_url.lower():
+        # ダッシュボードの特徴的な要素をチェック
+        try:
+            dashboard_element = page.locator("text=レセプト").first
+            if dashboard_element.is_visible(timeout=3000):
+                print(f"すでにログイン済みです（URL: {current_url}）")
+                return True
         except Exception:
             pass
 
-    # ログインフォームが必要かどうか再確認
+    # ログインフォームが表示されているか確認
     corp_id_field = page.locator("#form\\:corporation_id")
     if not corp_id_field.is_visible(timeout=5000):
-        # フォームがないので、ログイン済みと判断
-        print("ログインフォームが見つかりません。ログイン済みと判断します。")
-        return True
+        # フォームがない場合、ログインURLへ再度遷移
+        print("ログインフォームが見つかりません。ログインURLへ再遷移します...")
+        page.goto(LOGIN_URL, timeout=timeout)
+        page.wait_for_load_state("domcontentloaded", timeout=timeout)
+        page.wait_for_timeout(1000)
+
+    # 再度フォームを確認
+    corp_id_field = page.locator("#form\\:corporation_id")
+    if not corp_id_field.is_visible(timeout=5000):
+        print("警告: ログインフォームが見つかりません")
+        return False
 
     print("認証情報を入力しています...")
 
