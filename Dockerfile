@@ -5,8 +5,13 @@ FROM mcr.microsoft.com/playwright/python:v1.40.0-jammy
 
 WORKDIR /app
 
+# タイムゾーン設定（対話入力をスキップ）
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=Asia/Tokyo
+
 # VNC関連パッケージをインストール
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    tzdata \
     xvfb \
     x11vnc \
     fluxbox \
