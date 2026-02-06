@@ -1,7 +1,7 @@
 # カイポケ自動化 API サーバー
 # Playwright + Flask + VNC on Docker
 
-FROM mcr.microsoft.com/playwright/python:v1.40.0-jammy
+FROM mcr.microsoft.com/playwright/python:v1.58.0-jammy
 
 WORKDIR /app
 
