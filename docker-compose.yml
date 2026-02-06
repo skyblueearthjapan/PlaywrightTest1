@@ -6,21 +6,35 @@ services:
     container_name: kaipoke-api
     restart: unless-stopped
     ports:
-      - "5000:5000"
+      - "5000:5000"   # Flask API
+      - "6080:6080"   # noVNC WebSocket
     volumes:
       # データ永続化（セッション情報、CSV等）
       - ./data:/app/data
       - ./artifacts:/app/artifacts
+      - ./logs:/app/logs
       - ./state.json:/app/state.json
     environment:
       - TZ=Asia/Tokyo
       - PYTHONUNBUFFERED=1
+      - DISPLAY=:99
+      - VNC_PORT=5901
+      - NOVNC_PORT=6080
+      - SCREEN_WIDTH=1280
+      - SCREEN_HEIGHT=720
+      - SCREEN_DEPTH=24
+      # API認証トークン（本番環境では変更してください）
+      - KAIPOKE_API_TOKEN=your-secure-token-here
+      # VPSホスト名
+      - VPS_HOST=kaipoke-api.net
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5000/api/status"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 10s
+      start_period: 15s
+    # 共有メモリを増やす（Playwrightブラウザ用）
+    shm_size: '2gb'
 
 # Cloudflare Tunnel を使う場合は以下を追加
 #  cloudflared:
