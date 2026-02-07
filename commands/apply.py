@@ -29,6 +29,7 @@ from lib.common import (
     set_service_month,
     save_artifacts,
 )
+from lib.stop_signal import is_stop_requested
 
 
 class ScheduleEntry(NamedTuple):
@@ -457,6 +458,10 @@ def run_apply(
 
             # 削除を実行
             for entry in diff["remove"]:
+                if is_stop_requested():
+                    print(f"\n非常停止が要求されました！削除処理を中断します。")
+                    result["stopped"] = True
+                    break
                 print(f"削除: {entry.user_name} {entry.date} {entry.time_start}")
                 if navigate_to_user(page, entry.user_name):
                     if remove_schedule_entry(page, entry):
@@ -467,6 +472,10 @@ def run_apply(
 
             # 追加を実行
             for entry in diff["add"]:
+                if is_stop_requested():
+                    print(f"\n非常停止が要求されました！追加処理を中断します。")
+                    result["stopped"] = True
+                    break
                 print(f"追加: {entry.user_name} {entry.date} {entry.time_start}")
                 if navigate_to_user(page, entry.user_name):
                     if add_schedule_entry(page, entry):
@@ -477,6 +486,10 @@ def run_apply(
 
             # 変更を実行（削除してから追加）
             for current_entry, optimized_entry in diff["modify"]:
+                if is_stop_requested():
+                    print(f"\n非常停止が要求されました！変更処理を中断します。")
+                    result["stopped"] = True
+                    break
                 print(f"変更: {current_entry.user_name} {current_entry.date} {current_entry.time_start}")
                 if navigate_to_user(page, current_entry.user_name):
                     if remove_schedule_entry(page, current_entry):

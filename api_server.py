@@ -40,6 +40,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from commands.expand import run_expand
 from commands.export import run_export
 from commands.auto_apply import run_auto_apply
+from lib.stop_signal import request_stop, clear_stop, is_stop_requested
 from lib.diff_engine import (
     compare_schedules,
     compare_schedules_from_content,
@@ -169,7 +170,38 @@ def api_status():
         "status": "running",
         "current_task": current_task,
         "job": job_state,
+        "stop_requested": is_stop_requested(),
         "timestamp": datetime.now().isoformat(),
+    })
+
+
+@app.route('/api/stop', methods=['POST'])
+def api_stop():
+    """
+    非常停止 API
+
+    実行中のPlaywright処理を安全に停止します。
+    現在処理中の利用者の操作が完了した後に停止します。
+    """
+    global current_task, job_state
+
+    request_stop()
+    add_log("非常停止が要求されました")
+
+    if current_task["running"]:
+        current_task["command"] = f"{current_task['command']}(停止中)"
+        add_log(f"実行中のタスクを停止します: {current_task['command']}")
+
+    if job_state["state"] == "running":
+        job_state["state"] = "stopped"
+        job_state["progress"] = "stopped"
+        job_state["ended_at"] = datetime.now().isoformat()
+
+    return jsonify({
+        "success": True,
+        "message": "非常停止を要求しました。現在の利用者の処理完了後に停止します。",
+        "current_task": current_task,
+        "job": job_state,
     })
 
 
@@ -195,6 +227,7 @@ def api_expand():
             "started_at": datetime.now().isoformat(),
         }
 
+        clear_stop()  # 非常停止フラグをクリア
         add_log(f"expand 開始 (month={month})")
         print(f"\n=== API: expand 開始 (month={month}) ===")
 
@@ -244,6 +277,7 @@ def api_export():
             "started_at": datetime.now().isoformat(),
         }
 
+        clear_stop()  # 非常停止フラグをクリア
         add_log(f"export 開始 (month={month})")
         print(f"\n=== API: export 開始 (month={month}) ===")
 
@@ -353,6 +387,7 @@ def api_apply():
             "started_at": datetime.now().isoformat(),
         }
 
+        clear_stop()  # 非常停止フラグをクリア
         add_log(f"apply 開始 (month={month}, dry_run={dry_run})")
         print(f"\n=== API: apply 開始 (month={month}, dry_run={dry_run}) ===")
         result = run_auto_apply(

@@ -27,6 +27,8 @@ function onOpen() {
     .addItem('4. 差分適用（カイポケに反映）', 'applyDiff')
     .addSeparator()
     .addItem('サーバー状態確認', 'checkStatus')
+    .addSeparator()
+    .addItem('*** 非常停止 ***', 'emergencyStop')
     .addToUi();
 }
 
@@ -60,6 +62,58 @@ function checkStatus() {
       'URL: ' + API_URL + '\n\n' +
       'エラー: ' + e.message,
       SpreadsheetApp.getUi().ButtonSet.OK
+    );
+  }
+}
+
+/**
+ * 非常停止
+ * 実行中のPlaywright処理を緊急停止します。
+ */
+function emergencyStop() {
+  const ui = SpreadsheetApp.getUi();
+
+  const confirm = ui.alert(
+    '*** 非常停止 ***',
+    '実行中の処理を緊急停止します。\n\n' +
+    '現在処理中の利用者の操作が完了した後に停止します。\n\n' +
+    '本当に停止しますか？',
+    ui.ButtonSet.YES_NO
+  );
+
+  if (confirm !== ui.Button.YES) {
+    return;
+  }
+
+  try {
+    const response = UrlFetchApp.fetch(API_URL + '/api/stop', {
+      method: 'POST',
+      contentType: 'application/json',
+      payload: JSON.stringify({}),
+      muteHttpExceptions: true,
+    });
+
+    const status = response.getResponseCode();
+    const result = JSON.parse(response.getContentText());
+
+    if (status === 200 && result.success) {
+      ui.alert(
+        '非常停止',
+        '停止を要求しました。\n\n' +
+        result.message + '\n\n' +
+        'タスク: ' + (result.current_task ? result.current_task.command || 'なし' : 'なし'),
+        ui.ButtonSet.OK
+      );
+    } else {
+      ui.alert('エラー', '停止に失敗しました: ' + (result.error || '不明なエラー'), ui.ButtonSet.OK);
+    }
+  } catch (e) {
+    ui.alert(
+      'エラー',
+      '非常停止リクエストに失敗しました。\n\n' +
+      'サーバーに接続できません。\n' +
+      'エラー: ' + e.message,
+      ui.ButtonSet.OK
     );
   }
 }

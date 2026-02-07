@@ -31,6 +31,7 @@ from lib.common import (
     parse_month,
 )
 from lib.diff_engine import load_correction_sheet, Correction
+from lib.stop_signal import is_stop_requested
 
 
 def select_user(page, user_name: str) -> bool:
@@ -663,6 +664,12 @@ def run_auto_apply(
 
             # 利用者ごとに処理
             for user_name, user_corrections in users.items():
+                # 非常停止チェック
+                if is_stop_requested():
+                    print(f"\n非常停止が要求されました！処理を中断します。")
+                    result["stopped"] = True
+                    break
+
                 print(f"\n--- 利用者: {user_name} ({len(user_corrections)}件) ---")
 
                 # 利用者を選択

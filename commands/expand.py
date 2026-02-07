@@ -32,6 +32,7 @@ from lib.common import (
     set_service_month,
     save_artifacts,
 )
+from lib.stop_signal import is_stop_requested
 
 # 最大利用者数（安全リミット: 現在約70名、将来の増加に備えて200）
 MAX_USERS = 200
@@ -276,6 +277,13 @@ def run_expand(month: str = "2026-04", headless: bool = True, dry_run: bool = Fa
             user_index = 1
 
             while True:
+                # 非常停止チェック
+                if is_stop_requested():
+                    print(f"\n非常停止が要求されました！処理を中断します。")
+                    print(f"（{user_index - 1}人目まで処理済み）")
+                    result["stopped"] = True
+                    break
+
                 result["total"] += 1
                 user_name = get_current_user_info(page)
                 print(f"[{user_index}] {user_name}")
