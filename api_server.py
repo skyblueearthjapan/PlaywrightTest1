@@ -456,6 +456,13 @@ def api_diff():
                 week_end_day = int(we_clean)
 
         add_log(f"diff 開始 (month={month}, week={week_start_day}-{week_end_day})")
+        print(f"[DEBUG /api/diff] リクエストパラメータ:")
+        print(f"  use_drive={use_drive}, month={month}")
+        print(f"  week_start={week_start} → day={week_start_day}")
+        print(f"  week_end={week_end} → day={week_end_day}")
+        print(f"  current_csv={current_csv}, optimized_csv={optimized_csv}")
+        print(f"  current_csv_content: {'あり (' + str(len(current_csv_content)) + '文字)' if current_csv_content else 'なし'}")
+        print(f"  optimized_csv_content: {'あり (' + str(len(optimized_csv_content)) + '文字)' if optimized_csv_content else 'なし'}")
 
         corrections = None
 
@@ -477,9 +484,16 @@ def api_diff():
             optimized_name = config.get("optimized_csv_name", "gas_optimized_{week_start}_{week_end}.csv")
             optimized_name = optimized_name.replace("{week_start}", ws).replace("{week_end}", we)
 
+            print(f"[DEBUG /api/diff] パターンA: Drive自動ダウンロード")
+            print(f"  current_name: {current_name}")
+            print(f"  optimized_name: {optimized_name}")
+            print(f"  folder_id: {folder_id}")
+
             # Driveからダウンロード
             current_file_id = find_file_by_name(folder_id, current_name)
             optimized_file_id = find_file_by_name(folder_id, optimized_name)
+            print(f"  current_file_id: {current_file_id}")
+            print(f"  optimized_file_id: {optimized_file_id}")
 
             if not current_file_id:
                 return jsonify({"success": False, "error": f"Driveに {current_name} が見つかりません"}), 404
@@ -495,6 +509,12 @@ def api_diff():
             if not download_from_drive(optimized_file_id, optimized_local):
                 return jsonify({"success": False, "error": f"{optimized_name} のダウンロードに失敗"}), 500
 
+            # ダウンロードしたファイルのサイズを確認
+            import os
+            cur_size = os.path.getsize(current_local) if os.path.exists(current_local) else 0
+            opt_size = os.path.getsize(optimized_local) if os.path.exists(optimized_local) else 0
+            print(f"  [DEBUG] ダウンロード完了: current={cur_size}bytes, optimized={opt_size}bytes")
+
             corrections = compare_schedules(
                 current_csv=current_local,
                 optimized_csv=optimized_local,
@@ -504,6 +524,7 @@ def api_diff():
 
         # パターンB: CSVコンテンツ直接送信
         elif current_csv_content and optimized_csv_content:
+            print(f"[DEBUG /api/diff] パターンB: CSVコンテンツ直接送信")
             corrections = compare_schedules_from_content(
                 current_content=current_csv_content,
                 optimized_content=optimized_csv_content,
@@ -513,6 +534,7 @@ def api_diff():
 
         # パターンC: ファイルパス指定
         elif current_csv and optimized_csv:
+            print(f"[DEBUG /api/diff] パターンC: ファイルパス指定 current={current_csv}, optimized={optimized_csv}")
             corrections = compare_schedules(
                 current_csv=current_csv,
                 optimized_csv=optimized_csv,

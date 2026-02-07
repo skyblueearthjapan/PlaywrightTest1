@@ -95,13 +95,15 @@ def read_csv_auto_encoding(file_path: str) -> list[list[str]]:
     if not path.exists():
         raise FileNotFoundError(f"CSVファイルが見つかりません: {file_path}")
 
-    encodings = ["cp932", "utf-8-sig", "utf-8", "shift_jis"]
+    encodings = ["utf-8-sig", "utf-8", "cp932", "shift_jis"]
     content = None
+    used_encoding = None
 
     for enc in encodings:
         try:
             with open(path, "r", encoding=enc) as f:
                 content = f.read()
+            used_encoding = enc
             break
         except UnicodeDecodeError:
             continue
@@ -109,12 +111,22 @@ def read_csv_auto_encoding(file_path: str) -> list[list[str]]:
     if content is None:
         raise ValueError(f"CSVファイルのエンコーディングを判定できません: {file_path}")
 
+    print(f"  [DEBUG] ファイル読み込み: {path.name} (encoding={used_encoding}, size={len(content)}文字)")
+
     import io
     rows = []
     with io.StringIO(content) as f:
         reader = csv.reader(f)
         for row in reader:
             rows.append(row)
+
+    print(f"  [DEBUG] 行数: {len(rows)} (ヘッダー含む)")
+    if rows:
+        print(f"  [DEBUG] ヘッダー列数: {len(rows[0])}")
+        if rows[0]:
+            print(f"  [DEBUG] ヘッダー先頭: '{rows[0][0]}'")
+    if len(rows) > 1:
+        print(f"  [DEBUG] データ1行目列数: {len(rows[1])}")
 
     return rows
 
@@ -130,6 +142,7 @@ def parse_kaipoke_csv(file_path: str) -> list[ScheduleEntry]:
     """
     rows = read_csv_auto_encoding(file_path)
     entries = []
+    skipped_rows = 0
 
     # ヘッダーをスキップ
     for row in rows[1:]:
@@ -149,6 +162,20 @@ def parse_kaipoke_csv(file_path: str) -> list[ScheduleEntry]:
                 end_time=row[15].strip(),
                 remarks=row[17].strip() if len(row) > 17 else "",
             ))
+        else:
+            skipped_rows += 1
+
+    print(f"  [DEBUG] parse_kaipoke_csv: {len(entries)}件パース, {skipped_rows}行スキップ（列数不足）")
+    if entries:
+        e = entries[0]
+        print(f"  [DEBUG]   先頭エントリ: 利用者='{e.user_name}', 日付='{e.date}', "
+              f"サービス='{e.service_type}', 時間='{e.start_time}-{e.end_time}', "
+              f"職員1='{e.staff1_name}', 職員2='{e.staff2_name}'")
+    if len(entries) > 1:
+        e = entries[1]
+        print(f"  [DEBUG]   2番目エントリ: 利用者='{e.user_name}', 日付='{e.date}', "
+              f"サービス='{e.service_type}', 時間='{e.start_time}-{e.end_time}', "
+              f"職員1='{e.staff1_name}', 職員2='{e.staff2_name}'")
 
     return entries
 
@@ -165,15 +192,19 @@ def parse_optimized_csv(file_path: str) -> list[ScheduleEntry]:
     entries = []
 
     if not rows:
+        print(f"  [DEBUG] parse_optimized_csv: ファイルが空です")
         return entries
 
     # ヘッダーを確認してフォーマットを判定
     header = rows[0] if rows else []
+    print(f"  [DEBUG] parse_optimized_csv: ヘッダー列数={len(header)}, header[0]='{header[0] if header else 'N/A'}'")
 
     # カイポケフォーマット（18列）の場合
     if len(header) >= 18 and "職員名" in str(header[0]):
+        print(f"  [DEBUG] parse_optimized_csv: カイポケフォーマットとして検出 → parse_kaipoke_csvに委譲")
         return parse_kaipoke_csv(file_path)
 
+    print(f"  [DEBUG] parse_optimized_csv: 簡易フォーマットとしてパース")
     # 簡易フォーマット（利用者, 日付, 曜日, サービス, 開始, 終了, 職員1, 職員2, 備考）
     for row in rows[1:]:
         if len(row) >= 6:
@@ -191,6 +222,7 @@ def parse_optimized_csv(file_path: str) -> list[ScheduleEntry]:
                 remarks=row[8].strip() if len(row) > 8 else "",
             ))
 
+    print(f"  [DEBUG] parse_optimized_csv: {len(entries)}件パース（簡易フォーマット）")
     return entries
 
 
@@ -233,16 +265,28 @@ def compare_schedules(
     if target_users:
         current_entries = [e for e in current_entries if e.user_name in target_users]
         optimized_entries = [e for e in optimized_entries if e.user_name in target_users]
+        print(f"  [DEBUG] ユーザーフィルタ後: current={len(current_entries)}, optimized={len(optimized_entries)}")
 
     if target_week_start and target_week_end:
+        print(f"  [DEBUG] 日付フィルタ: {target_week_start} ～ {target_week_end}")
+        # フィルタ前のdate値をデバッグ出力
+        current_dates_before = set(e.date for e in current_entries)
+        optimized_dates_before = set(e.date for e in optimized_entries)
+        print(f"  [DEBUG] フィルタ前 current の日付一覧: {sorted(current_dates_before)}")
+        print(f"  [DEBUG] フィルタ前 optimized の日付一覧: {sorted(optimized_dates_before)}")
+
         def in_range(entry):
             try:
                 day = int(entry.date)
                 return target_week_start <= day <= target_week_end
             except ValueError:
+                print(f"  [DEBUG] 日付パース失敗: '{entry.date}' (利用者={entry.user_name})")
                 return False
         current_entries = [e for e in current_entries if in_range(e)]
         optimized_entries = [e for e in optimized_entries if in_range(e)]
+        print(f"  [DEBUG] 日付フィルタ後: current={len(current_entries)}, optimized={len(optimized_entries)}")
+    else:
+        print(f"  [DEBUG] 日付フィルタなし (week_start={target_week_start}, week_end={target_week_end})")
 
     # 現在のエントリをキーでインデックス化
     current_by_key = {}
@@ -269,6 +313,17 @@ def compare_schedules(
     for user in sorted(all_users):
         user_current = [e for e in current_entries if e.user_name == user]
         user_optimized = [e for e in optimized_entries if e.user_name == user]
+
+        print(f"\n  [DEBUG] === 利用者: '{user}' ===")
+        print(f"  [DEBUG]   current: {len(user_current)}件, optimized: {len(user_optimized)}件")
+        if user_current:
+            for i, e in enumerate(user_current[:3]):
+                print(f"  [DEBUG]   current[{i}]: 日付={e.date}, サービス='{e.service_type}', "
+                      f"時間={e.start_time}-{e.end_time}, 職員1='{e.staff1_name}', 職員2='{e.staff2_name}'")
+        if user_optimized:
+            for i, e in enumerate(user_optimized[:3]):
+                print(f"  [DEBUG]   optimized[{i}]: 日付={e.date}, サービス='{e.service_type}', "
+                      f"時間={e.start_time}-{e.end_time}, 職員1='{e.staff1_name}', 職員2='{e.staff2_name}'")
 
         # 片方にしか存在しない利用者の処理
         if not user_current and user_optimized:
@@ -369,16 +424,23 @@ def compare_schedules(
                         all_matched_current.add(cur_idx)
                         all_matched_optimized.add(opt_idx)
 
+            # Pass 1 結果
+            if current_on_date or optimized_on_date:
+                print(f"  [DEBUG]   日付{date}: current={len(current_on_date)}件, optimized={len(optimized_on_date)}件, "
+                      f"Pass1マッチ: {len(matched_current_local)}件")
+
             # Pass 2: サービス内容が一致（時間は異なる）
+            pass2_matched = 0
             for opt_idx, opt_entry in optimized_on_date:
                 if opt_idx in matched_optimized_local:
                     continue
                 for cur_idx, cur_entry in current_on_date:
                     if cur_idx in matched_current_local:
                         continue
-                    if (cur_entry.service_type == opt_entry.service_type or
+                    svc_match = (cur_entry.service_type == opt_entry.service_type or
                         cur_entry.service_type in opt_entry.service_type or
-                        opt_entry.service_type in cur_entry.service_type):
+                        opt_entry.service_type in cur_entry.service_type)
+                    if svc_match:
                         # 差分があるかチェック
                         has_diff = (
                             cur_entry.start_time != opt_entry.start_time or
@@ -386,6 +448,13 @@ def compare_schedules(
                             cur_entry.staff1_name != opt_entry.staff1_name or
                             cur_entry.staff2_name != opt_entry.staff2_name
                         )
+                        print(f"  [DEBUG]     Pass2マッチ: cur_svc='{cur_entry.service_type}' <-> opt_svc='{opt_entry.service_type}', "
+                              f"has_diff={has_diff}")
+                        if has_diff:
+                            print(f"  [DEBUG]       差分詳細: 時間 {cur_entry.start_time}-{cur_entry.end_time} → {opt_entry.start_time}-{opt_entry.end_time}, "
+                                  f"職員1 '{cur_entry.staff1_name}' → '{opt_entry.staff1_name}', "
+                                  f"職員2 '{cur_entry.staff2_name}' → '{opt_entry.staff2_name}'")
+                        pass2_matched += 1
                         if has_diff:
                             corrections.append(Correction(
                                 user_name=user,
@@ -412,6 +481,14 @@ def compare_schedules(
         # マッチしなかったcurrentエントリと、マッチしなかったoptimizedエントリを比較
         unmatched_current = [(i, e) for i, e in enumerate(user_current) if i not in all_matched_current]
         unmatched_optimized = [(i, e) for i, e in enumerate(user_optimized) if i not in all_matched_optimized]
+
+        print(f"  [DEBUG]   Pass1+2後の未マッチ: current={len(unmatched_current)}件, optimized={len(unmatched_optimized)}件")
+        for i, e in unmatched_current:
+            print(f"  [DEBUG]     未マッチcurrent[{i}]: 日付={e.date}, サービス='{e.service_type}', "
+                  f"時間={e.start_time}-{e.end_time}, 職員1='{e.staff1_name}'")
+        for i, e in unmatched_optimized:
+            print(f"  [DEBUG]     未マッチoptimized[{i}]: 日付={e.date}, サービス='{e.service_type}', "
+                  f"時間={e.start_time}-{e.end_time}, 職員1='{e.staff1_name}'")
 
         for cur_idx, cur_entry in unmatched_current:
             for opt_idx, opt_entry in unmatched_optimized:
@@ -444,6 +521,9 @@ def compare_schedules(
 
         # Pass 4: 削除の検出（currentにのみ存在するエントリ）
         final_unmatched_current = [(i, e) for i, e in enumerate(user_current) if i not in all_matched_current]
+        final_unmatched_optimized_pre = [(i, e) for i, e in enumerate(user_optimized) if i not in all_matched_optimized]
+        print(f"  [DEBUG]   Pass3後の最終未マッチ: current={len(final_unmatched_current)}件 (→削除), "
+              f"optimized={len(final_unmatched_optimized_pre)}件 (→追加)")
         for cur_idx, cur_entry in final_unmatched_current:
             corrections.append(Correction(
                 user_name=user,
@@ -479,6 +559,16 @@ def compare_schedules(
                 service_type=opt_entry.service_type,
                 action="add",
             ))
+
+    print(f"\n  [DEBUG] ========== 比較結果サマリー ==========")
+    print(f"  [DEBUG] 総修正件数: {len(corrections)}")
+    actions = {}
+    for c in corrections:
+        actions[c.action] = actions.get(c.action, 0) + 1
+    for action, count in sorted(actions.items()):
+        print(f"  [DEBUG]   {action}: {count}件")
+    if not corrections:
+        print(f"  [DEBUG] ★★★ 修正が0件です。全エントリがマッチして差分なしか、パース/フィルタに問題がある可能性があります ★★★")
 
     return corrections
 
@@ -589,7 +679,7 @@ def parse_csv_from_content(content: str, csv_type: str = "kaipoke") -> list[Sche
 
     # 一時ファイルに書き込んで既存パーサーを再利用
     with tempfile.NamedTemporaryFile(mode='w', suffix='.csv',
-                                      encoding='utf-8-sig', delete=False) as f:
+                                      encoding='utf-8', delete=False) as f:
         f.write(content)
         tmp_path = f.name
 
@@ -626,18 +716,19 @@ def compare_schedules_from_content(
     import os
 
     # BOM除去
-    for content in [current_content, optimized_content]:
-        if content and content[0] == '\ufeff':
-            content = content[1:]
+    if current_content and current_content[0] == '\ufeff':
+        current_content = current_content[1:]
+    if optimized_content and optimized_content[0] == '\ufeff':
+        optimized_content = optimized_content[1:]
 
     # 一時ファイルに書き込み
     with tempfile.NamedTemporaryFile(mode='w', suffix='.csv',
-                                      encoding='utf-8-sig', delete=False) as f:
+                                      encoding='utf-8', delete=False) as f:
         f.write(current_content)
         current_tmp = f.name
 
     with tempfile.NamedTemporaryFile(mode='w', suffix='.csv',
-                                      encoding='utf-8-sig', delete=False) as f:
+                                      encoding='utf-8', delete=False) as f:
         f.write(optimized_content)
         optimized_tmp = f.name
 
