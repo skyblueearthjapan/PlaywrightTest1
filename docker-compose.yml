@@ -6,7 +6,8 @@ services:
     container_name: kaipoke-api
     restart: unless-stopped
     ports:
-      - "5000:5000"   # Flask API
+      - "5000:5000"   # Flask API (内部/CLI用)
+      - "8443:5000"   # Flask API (Cloudflare HTTPS対応ポート)
       - "6080:6080"   # noVNC WebSocket
     volumes:
       # ソースコード（git pullだけで反映されるように）
