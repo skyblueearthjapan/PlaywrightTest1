@@ -625,6 +625,35 @@ def run_auto_apply(
             set_service_month(page, month)
             page.wait_for_timeout(1000)
 
+            # 安全確認: 月が正しく設定されたか検証
+            from lib.common import to_reiwa
+            target_year, target_month_num = parse_month(month)
+            target_reiwa = to_reiwa(target_year)
+            expected_month_text = f"令和{target_reiwa}年{target_month_num}月"
+
+            actual_month = ""
+            try:
+                selects = page.locator("select")
+                for i in range(selects.count()):
+                    select = selects.nth(i)
+                    if select.is_visible(timeout=1000):
+                        text = select.evaluate(
+                            "el => el.options[el.selectedIndex] ? el.options[el.selectedIndex].text : ''"
+                        )
+                        if text and "令和" in text and "月" in text:
+                            actual_month = text.strip()
+                            break
+            except Exception:
+                pass
+
+            if actual_month and expected_month_text not in actual_month:
+                error_msg = f"月の設定が不正です！期待: {expected_month_text}, 実際: {actual_month}"
+                print(f"エラー: {error_msg}")
+                save_artifacts(page, Path("artifacts"), "auto_apply_wrong_month")
+                raise RuntimeError(error_msg)
+
+            print(f"月の検証OK: {actual_month or expected_month_text}")
+
             # 利用者ごとにグループ化
             users = {}
             for c in corrections:
