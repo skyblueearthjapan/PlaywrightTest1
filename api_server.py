@@ -61,7 +61,7 @@ from lib.google_drive import (
 app = Flask(__name__)
 CORS(app, resources={
     r"/api/*": {
-        "origins": ["https://script.google.com", "https://*.googleusercontent.com"],
+        "origins": "*",
         "methods": ["GET", "POST", "OPTIONS"],
         "allow_headers": ["Content-Type", "Authorization"]
     }
