@@ -5,9 +5,9 @@ playwright>=1.40.0
 flask>=3.0.0
 flask-cors>=4.0.0
 
-# Google Drive連携（オプション）
-# google-api-python-client>=2.100.0
-# google-auth>=2.23.0
+# Google Drive連携
+google-api-python-client>=2.100.0
+google-auth>=2.23.0
 
 # ヘルスチェック用
 requests>=2.31.0

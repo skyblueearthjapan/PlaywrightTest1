@@ -40,13 +40,21 @@ sys.path.insert(0, str(Path(__file__).parent))
 from commands.expand import run_expand
 from commands.export import run_export
 from commands.auto_apply import run_auto_apply
-from lib.diff_engine import compare_schedules, generate_correction_sheet, load_correction_sheet
+from lib.diff_engine import (
+    compare_schedules,
+    compare_schedules_from_content,
+    generate_correction_sheet,
+    load_correction_sheet,
+    validate_correction_data,
+    Correction,
+)
 from lib.google_drive import (
     load_drive_config,
     save_drive_config,
     upload_to_drive,
     download_from_drive,
     find_file_by_name,
+    list_files_in_folder,
 )
 
 app = Flask(__name__)
@@ -214,7 +222,7 @@ def api_expand():
 
 @app.route('/api/export', methods=['POST'])
 def api_export():
-    """CSV出力 API"""
+    """CSV出力 API（Drive自動保存対応）"""
     global current_task
 
     if current_task["running"]:
@@ -228,12 +236,7 @@ def api_export():
         data = request.get_json() or {}
         month = data.get("month", "2026-04")
         out_path = data.get("out_path")
-        upload_to_drive_flag = data.get("upload_to_drive", False)
-        drive_folder_id = data.get("drive_folder_id")
-
-        if upload_to_drive_flag and not drive_folder_id:
-            config = load_drive_config()
-            drive_folder_id = config.get("folder_id")
+        auto_drive_upload = data.get("auto_drive_upload", True)
 
         current_task = {
             "running": True,
@@ -249,11 +252,48 @@ def api_export():
             month=month,
             out_path=out_path,
             headless=headless,
-            upload_to_drive=upload_to_drive_flag,
-            drive_folder_id=drive_folder_id,
         )
 
-        add_log(f"export 完了: {result}")
+        # CSV内容をレスポンスに含める
+        csv_path = Path(result.get("file_path", ""))
+        if csv_path.exists():
+            csv_content = None
+            for enc in ["cp932", "utf-8-sig", "utf-8"]:
+                try:
+                    csv_content = csv_path.read_text(encoding=enc)
+                    break
+                except UnicodeDecodeError:
+                    continue
+            if csv_content:
+                result["csv_content"] = csv_content
+                result["row_count"] = csv_content.count("\n")
+                result["file_size_bytes"] = csv_path.stat().st_size
+
+        # Google Driveに自動アップロード
+        if auto_drive_upload and result.get("success"):
+            try:
+                config = load_drive_config()
+                folder_id = config.get("folder_id")
+                if folder_id:
+                    month_str = month.replace("-", "")
+                    drive_filename = config.get("current_csv_name", "kaipoke_export_{month}.csv")
+                    drive_filename = drive_filename.replace("{month}", month_str)
+                    file_id = upload_to_drive(
+                        str(csv_path), folder_id, filename=drive_filename
+                    )
+                    if file_id:
+                        result["drive_file_id"] = file_id
+                        result["drive_filename"] = drive_filename
+                        add_log(f"Driveアップロード完了: {drive_filename}")
+                    else:
+                        add_log("Driveアップロードに失敗（サービスアカウント未設定の可能性）")
+                else:
+                    add_log("Drive folder_idが未設定です")
+            except Exception as e:
+                add_log(f"Driveアップロードエラー: {e}")
+                result["drive_error"] = str(e)
+
+        add_log(f"export 完了: success={result.get('success')}")
         return jsonify({
             "success": True,
             "result": result,
@@ -273,7 +313,7 @@ def api_export():
 
 @app.route('/api/apply', methods=['POST'])
 def api_apply():
-    """差分適用 API"""
+    """差分適用 API（インラインcorrectionデータ対応）"""
     global current_task
 
     if current_task["running"]:
@@ -287,9 +327,19 @@ def api_apply():
         data = request.get_json() or {}
         month = data.get("month", "2026-04")
         correction_sheet = data.get("correction_sheet", "data/correction_sheet.json")
+        correction_data = data.get("correction_data")  # インラインデータ
         dry_run = data.get("dry_run", True)
         headed = data.get("headed", True)  # デフォルトでVNC表示
         limit = data.get("limit")
+
+        # インラインデータが提供された場合、ファイルに保存
+        if correction_data:
+            import json
+            correction_sheet = "data/correction_sheet.json"
+            Path("data").mkdir(parents=True, exist_ok=True)
+            with open(correction_sheet, "w", encoding="utf-8") as f:
+                json.dump(correction_data, f, ensure_ascii=False, indent=2)
+            add_log("インラインcorrectionデータをファイルに保存")
 
         if not Path(correction_sheet).exists():
             return jsonify({
@@ -367,40 +417,114 @@ def api_config():
 
 @app.route('/api/diff', methods=['POST'])
 def api_diff():
-    """差分確認 API"""
+    """差分確認 API（CSV内容受信 / Drive自動読み込み対応）"""
     try:
+        import json as json_module
         data = request.get_json() or {}
+
+        # パターンA: Driveから自動読み込み
+        use_drive = data.get("use_drive", False)
+        # パターンB: CSVコンテンツ直接送信
+        current_csv_content = data.get("current_csv_content")
+        optimized_csv_content = data.get("optimized_csv_content")
+        # パターンC: 既存のファイルパス指定
         current_csv = data.get("current_csv")
         optimized_csv = data.get("optimized_csv")
+
+        month = data.get("month", "2026-04")
         week_start = data.get("week_start")
         week_end = data.get("week_end")
         output_path = data.get("output_path", "data/correction_sheet.json")
 
-        if not current_csv or not optimized_csv:
+        add_log(f"diff 開始 (month={month})")
+
+        corrections = None
+
+        # パターンA: Driveから自動ダウンロード
+        if use_drive:
+            config = load_drive_config()
+            folder_id = config.get("folder_id")
+            if not folder_id:
+                return jsonify({"success": False, "error": "Drive folder_idが未設定です"}), 400
+
+            month_str = month.replace("-", "")
+            current_name = config.get("current_csv_name", "kaipoke_export_{month}.csv").replace("{month}", month_str)
+            optimized_name = config.get("optimized_csv_name", "optimized_{month}.csv").replace("{month}", month_str)
+
+            # Driveからダウンロード
+            current_file_id = find_file_by_name(folder_id, current_name)
+            optimized_file_id = find_file_by_name(folder_id, optimized_name)
+
+            if not current_file_id:
+                return jsonify({"success": False, "error": f"Driveに {current_name} が見つかりません"}), 404
+            if not optimized_file_id:
+                return jsonify({"success": False, "error": f"Driveに {optimized_name} が見つかりません"}), 404
+
+            Path("data").mkdir(parents=True, exist_ok=True)
+            current_local = f"data/{current_name}"
+            optimized_local = f"data/{optimized_name}"
+
+            if not download_from_drive(current_file_id, current_local):
+                return jsonify({"success": False, "error": f"{current_name} のダウンロードに失敗"}), 500
+            if not download_from_drive(optimized_file_id, optimized_local):
+                return jsonify({"success": False, "error": f"{optimized_name} のダウンロードに失敗"}), 500
+
+            corrections = compare_schedules(
+                current_csv=current_local,
+                optimized_csv=optimized_local,
+                target_week_start=week_start,
+                target_week_end=week_end,
+            )
+
+        # パターンB: CSVコンテンツ直接送信
+        elif current_csv_content and optimized_csv_content:
+            corrections = compare_schedules_from_content(
+                current_content=current_csv_content,
+                optimized_content=optimized_csv_content,
+                target_week_start=week_start,
+                target_week_end=week_end,
+            )
+
+        # パターンC: ファイルパス指定
+        elif current_csv and optimized_csv:
+            corrections = compare_schedules(
+                current_csv=current_csv,
+                optimized_csv=optimized_csv,
+                target_week_start=week_start,
+                target_week_end=week_end,
+            )
+
+        else:
             return jsonify({
                 "success": False,
-                "error": "current_csv, optimized_csv は必須です",
+                "error": "use_drive=true、current_csv_content+optimized_csv_content、または current_csv+optimized_csv のいずれかが必要です",
             }), 400
 
-        corrections = compare_schedules(
-            current_csv=current_csv,
-            optimized_csv=optimized_csv,
-            target_week_start=week_start,
-            target_week_end=week_end,
-        )
-
+        # 修正シートを生成・保存
         generate_correction_sheet(corrections, output_path, format="json")
         csv_path = output_path.replace(".json", ".csv")
         generate_correction_sheet(corrections, csv_path, format="csv")
 
-        result = {
+        # サマリーテキスト生成
+        time_changes = sum(1 for c in corrections if c.has_time_change())
+        staff_changes = sum(1 for c in corrections if c.has_staff_change())
+        date_changes = sum(1 for c in corrections if c.has_date_change())
+        additions = sum(1 for c in corrections if c.action == "add")
+        deletions = sum(1 for c in corrections if c.action == "delete")
+        edits = sum(1 for c in corrections if c.action == "edit")
+
+        summary_text = f"編集: {edits}件, 時間変更: {time_changes}件, スタッフ変更: {staff_changes}件, 日付変更: {date_changes}件, 追加: {additions}件, 削除: {deletions}件"
+
+        # correction_sheet JSONを文字列として含める
+        correction_sheet_data = {
             "total_corrections": len(corrections),
             "summary": {
-                "time_changes": sum(1 for c in corrections if c.has_time_change()),
-                "staff_changes": sum(1 for c in corrections if c.has_staff_change()),
-                "date_changes": sum(1 for c in corrections if c.has_date_change()),
-                "additions": sum(1 for c in corrections if c.action == "add"),
-                "deletions": sum(1 for c in corrections if c.action == "delete"),
+                "time_changes": time_changes,
+                "staff_changes": staff_changes,
+                "date_changes": date_changes,
+                "additions": additions,
+                "deletions": deletions,
+                "edits": edits,
             },
             "corrections": [
                 {
@@ -415,16 +539,33 @@ def api_diff():
                     "staff1_to": c.staff1_to,
                     "staff2_from": c.staff2_from,
                     "staff2_to": c.staff2_to,
+                    "service_type": c.service_type,
                     "action": c.action,
                 }
                 for c in corrections
             ],
+        }
+
+        result = {
+            "total_corrections": len(corrections),
+            "summary": {
+                "time_changes": time_changes,
+                "staff_changes": staff_changes,
+                "date_changes": date_changes,
+                "additions": additions,
+                "deletions": deletions,
+                "edits": edits,
+                "summary_text": summary_text,
+            },
+            "corrections": correction_sheet_data["corrections"],
+            "correction_sheet_json": json_module.dumps(correction_sheet_data, ensure_ascii=False),
             "output_files": {
                 "json": output_path,
                 "csv": csv_path,
-            }
+            },
         }
 
+        add_log(f"diff 完了: {summary_text}")
         return jsonify({
             "success": True,
             "result": result,
@@ -437,9 +578,81 @@ def api_diff():
         }), 404
 
     except Exception as e:
+        add_log(f"diff エラー: {e}")
         print(f"エラー: {e}")
         import traceback
         traceback.print_exc()
+        return jsonify({
+            "success": False,
+            "error": str(e),
+        }), 500
+
+
+@app.route('/api/diff/validate', methods=['POST'])
+def api_diff_validate():
+    """差分データ検証 API - Playwright適用に十分なデータかを検証"""
+    try:
+        import json as json_module
+        data = request.get_json() or {}
+        correction_data = data.get("correction_data")
+        correction_sheet = data.get("correction_sheet")
+
+        corrections = []
+
+        if correction_data:
+            # インラインデータから読み込み
+            items = correction_data.get("corrections", [])
+            for item in items:
+                corrections.append(Correction(**item))
+        elif correction_sheet and Path(correction_sheet).exists():
+            # ファイルから読み込み
+            corrections = load_correction_sheet(correction_sheet)
+        else:
+            # デフォルトファイル
+            default_path = "data/correction_sheet.json"
+            if Path(default_path).exists():
+                corrections = load_correction_sheet(default_path)
+            else:
+                return jsonify({
+                    "success": False,
+                    "error": "correction_data または correction_sheet が必要です",
+                }), 400
+
+        result = validate_correction_data(corrections)
+        add_log(f"diff/validate: valid={result['valid']}, total={result['total_corrections']}")
+
+        return jsonify({
+            "success": True,
+            "result": result,
+        })
+
+    except Exception as e:
+        print(f"エラー: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            "success": False,
+            "error": str(e),
+        }), 500
+
+
+@app.route('/api/drive/files', methods=['GET'])
+def api_drive_files():
+    """Driveフォルダ内のファイル一覧を取得"""
+    try:
+        config = load_drive_config()
+        folder_id = config.get("folder_id")
+        if not folder_id:
+            return jsonify({"success": False, "error": "Drive folder_idが未設定です"}), 400
+
+        files = list_files_in_folder(folder_id)
+        return jsonify({
+            "success": True,
+            "files": files,
+            "folder_id": folder_id,
+        })
+
+    except Exception as e:
         return jsonify({
             "success": False,
             "error": str(e),
@@ -456,16 +669,15 @@ def api_test():
         "api_version": "2.0.0",
         "vnc_enabled": True,
         "endpoints": [
-            "GET  /api/status - サーバー状態確認",
-            "GET  /api/test   - 接続テスト",
-            "POST /api/expand - 月間スケジュール展開",
-            "POST /api/export - CSV出力",
-            "POST /api/diff   - 差分確認",
-            "POST /api/apply  - 差分適用",
-            "POST /api/kaipoke/run    - Playwright実行開始（VNC付き）",
-            "POST /api/kaipoke/stop   - 実行停止",
-            "GET  /api/kaipoke/status - 状態取得",
-            "GET  /api/kaipoke/logs   - ログ取得",
+            "GET  /api/status        - サーバー状態確認",
+            "GET  /api/test          - 接続テスト",
+            "POST /api/expand        - 月間スケジュール展開",
+            "POST /api/export        - CSV出力（Drive自動保存）",
+            "POST /api/diff          - 差分確認（CSV内容/Drive/ファイルパス対応）",
+            "POST /api/diff/validate - 差分データ検証",
+            "POST /api/apply         - 差分適用（インラインデータ対応）",
+            "GET  /api/drive/files   - Driveファイル一覧",
+            "GET/POST /api/config    - 設定取得/更新",
         ]
     }
 

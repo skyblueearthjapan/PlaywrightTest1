@@ -569,6 +569,190 @@ def load_correction_sheet(file_path: str) -> list[Correction]:
     return corrections
 
 
+def parse_csv_from_content(content: str, csv_type: str = "kaipoke") -> list[ScheduleEntry]:
+    """
+    CSVテキスト文字列からScheduleEntryリストを生成
+
+    Args:
+        content: CSV文字列
+        csv_type: "kaipoke" or "optimized"
+
+    Returns:
+        list[ScheduleEntry]: パース結果
+    """
+    import tempfile
+    import os
+
+    # BOM除去
+    if content and content[0] == '\ufeff':
+        content = content[1:]
+
+    # 一時ファイルに書き込んで既存パーサーを再利用
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.csv',
+                                      encoding='utf-8-sig', delete=False) as f:
+        f.write(content)
+        tmp_path = f.name
+
+    try:
+        if csv_type == "kaipoke":
+            return parse_kaipoke_csv(tmp_path)
+        else:
+            return parse_optimized_csv(tmp_path)
+    finally:
+        os.unlink(tmp_path)
+
+
+def compare_schedules_from_content(
+    current_content: str,
+    optimized_content: str,
+    target_users: list[str] = None,
+    target_week_start: int = None,
+    target_week_end: int = None,
+) -> list[Correction]:
+    """
+    CSVテキスト文字列を直接比較して差分を生成
+
+    Args:
+        current_content: 現在のCSVテキスト
+        optimized_content: 最適化CSVテキスト
+        target_users: 対象利用者
+        target_week_start: 対象週の開始日
+        target_week_end: 対象週の終了日
+
+    Returns:
+        list[Correction]: 修正リスト
+    """
+    import tempfile
+    import os
+
+    # BOM除去
+    for content in [current_content, optimized_content]:
+        if content and content[0] == '\ufeff':
+            content = content[1:]
+
+    # 一時ファイルに書き込み
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.csv',
+                                      encoding='utf-8-sig', delete=False) as f:
+        f.write(current_content)
+        current_tmp = f.name
+
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.csv',
+                                      encoding='utf-8-sig', delete=False) as f:
+        f.write(optimized_content)
+        optimized_tmp = f.name
+
+    try:
+        return compare_schedules(
+            current_csv=current_tmp,
+            optimized_csv=optimized_tmp,
+            target_users=target_users,
+            target_week_start=target_week_start,
+            target_week_end=target_week_end,
+        )
+    finally:
+        os.unlink(current_tmp)
+        os.unlink(optimized_tmp)
+
+
+def validate_correction_data(corrections: list[Correction]) -> dict:
+    """
+    修正データがPlaywright適用に十分かを検証
+
+    Args:
+        corrections: 修正リスト
+
+    Returns:
+        dict: 検証結果
+    """
+    warnings = []
+    errors = []
+    invalid_items = []
+    by_action = {}
+
+    for i, c in enumerate(corrections):
+        item_errors = []
+
+        # アクション別カウント初期化
+        if c.action not in by_action:
+            by_action[c.action] = {"count": 0, "valid": 0, "invalid": 0}
+        by_action[c.action]["count"] += 1
+
+        # 全アクション共通: user_name必須
+        if not c.user_name or not c.user_name.strip():
+            item_errors.append("user_name が未設定です")
+
+        # アクション別バリデーション
+        if c.action == "edit":
+            if not c.date_from:
+                item_errors.append("date_from が未設定です")
+            if not c.start_time_from:
+                item_errors.append("start_time_from が未設定です（既存予定を特定できません）")
+            if not c.has_time_change() and not c.has_staff_change():
+                warnings.append(f"[{i}] {c.user_name} {c.date_from}日: 変更内容がありません")
+
+        elif c.action == "delete":
+            if not c.date_from:
+                item_errors.append("date_from が未設定です")
+            if not c.start_time_from:
+                item_errors.append("start_time_from が未設定です（削除対象を特定できません）")
+
+        elif c.action == "add":
+            if not c.date_to:
+                item_errors.append("date_to が未設定です")
+            if not c.start_time_to:
+                item_errors.append("start_time_to が未設定です")
+            if not c.end_time_to:
+                item_errors.append("end_time_to が未設定です")
+            if not c.staff1_to:
+                warnings.append(f"[{i}] {c.user_name} {c.date_to}日: 職員1が未設定です")
+            if not c.staff2_to:
+                warnings.append(f"[{i}] {c.user_name} {c.date_to}日: 職員2が未設定です（1人訪問）")
+
+        elif c.action == "date_change":
+            if not c.date_from:
+                item_errors.append("date_from が未設定です")
+            if not c.date_to:
+                item_errors.append("date_to が未設定です")
+            if not c.start_time_from:
+                item_errors.append("start_time_from が未設定です")
+            if c.date_from and c.date_to and c.date_from == c.date_to:
+                warnings.append(f"[{i}] {c.user_name}: date_changeですが日付が同じです")
+
+        else:
+            item_errors.append(f"不明なaction: {c.action}")
+
+        # 時間フォーマット検証
+        for field_name, value in [
+            ("start_time_from", c.start_time_from),
+            ("start_time_to", c.start_time_to),
+            ("end_time_from", c.end_time_from),
+            ("end_time_to", c.end_time_to),
+        ]:
+            if value and value.strip() and not re.match(r'^\d{1,2}:\d{2}$', value):
+                item_errors.append(f"{field_name} の形式が不正: '{value}' (HH:MM形式が必要)")
+
+        if item_errors:
+            errors.extend([f"[{i}] {c.user_name}: {e}" for e in item_errors])
+            invalid_items.append({
+                "index": i,
+                "user_name": c.user_name,
+                "action": c.action,
+                "reasons": item_errors,
+            })
+            by_action[c.action]["invalid"] += 1
+        else:
+            by_action[c.action]["valid"] += 1
+
+    return {
+        "valid": len(errors) == 0,
+        "total_corrections": len(corrections),
+        "warnings": warnings,
+        "errors": errors,
+        "invalid_corrections": invalid_items,
+        "by_action": by_action,
+    }
+
+
 if __name__ == "__main__":
     # テスト実行
     import argparse
