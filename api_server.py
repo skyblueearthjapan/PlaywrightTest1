@@ -436,7 +436,26 @@ def api_diff():
         week_end = data.get("week_end")
         output_path = data.get("output_path", "data/correction_sheet.json")
 
-        add_log(f"diff 開始 (month={month})")
+        # week_start/week_end を日の数値(int)に変換
+        # YYYYMMDD形式 (例: "20260202") → 日のみ (例: 2)
+        # YYYY-MM-DD形式 (例: "2026-02-02") → 日のみ (例: 2)
+        # 数値のみ (例: "2") → そのまま
+        week_start_day = None
+        week_end_day = None
+        if week_start:
+            ws_clean = str(week_start).replace("-", "")
+            if len(ws_clean) == 8:  # YYYYMMDD
+                week_start_day = int(ws_clean[6:8])
+            else:
+                week_start_day = int(ws_clean)
+        if week_end:
+            we_clean = str(week_end).replace("-", "")
+            if len(we_clean) == 8:  # YYYYMMDD
+                week_end_day = int(we_clean[6:8])
+            else:
+                week_end_day = int(we_clean)
+
+        add_log(f"diff 開始 (month={month}, week={week_start_day}-{week_end_day})")
 
         corrections = None
 
@@ -448,8 +467,15 @@ def api_diff():
                 return jsonify({"success": False, "error": "Drive folder_idが未設定です"}), 400
 
             month_str = month.replace("-", "")
-            current_name = config.get("current_csv_name", "kaipoke_export_{month}.csv").replace("{month}", month_str)
-            optimized_name = config.get("optimized_csv_name", "optimized_{month}.csv").replace("{month}", month_str)
+            current_name = config.get("current_csv_name", "kaipoke_current_{month}.csv").replace("{month}", month_str)
+
+            # 最適化CSVは週単位: week_start, week_end (YYYYMMDD) が必要
+            if not week_start or not week_end:
+                return jsonify({"success": False, "error": "use_drive=true の場合、week_start と week_end (YYYYMMDD形式) が必要です"}), 400
+            ws = week_start.replace("-", "")
+            we = week_end.replace("-", "")
+            optimized_name = config.get("optimized_csv_name", "gas_optimized_{week_start}_{week_end}.csv")
+            optimized_name = optimized_name.replace("{week_start}", ws).replace("{week_end}", we)
 
             # Driveからダウンロード
             current_file_id = find_file_by_name(folder_id, current_name)
@@ -472,8 +498,8 @@ def api_diff():
             corrections = compare_schedules(
                 current_csv=current_local,
                 optimized_csv=optimized_local,
-                target_week_start=week_start,
-                target_week_end=week_end,
+                target_week_start=week_start_day,
+                target_week_end=week_end_day,
             )
 
         # パターンB: CSVコンテンツ直接送信
@@ -481,8 +507,8 @@ def api_diff():
             corrections = compare_schedules_from_content(
                 current_content=current_csv_content,
                 optimized_content=optimized_csv_content,
-                target_week_start=week_start,
-                target_week_end=week_end,
+                target_week_start=week_start_day,
+                target_week_end=week_end_day,
             )
 
         # パターンC: ファイルパス指定
@@ -490,8 +516,8 @@ def api_diff():
             corrections = compare_schedules(
                 current_csv=current_csv,
                 optimized_csv=optimized_csv,
-                target_week_start=week_start,
-                target_week_end=week_end,
+                target_week_start=week_start_day,
+                target_week_end=week_end_day,
             )
 
         else:
