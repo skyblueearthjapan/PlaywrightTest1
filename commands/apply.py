@@ -29,7 +29,7 @@ from lib.common import (
     set_service_month,
     save_artifacts,
 )
-from lib.stop_signal import is_stop_requested
+from lib.stop_signal import is_stop_requested, clear_stop
 
 
 class ScheduleEntry(NamedTuple):
@@ -354,6 +354,9 @@ def run_apply(
     Returns:
         dict: 実行結果
     """
+    # 前回の停止フラグをクリア
+    clear_stop()
+
     if not current_csv or not optimized_csv:
         raise ValueError("--current と --optimized は必須です")
 

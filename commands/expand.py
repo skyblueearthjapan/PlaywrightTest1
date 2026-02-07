@@ -32,7 +32,7 @@ from lib.common import (
     set_service_month,
     save_artifacts,
 )
-from lib.stop_signal import is_stop_requested
+from lib.stop_signal import is_stop_requested, clear_stop
 
 # 最大利用者数（安全リミット: 現在約70名、将来の増加に備えて200）
 MAX_USERS = 200
@@ -193,6 +193,9 @@ def run_expand(month: str = "2026-04", headless: bool = True, dry_run: bool = Fa
             details: dict - {new: int, overwritten: int}
             users: list   - 各利用者の処理結果
     """
+    # 前回の停止フラグをクリア
+    clear_stop()
+
     result = {
         "success": 0,
         "skipped": 0,

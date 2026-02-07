@@ -31,7 +31,7 @@ from lib.common import (
     parse_month,
 )
 from lib.diff_engine import load_correction_sheet, Correction
-from lib.stop_signal import is_stop_requested
+from lib.stop_signal import is_stop_requested, clear_stop
 
 
 def select_user(page, user_name: str) -> bool:
@@ -590,6 +590,9 @@ def run_auto_apply(
     Returns:
         dict: 実行結果
     """
+    # 前回の停止フラグをクリア
+    clear_stop()
+
     # 修正シートを読み込む
     corrections = load_correction_sheet(correction_sheet)
     if limit:
