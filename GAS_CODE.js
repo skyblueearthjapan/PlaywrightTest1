@@ -73,18 +73,6 @@ function checkStatus() {
 function emergencyStop() {
   const ui = SpreadsheetApp.getUi();
 
-  const confirm = ui.alert(
-    '*** 非常停止 ***',
-    '実行中の処理を緊急停止します。\n\n' +
-    '現在処理中の利用者の操作が完了した後に停止します。\n\n' +
-    '本当に停止しますか？',
-    ui.ButtonSet.YES_NO
-  );
-
-  if (confirm !== ui.Button.YES) {
-    return;
-  }
-
   try {
     const response = UrlFetchApp.fetch(API_URL + '/api/stop', {
       method: 'POST',
@@ -100,8 +88,7 @@ function emergencyStop() {
       ui.alert(
         '非常停止',
         '停止を要求しました。\n\n' +
-        result.message + '\n\n' +
-        'タスク: ' + (result.current_task ? result.current_task.command || 'なし' : 'なし'),
+        '現在処理中の利用者の操作が完了した後に停止します。',
         ui.ButtonSet.OK
       );
     } else {
