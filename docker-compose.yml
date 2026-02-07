@@ -9,6 +9,10 @@ services:
       - "5000:5000"   # Flask API
       - "6080:6080"   # noVNC WebSocket
     volumes:
+      # ソースコード（git pullだけで反映されるように）
+      - ./api_server.py:/app/api_server.py
+      - ./lib:/app/lib
+      - ./commands:/app/commands
       # データ永続化（セッション情報、CSV等）
       - ./data:/app/data
       - ./artifacts:/app/artifacts
