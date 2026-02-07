@@ -378,42 +378,79 @@ def set_service_month(page: Page, month_str: str) -> None:
 
     # 現在の月を確認する関数
     def get_current_month_text():
-        # ページ内の「令和X年Y月」テキストを探す
+        # 方法1: <select>ドロップダウンから読み取り（サービス提供年月）
         try:
-            # DevToolsから見ると #tdNextServiceOffer 付近に年月がある
+            selects = page.locator("select")
+            for i in range(selects.count()):
+                select = selects.nth(i)
+                if select.is_visible(timeout=1000):
+                    text = select.evaluate(
+                        "el => el.options[el.selectedIndex] ? el.options[el.selectedIndex].text : ''"
+                    )
+                    if text and "令和" in text and "月" in text:
+                        return text.strip()
+        except Exception:
+            pass
+
+        # 方法2: ページ内の「令和X年Y月」テキスト要素を探す
+        try:
             month_elem = page.locator("text=/令和\\d+年\\d+月/").first
-            if month_elem.is_visible():
+            if month_elem.is_visible(timeout=1000):
                 return month_elem.text_content().strip()
         except Exception:
             pass
+
         return ""
 
     # 現在の月をチェック
     current_text = get_current_month_text()
-    print(f"  現在の月: {current_text}")
+    print(f"  現在の月: '{current_text}'")
 
     if target_text in current_text:
         print(f"  すでに目標の月です: {target_text}")
         return
 
-    # 「次月」ボタンで移動（最大12回）
-    for i in range(12):
-        next_btn = page.locator("a.next, a:has-text('次月')").first
-        if not next_btn.is_visible():
-            # 別のセレクタを試す
-            next_btn = page.locator("text=次月").first
+    # 目標月を超えていたら「前月」で戻る
+    import re
+    def extract_month_number(text):
+        m = re.search(r'(\d+)月', text)
+        return int(m.group(1)) if m else 0
 
-        if not next_btn.is_visible():
-            print("  「次月」ボタンが見つかりません")
+    def extract_year_number(text):
+        m = re.search(r'令和(\d+)年', text)
+        return int(m.group(1)) if m else 0
+
+    current_month_num = extract_month_number(current_text)
+    current_year_num = extract_year_number(current_text)
+    target_month_num = month
+    target_year_num = reiwa_year
+
+    # 前月/次月どちらに進むべきか判定
+    current_total = current_year_num * 12 + current_month_num
+    target_total = target_year_num * 12 + target_month_num
+    go_forward = target_total >= current_total
+
+    btn_text = "次月" if go_forward else "前月"
+    btn_selector = "a.next, a:has-text('次月')" if go_forward else "a:has-text('前月')"
+    print(f"  方向: {'次月→' if go_forward else '←前月'}（差: {abs(target_total - current_total)}ヶ月）")
+
+    # ボタンで移動（最大12回）
+    for i in range(12):
+        nav_btn = page.locator(btn_selector).first
+        if not nav_btn.is_visible():
+            nav_btn = page.locator(f"text={btn_text}").first
+
+        if not nav_btn.is_visible():
+            print(f"  「{btn_text}」ボタンが見つかりません")
             break
 
-        next_btn.click()
+        nav_btn.click()
         page.wait_for_timeout(1500)
 
         current_text = get_current_month_text()
         print(f"  → {current_text}")
 
-        if f"{month}月" in current_text:
+        if target_text in current_text:
             print(f"サービス提供月を設定しました: {current_text}")
             return
 
