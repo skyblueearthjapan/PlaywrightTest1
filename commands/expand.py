@@ -4,6 +4,12 @@ Block 1: 月間予定への固定パターン展開 (expand コマンド)
 全利用者に対して「週間訪問パターンから展開」を実行し、
 週間パターンを月間スケジュールに展開します。
 
+動作:
+  - 利用者を先頭から順に「次へ」で移動
+  - 各利用者で「週間訪問パターンから展開」ボタンをクリック
+  - 既に展開済みの場合はネイティブconfirmダイアログが出る → OK（上書き）
+  - 「次へ」リンクがなくなったら全利用者完了
+
 使い方:
     python main.py expand --month 2026-04
     python main.py expand --month 2026-04 --headed
@@ -27,103 +33,145 @@ from lib.common import (
     save_artifacts,
 )
 
-
-def expand_weekly_pattern(page, wait_after_expand: float = 2.0) -> str:
-    """
-    現在表示中の利用者に対して「週間訪問パターンから展開」を実行
-
-    Args:
-        page: Playwrightのページオブジェクト
-        wait_after_expand: 展開後の待機時間（秒）
-
-    Returns:
-        str: "success" = 展開成功, "skipped" = すでに展開済み（スキップ）, "failed" = 失敗
-    """
-    try:
-        # 「週間訪問パターンから展開」ボタンをクリック
-        expand_button = page.locator("text=週間訪問パターンから展開")
-
-        if not expand_button.is_visible():
-            print("  「週間訪問パターンから展開」ボタンが見つかりません")
-            return "failed"
-
-        expand_button.click()
-        page.wait_for_timeout(1000)
-
-        # 「上書きしますか？」確認ダイアログが表示されたらキャンセル（上書きしない）
-        overwrite_dialog = page.locator("text=上書きしますか")
-        cancel_buttons = [
-            "button:has-text('いいえ')",
-            "button:has-text('キャンセル')",
-            "button:has-text('No')",
-            "button:has-text('Cancel')",
-        ]
-
-        if overwrite_dialog.is_visible():
-            print("  すでに展開済み - 上書きせずスキップ")
-            for selector in cancel_buttons:
-                try:
-                    cancel_btn = page.locator(selector).first
-                    if cancel_btn.is_visible():
-                        cancel_btn.click()
-                        page.wait_for_timeout(500)
-                        break
-                except Exception:
-                    continue
-            return "skipped"
-
-        page.wait_for_timeout(int(wait_after_expand * 1000))
-        return "success"
-
-    except Exception as e:
-        print(f"  展開に失敗しました: {e}")
-        return "failed"
+# 最大利用者数（安全リミット: 現在約70名、将来の増加に備えて200）
+MAX_USERS = 200
 
 
 def get_current_user_info(page) -> str:
-    """現在表示中の利用者情報を取得"""
+    """
+    現在表示中の利用者名を取得
+
+    カイポケの月間スケジュール画面の利用者名ドロップダウン（td.pulldownUser）
+    またはページ見出しから名前を取得します。
+    """
+    # 方法1: ドロップダウンの選択テキストから取得
     try:
-        # 利用者名を取得（画面によってセレクタが異なる可能性あり）
-        user_name_selectors = [
-            ".user-name",
-            "[data-user-name]",
-            ".patient-name",
-            "h2",
-            "h3",
-        ]
-        for selector in user_name_selectors:
-            try:
-                elem = page.locator(selector).first
-                if elem.is_visible():
-                    return elem.text_content().strip()[:50]
-            except Exception:
-                continue
-        return "（名前取得失敗）"
+        select = page.locator("td.pulldownUser select")
+        if select.is_visible(timeout=2000):
+            name = select.evaluate(
+                "el => el.options[el.selectedIndex] ? el.options[el.selectedIndex].text : ''"
+            )
+            if name and name.strip():
+                return name.strip()
     except Exception:
-        return "（名前取得失敗）"
+        pass
 
-
-def has_next_button(page) -> bool:
-    """「次へ」ボタンが存在するかチェック"""
+    # 方法2: ページ見出しから取得（「○○様　月間スケジュール一覧」）
     try:
-        next_button = page.locator("text=次へ")
-        # ボタンが存在し、かつ visible かどうか
-        return next_button.count() > 0 and next_button.first.is_visible()
+        heading = page.locator("text=/.*様.*月間スケジュール/").first
+        if heading.is_visible(timeout=1000):
+            text = heading.text_content()
+            if "様" in text:
+                return text.split("様")[0].strip()
+    except Exception:
+        pass
+
+    # 方法3: フォールバック
+    return "（名前取得失敗）"
+
+
+def has_next_user(page) -> bool:
+    """
+    「次へ」リンクが存在するか（最後の利用者でないか）
+
+    td.linkNextUser 内にリンクがあれば次の利用者が存在する。
+    最後の利用者ではリンクが存在しない。
+    """
+    try:
+        next_link = page.locator("td.linkNextUser a")
+        return next_link.count() > 0 and next_link.first.is_visible(timeout=2000)
     except Exception:
         return False
 
 
-def click_next_button(page) -> bool:
-    """「次へ」ボタンをクリック"""
+def click_next_user(page) -> bool:
+    """
+    「次へ」リンクをクリックして次の利用者に移動
+
+    td.linkNextUser a をクリックし、ページ遷移を待ちます。
+    """
     try:
-        next_button = page.locator("text=次へ").first
-        if next_button.is_visible():
-            next_button.click()
-            page.wait_for_timeout(1000)
-            return True
+        next_link = page.locator("td.linkNextUser a").first
+        if not next_link.is_visible(timeout=2000):
+            return False
+
+        # 次の利用者名をログ出力（「次へ(飯塚 大輝)」のテキスト）
+        try:
+            next_text = next_link.text_content().strip()
+            print(f"  → {next_text}")
+        except Exception:
+            pass
+
+        next_link.click()
+
+        # ページ遷移を待つ
+        try:
+            page.wait_for_load_state("networkidle", timeout=30000)
+        except Exception:
+            page.wait_for_load_state("domcontentloaded", timeout=30000)
+        page.wait_for_timeout(1000)
+
+        return True
+
+    except Exception as e:
+        print(f"  次へクリック失敗: {e}")
         return False
-    except Exception:
-        return False
+
+
+def expand_weekly_pattern(page, dialog_tracker: dict) -> str:
+    """
+    現在表示中の利用者に対して「週間訪問パターンから展開」を実行
+
+    ネイティブconfirmダイアログ:
+      「既に当月の月間パターン割当が登録されています。上書きしますか？」
+      → page.on('dialog') ハンドラで自動的にOKを押す
+
+    Args:
+        page: Playwrightのページオブジェクト
+        dialog_tracker: ダイアログ出現トラッカー {"appeared": bool, "message": str}
+
+    Returns:
+        str: "success" = 新規展開, "overwritten" = 上書き展開, "failed" = 失敗
+    """
+    # ダイアログトラッカーをリセット
+    dialog_tracker["appeared"] = False
+    dialog_tracker["message"] = ""
+
+    try:
+        # 「週間訪問パターンから展開」ボタンを探す
+        expand_btn = page.locator("button[title='週間訪問パターンから展開']")
+
+        if not expand_btn.is_visible(timeout=3000):
+            # フォールバック: テキストで探す
+            expand_btn = page.locator("text=週間訪問パターンから展開")
+            if not expand_btn.is_visible(timeout=2000):
+                print("  「週間訪問パターンから展開」ボタンが見つかりません")
+                return "failed"
+
+        # ボタンをクリック（→ ネイティブconfirmダイアログが出る場合あり）
+        expand_btn.click()
+
+        # ダイアログ処理 + ページ遷移を待つ
+        page.wait_for_timeout(1000)
+        try:
+            page.wait_for_load_state("networkidle", timeout=30000)
+        except Exception:
+            page.wait_for_load_state("domcontentloaded", timeout=30000)
+        page.wait_for_timeout(1500)
+
+        if dialog_tracker["appeared"]:
+            return "overwritten"
+        else:
+            return "success"
+
+    except Exception as e:
+        print(f"  展開失敗: {e}")
+        # エラー時のスクリーンショット
+        try:
+            save_artifacts(page, Path("artifacts"), "expand_user_error")
+        except Exception:
+            pass
+        return "failed"
 
 
 def run_expand(month: str = "2026-04", headless: bool = True, dry_run: bool = False) -> dict:
@@ -136,12 +184,40 @@ def run_expand(month: str = "2026-04", headless: bool = True, dry_run: bool = Fa
         dry_run: テスト実行（実際の展開は行わない）
 
     Returns:
-        dict: 実行結果 {success: int, skipped: int, failed: int, total: int}
+        dict: 実行結果
+            success: int  - 成功数（新規 + 上書き）※GAS互換
+            skipped: int  - スキップ数（今回は常に0）※GAS互換
+            failed: int   - 失敗数
+            total: int    - 処理した利用者数
+            details: dict - {new: int, overwritten: int}
+            users: list   - 各利用者の処理結果
     """
-    result = {"success": 0, "skipped": 0, "failed": 0, "total": 0, "users": []}
+    result = {
+        "success": 0,
+        "skipped": 0,
+        "failed": 0,
+        "total": 0,
+        "details": {
+            "new": 0,
+            "overwritten": 0,
+        },
+        "users": [],
+    }
 
     with sync_playwright() as p:
         browser, context, page = create_browser_context(p, headless=headless)
+
+        # ネイティブconfirmダイアログのハンドラ
+        # 「既に当月の月間パターン割当が登録されています。上書きしますか？」→ OK
+        dialog_tracker = {"appeared": False, "message": ""}
+
+        def handle_dialog(dialog):
+            dialog_tracker["appeared"] = True
+            dialog_tracker["message"] = dialog.message
+            print(f"  [ダイアログ] {dialog.message} → OK（自動承認）")
+            dialog.accept()
+
+        page.on("dialog", handle_dialog)
 
         try:
             # ログイン
@@ -160,12 +236,13 @@ def run_expand(month: str = "2026-04", headless: bool = True, dry_run: bool = Fa
             # 月間スケジュール管理画面に遷移
             goto_monthly_schedule(page)
 
-            # サービス提供月を設定（4月固定）
+            # サービス提供月を設定
             set_service_month(page, month)
             page.wait_for_timeout(1000)
 
             print(f"\n=== Block 1: 週間パターン展開開始 ===")
             print(f"対象月: {month}")
+            print(f"最大利用者数: {MAX_USERS}")
             print("")
 
             user_index = 1
@@ -179,40 +256,47 @@ def run_expand(month: str = "2026-04", headless: bool = True, dry_run: bool = Fa
                     print("  (dry-run: 展開をスキップ)")
                     status = "success"
                 else:
-                    status = expand_weekly_pattern(page)
+                    status = expand_weekly_pattern(page, dialog_tracker)
 
+                # 結果を記録
                 if status == "success":
                     result["success"] += 1
-                    result["users"].append({"index": user_index, "name": user_name, "status": "success"})
-                    print("  → 展開完了")
-                elif status == "skipped":
-                    result["skipped"] += 1
-                    result["users"].append({"index": user_index, "name": user_name, "status": "skipped"})
-                    print("  → スキップ（展開済み）")
+                    result["details"]["new"] += 1
+                    print("  → 新規展開完了")
+                elif status == "overwritten":
+                    result["success"] += 1
+                    result["details"]["overwritten"] += 1
+                    print("  → 上書き展開完了")
                 else:
                     result["failed"] += 1
-                    result["users"].append({"index": user_index, "name": user_name, "status": "failed"})
                     print("  → 展開失敗")
 
-                # 「次へ」ボタンがなければ終了（最後の利用者）
-                if not has_next_button(page):
-                    print(f"\n最後の利用者に到達しました（「次へ」ボタンなし）")
+                result["users"].append({
+                    "index": user_index,
+                    "name": user_name,
+                    "status": status,
+                })
+
+                # 最後の利用者かチェック（「次へ」リンクの有無）
+                if not has_next_user(page):
+                    print(f"\n最後の利用者に到達しました（「次へ」リンクなし）")
                     break
 
                 # 次の利用者へ
-                if not click_next_button(page):
-                    print("「次へ」ボタンのクリックに失敗しました")
+                if not click_next_user(page):
+                    print("「次へ」リンクのクリックに失敗しました")
                     break
 
                 user_index += 1
 
-                # 安全のため、61件を超えたら停止
-                if user_index > 70:
-                    print("警告: 想定以上の利用者数のため停止")
+                # 安全リミット
+                if user_index > MAX_USERS:
+                    print(f"警告: 利用者数が{MAX_USERS}を超えたため停止")
                     break
 
             print(f"\n=== Block 1: 完了 ===")
-            print(f"成功: {result['success']} / スキップ: {result['skipped']} / 失敗: {result['failed']} / 合計: {result['total']}")
+            print(f"成功: {result['success']}（新規: {result['details']['new']} / 上書き: {result['details']['overwritten']}）")
+            print(f"失敗: {result['failed']} / 合計: {result['total']}")
 
         except Exception as e:
             print(f"エラーが発生しました: {e}")
