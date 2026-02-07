@@ -236,7 +236,7 @@ def api_export():
         data = request.get_json() or {}
         month = data.get("month", "2026-04")
         out_path = data.get("out_path")
-        auto_drive_upload = data.get("auto_drive_upload", True)
+        auto_drive_upload = data.get("auto_drive_upload", False)
 
         current_task = {
             "running": True,
@@ -269,8 +269,7 @@ def api_export():
                 result["row_count"] = csv_content.count("\n")
                 result["file_size_bytes"] = csv_path.stat().st_size
 
-        # Google Driveに自動アップロード
-        add_log(f"Drive upload check: auto_drive_upload={auto_drive_upload}, result.success={result.get('success')}, csv_path={csv_path}, csv_path.exists={csv_path.exists() if csv_path else False}")
+        # Google Driveに自動アップロード（Shared Drive使用時のみ有効）
         if auto_drive_upload and result.get("success"):
             try:
                 config = load_drive_config()
