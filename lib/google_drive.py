@@ -33,7 +33,7 @@ PROJECT_ROOT = Path(__file__).parent.parent
 CREDENTIALS_PATH = PROJECT_ROOT / "credentials" / "service_account.json"
 
 # スコープ（Driveへの読み書き権限）
-SCOPES = ['https://www.googleapis.com/auth/drive.file']
+SCOPES = ['https://www.googleapis.com/auth/drive']
 
 
 def get_drive_service():

@@ -270,6 +270,7 @@ def api_export():
                 result["file_size_bytes"] = csv_path.stat().st_size
 
         # Google Driveに自動アップロード
+        add_log(f"Drive upload check: auto_drive_upload={auto_drive_upload}, result.success={result.get('success')}, csv_path={csv_path}, csv_path.exists={csv_path.exists() if csv_path else False}")
         if auto_drive_upload and result.get("success"):
             try:
                 config = load_drive_config()
