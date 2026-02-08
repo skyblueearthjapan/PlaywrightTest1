@@ -594,14 +594,16 @@ def api_diff():
             config = load_drive_config()
             folder_id = config.get("folder_id", "")
             csv_abs_path = str(Path(csv_path).resolve())
-            print(f"[DEBUG Drive upload] csv_path={csv_path}, csv_abs_path={csv_abs_path}, exists={os.path.exists(csv_abs_path)}, folder_id={folder_id}")
+            add_log(f"[Drive] csv_path={csv_path}, abs={csv_abs_path}, exists={os.path.exists(csv_abs_path)}, folder_id={folder_id[:8]}...")
+            print(f"[DEBUG Drive upload] csv_path={csv_path}, csv_abs_path={csv_abs_path}, exists={os.path.exists(csv_abs_path)}, folder_id={folder_id}", flush=True)
             if folder_id and os.path.exists(csv_abs_path):
                 # ファイル名テンプレートから生成
                 ws = str(week_start).replace("-", "") if week_start else "unknown"
                 we = str(week_end).replace("-", "") if week_end else "unknown"
                 name_template = config.get("diff_result_csv_name", "diff_result_{week_start}_{week_end}.csv")
                 drive_filename = name_template.format(week_start=ws, week_end=we)
-                print(f"[DEBUG Drive upload] uploading {csv_abs_path} as {drive_filename}")
+                add_log(f"[Drive] uploading as {drive_filename}")
+                print(f"[DEBUG Drive upload] uploading {csv_abs_path} as {drive_filename}", flush=True)
                 file_id = upload_to_drive(csv_abs_path, folder_id, drive_filename, overwrite=True)
                 if file_id:
                     drive_file_info = {
@@ -611,20 +613,21 @@ def api_diff():
                     }
                     add_log(f"差分結果CSVをDriveにアップロード: {drive_filename} (ID: {file_id})")
                 else:
-                    add_log("警告: 差分結果CSVのDriveアップロードに失敗")
-                    print("[DEBUG Drive upload] upload_to_drive returned None")
+                    add_log("警告: 差分結果CSVのDriveアップロードに失敗（upload_to_drive returned None）")
+                    print("[DEBUG Drive upload] upload_to_drive returned None", flush=True)
             else:
                 if not folder_id:
                     add_log("警告: Drive folder_idが未設定のためアップロードをスキップ")
-                    print("[DEBUG Drive upload] folder_id is empty")
+                    print("[DEBUG Drive upload] folder_id is empty", flush=True)
                 if not os.path.exists(csv_abs_path):
                     add_log(f"警告: CSVファイルが見つかりません: {csv_abs_path}")
-                    print(f"[DEBUG Drive upload] CSV file not found: {csv_abs_path}")
+                    print(f"[DEBUG Drive upload] CSV file not found: {csv_abs_path}", flush=True)
         except Exception as e:
             add_log(f"警告: Driveアップロード中にエラー: {e}")
-            print(f"[WARN] Drive upload error: {e}")
+            print(f"[WARN] Drive upload error: {e}", flush=True)
             import traceback
             traceback.print_exc()
+            sys.stdout.flush()
 
         # サマリーテキスト生成
         time_changes = sum(1 for c in corrections if c.has_time_change())
