@@ -852,37 +852,57 @@ def select_staff_member(page, staff_name: str) -> bool:
     """
     職員別タブで職員を選択
 
-    PDF仕様: select#staffMemberInternalId
+    スクリーンショットで確認済みの構造:
+      div#helper_search > table > tbody > tr > td >
+        select#staffMemberInternalId.form-control
+        onchange="submitStaffInternalId(this.value)"
     """
-    try:
-        staff_select = page.locator("select#staffMemberInternalId")
-        if staff_select.is_visible(timeout=3000):
-            options = staff_select.locator("option").all()
-            for opt in options:
-                opt_text = opt.text_content()
-                if staff_name in opt_text:
-                    staff_select.select_option(label=opt_text)
-                    page.wait_for_timeout(1500)
-                    print(f"  職員を選択: {staff_name}")
-                    return True
-        # Fallback: 「次へ」「前へ」ボタンで移動
-        nav_buttons = page.locator("text=▸▸, text=次へ")
-        for i in range(70):
-            page_text = page.content()
-            if staff_name in page_text:
-                print(f"  {i+1}回目で職員を発見: {staff_name}")
+    print(f"  職員を選択しています: {staff_name}")
+
+    # 方法1: select#staffMemberInternalId から直接選択
+    selectors = [
+        "select#staffMemberInternalId",
+        "div#helper_search select.form-control",
+    ]
+    for selector in selectors:
+        try:
+            staff_select = page.locator(selector).first
+            if not staff_select.is_visible(timeout=3000):
+                continue
+
+            # 現在選択中の職員を確認
+            current_text = staff_select.evaluate(
+                "el => el.options[el.selectedIndex] ? el.options[el.selectedIndex].text : ''"
+            )
+            if current_text and name_matches(staff_name, current_text):
+                print(f"  すでに選択されています: {staff_name}")
                 return True
-            btn = nav_buttons.first
-            if btn.is_visible():
-                btn.click()
-                page.wait_for_timeout(1500)
-            else:
-                break
-        print(f"  職員が見つかりません: {staff_name}")
-        return False
-    except Exception as e:
-        print(f"  職員選択エラー: {e}")
-        return False
+
+            # 全optionを取得して名前マッチ
+            options_data = staff_select.evaluate("""el => {
+                return Array.from(el.options).map((opt, i) => ({
+                    index: i,
+                    value: opt.value,
+                    text: opt.text
+                }));
+            }""")
+            for opt in options_data:
+                if name_matches(staff_name, opt["text"]):
+                    staff_select.select_option(value=opt["value"])
+                    page.wait_for_load_state("networkidle", timeout=10000)
+                    page.wait_for_timeout(1000)
+                    print(f"  ドロップダウンから職員を選択: {staff_name} (value={opt['value']})")
+                    return True
+
+            print(f"  ドロップダウンに職員が見つかりません: {staff_name}")
+            print(f"  選択肢: {[o['text'] for o in options_data[:10]]}...")
+            return False
+        except Exception as e:
+            print(f"  セレクタ '{selector}' でエラー: {e}")
+            continue
+
+    print(f"  職員が見つかりません: {staff_name}")
+    return False
 
 
 def add_event_entry(page, correction: Correction, dry_run: bool = False) -> bool:
