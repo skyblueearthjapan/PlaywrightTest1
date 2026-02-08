@@ -142,12 +142,20 @@ def expand_weekly_pattern(page, dialog_tracker: dict) -> str:
         # 「週間訪問パターンから展開」ボタンを探す
         expand_btn = page.locator("button[title='週間訪問パターンから展開']")
 
-        if not expand_btn.is_visible(timeout=3000):
+        if not expand_btn.is_visible(timeout=2000):
             # フォールバック: テキストで探す
             expand_btn = page.locator("text=週間訪問パターンから展開")
-            if not expand_btn.is_visible(timeout=2000):
+            if not expand_btn.is_visible(timeout=1000):
                 print("  「週間訪問パターンから展開」ボタンが見つかりません")
                 return "failed"
+
+        # ボタンが disabled なら即スキップ（週間パターン未作成の利用者）
+        is_disabled = expand_btn.evaluate(
+            "el => el.disabled || el.classList.contains('disabled') || el.getAttribute('aria-disabled') === 'true'"
+        )
+        if is_disabled:
+            print("  週間パターン未設定 → スキップ")
+            return "skipped"
 
         # ボタンをクリック（→ ネイティブconfirmダイアログが出る場合あり）
         expand_btn.click()
@@ -306,6 +314,9 @@ def run_expand(month: str = "2026-04", headless: bool = True, dry_run: bool = Fa
                     result["success"] += 1
                     result["details"]["overwritten"] += 1
                     print("  → 上書き展開完了")
+                elif status == "skipped":
+                    result["skipped"] += 1
+                    print("  → スキップ（パターン未設定）")
                 else:
                     result["failed"] += 1
                     print("  → 展開失敗")
@@ -335,6 +346,7 @@ def run_expand(month: str = "2026-04", headless: bool = True, dry_run: bool = Fa
 
             print(f"\n=== Block 1: 完了 ===")
             print(f"成功: {result['success']}（新規: {result['details']['new']} / 上書き: {result['details']['overwritten']}）")
+            print(f"スキップ: {result['skipped']}（パターン未設定）")
             print(f"失敗: {result['failed']} / 合計: {result['total']}")
 
         except Exception as e:
