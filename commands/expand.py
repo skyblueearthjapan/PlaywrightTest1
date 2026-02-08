@@ -139,26 +139,20 @@ def expand_weekly_pattern(page, dialog_tracker: dict) -> str:
     dialog_tracker["message"] = ""
 
     try:
-        # 「週間訪問パターンから展開」ボタンを探す
-        expand_btn = page.locator("button[title='週間訪問パターンから展開']")
+        # 「週間訪問パターンから展開」ボタンを探す（<button>要素のみ）
+        # パターン未設定の利用者では <button> 自体がDOMに存在しない（テキストのみ残る）
+        expand_btn = page.locator("button[onclick*='doCheckDeployWeeklyShiftAss']")
 
-        if not expand_btn.is_visible(timeout=2000):
-            # フォールバック: テキストで探す
-            expand_btn = page.locator("text=週間訪問パターンから展開")
-            if not expand_btn.is_visible(timeout=1000):
-                print("  「週間訪問パターンから展開」ボタンが見つかりません")
-                return "failed"
+        if expand_btn.count() == 0:
+            # フォールバック: title属性で探す
+            expand_btn = page.locator("button[title='週間訪問パターンから展開']")
 
-        # ボタンが disabled なら即スキップ（週間パターン未作成の利用者）
-        is_disabled = expand_btn.evaluate(
-            "el => el.disabled || el.classList.contains('disabled') || el.getAttribute('aria-disabled') === 'true'"
-        )
-        if is_disabled:
+        if expand_btn.count() == 0 or not expand_btn.first.is_visible(timeout=2000):
             print("  週間パターン未設定 → スキップ")
             return "skipped"
 
         # ボタンをクリック（→ ネイティブconfirmダイアログが出る場合あり）
-        expand_btn.click()
+        expand_btn.first.click()
 
         # ダイアログ処理 + ページ遷移を待つ
         page.wait_for_timeout(1000)
