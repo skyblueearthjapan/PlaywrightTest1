@@ -45,8 +45,27 @@ from lib.stop_signal import is_stop_requested, clear_stop
 # =============================================================================
 
 def normalize_name(name: str) -> str:
-    """名前のスペースを正規化（全角スペース↔半角スペースどちらでもマッチ可能に）"""
-    return name.replace("\u3000", " ").strip()
+    """名前を正規化（全角/半角スペース統一 + 漢字の異体字を統一）"""
+    # スペース正規化
+    name = name.replace("\u3000", " ").strip()
+    # 漢字の異体字を統一（カイポケで確認された異体字ペア）
+    variant_map = {
+        "栁": "柳",  # U+6801 → U+67F3
+        "﨑": "崎",  # U+FA11 → U+5D0E
+        "髙": "高",  # U+9AD9 → U+9AD8
+        "濵": "浜",  # U+6FF5 → U+6D5C
+        "邊": "辺",  # U+908A → U+8FBA
+        "廣": "広",  # U+5EE3 → U+5E83
+        "齋": "斎",  # U+9F4B → U+658E
+        "齊": "斎",  # U+9F4A → U+658E
+        "澤": "沢",  # U+6FA4 → U+6CA2
+        "櫻": "桜",  # U+6AFB → U+685C
+        "渡邉": "渡辺",
+        "渡邊": "渡辺",
+    }
+    for old, new in variant_map.items():
+        name = name.replace(old, new)
+    return name
 
 
 def name_matches(needle: str, haystack: str) -> bool:
