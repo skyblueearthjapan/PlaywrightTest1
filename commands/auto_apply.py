@@ -934,18 +934,51 @@ def add_event_entry(page, correction: Correction, dry_run: bool = False) -> bool
         page.wait_for_timeout(2000)
 
         # Step 2: 「新しく登録する」ラジオを選択
-        new_register_radio = page.locator("input[name='popupSelectedIndividual']").first
-        if new_register_radio.is_visible(timeout=3000):
-            new_register_radio.click()
-            page.wait_for_timeout(500)
-            print("    「新しく登録する」を選択")
+        # ラジオボタンは2つ: 「既存から選択」(value=0等) / 「新しく登録する」(value=1等)
+        # 「新しく登録する」を選択すると input#popupIndividualName が enabled になる
+        radios = page.locator("input[name='popupSelectedIndividual']").all()
+        print(f"    ラジオボタン数: {len(radios)}")
+        if len(radios) >= 2:
+            # 2番目のラジオ = 「新しく登録する」
+            radios[1].click()
+            page.wait_for_timeout(1000)
+            print("    「新しく登録する」を選択（2番目のラジオ）")
+        elif len(radios) == 1:
+            radios[0].click()
+            page.wait_for_timeout(1000)
+            print("    ラジオボタンをクリック（1つのみ）")
+        else:
+            # ラジオが見つからない場合、ラベルテキストで探す
+            new_label = page.locator("label:has-text('新しく登録')").first
+            if new_label.is_visible(timeout=2000):
+                new_label.click()
+                page.wait_for_timeout(1000)
+                print("    「新しく登録する」ラベルをクリック")
 
-        # Step 3: イベント名を入力
+        # Step 3: イベント名を入力（ラジオ選択後にenabledになるのを待つ）
         event_name_input = page.locator("input#popupIndividualName")
-        if event_name_input.is_visible(timeout=3000):
+        try:
+            event_name_input.wait_for(state="attached", timeout=5000)
+            # disabled属性が解除されるのを待つ
+            page.wait_for_function(
+                "() => !document.querySelector('#popupIndividualName').disabled",
+                timeout=5000
+            )
             event_name_input.fill(event_name)
             page.wait_for_timeout(300)
             print(f"    イベント名入力: {event_name}")
+        except Exception as e:
+            print(f"    イベント名入力に失敗（フィールドがdisabled）: {e}")
+            # デバッグ: ラジオボタンの状態を出力
+            for i, r in enumerate(radios):
+                try:
+                    checked = r.is_checked()
+                    val = r.get_attribute("value")
+                    print(f"    ラジオ[{i}]: value={val}, checked={checked}")
+                except:
+                    pass
+            close_edit_dialog(page)
+            return False
 
         # Step 4: 時間を設定
         start_parts = correction.start_time_to.split(":")
