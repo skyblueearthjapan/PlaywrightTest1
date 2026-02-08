@@ -365,6 +365,9 @@ def api_apply():
         dry_run = data.get("dry_run", True)
         headed = data.get("headed", True)  # デフォルトでVNC表示
         limit = data.get("limit")
+        action_filter = data.get("action_filter")  # "edit", "add", "delete", "date_change"
+        business_type_filter = data.get("business_type_filter")  # "医療保険", "介護保険", "イベント"
+        target_users = data.get("target_users")  # ["山田太郎", "佐藤花子"]
 
         # インラインデータが提供された場合、ファイルに保存
         if correction_data:
@@ -388,14 +391,26 @@ def api_apply():
         }
 
         clear_stop()  # 非常停止フラグをクリア
-        add_log(f"apply 開始 (month={month}, dry_run={dry_run})")
-        print(f"\n=== API: apply 開始 (month={month}, dry_run={dry_run}) ===")
+        filter_info = ""
+        if action_filter:
+            filter_info += f", action={action_filter}"
+        if business_type_filter:
+            filter_info += f", business_type={business_type_filter}"
+        if target_users:
+            filter_info += f", users={target_users}"
+        if limit:
+            filter_info += f", limit={limit}"
+        add_log(f"apply 開始 (month={month}, dry_run={dry_run}{filter_info})")
+        print(f"\n=== API: apply 開始 (month={month}, dry_run={dry_run}{filter_info}) ===")
         result = run_auto_apply(
             correction_sheet=correction_sheet,
             month=month,
             headless=not headed,
             dry_run=dry_run,
             limit=limit,
+            action_filter=action_filter,
+            business_type_filter=business_type_filter,
+            target_users=target_users,
         )
 
         add_log(f"apply 完了: {result}")

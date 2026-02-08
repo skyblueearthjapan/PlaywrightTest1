@@ -916,6 +916,9 @@ def run_auto_apply(
     headless: bool = True,
     dry_run: bool = False,
     limit: int = None,
+    action_filter: str = None,
+    business_type_filter: str = None,
+    target_users: list = None,
 ) -> dict:
     """
     修正シートに基づいてスケジュールを自動適用
@@ -930,6 +933,9 @@ def run_auto_apply(
         headless: ヘッドレスモードで実行するか
         dry_run: テスト実行（実際には保存しない）
         limit: 適用する件数の上限
+        action_filter: アクションでフィルタ（"edit", "add", "delete", "date_change"）
+        business_type_filter: 業務種別でフィルタ（"医療保険", "介護保険", "イベント"）
+        target_users: 対象利用者名リスト（指定時はこのリストの利用者のみ処理）
 
     Returns:
         dict: 実行結果
@@ -938,9 +944,29 @@ def run_auto_apply(
     clear_stop()
 
     # 修正シートを読み込む
-    corrections = load_correction_sheet(correction_sheet)
+    all_corrections = load_correction_sheet(correction_sheet)
+
+    # フィルタ適用
+    corrections = all_corrections
+
+    if action_filter:
+        corrections = [c for c in corrections if c.action == action_filter]
+        print(f"[フィルタ] action={action_filter}: {len(corrections)}/{len(all_corrections)}件")
+
+    if business_type_filter:
+        if business_type_filter == "イベント":
+            corrections = [c for c in corrections if c.is_event()]
+        else:
+            corrections = [c for c in corrections if c.business_type == business_type_filter]
+        print(f"[フィルタ] business_type={business_type_filter}: {len(corrections)}件")
+
+    if target_users:
+        corrections = [c for c in corrections if c.user_name in target_users]
+        print(f"[フィルタ] users={target_users}: {len(corrections)}件")
+
     if limit:
         corrections = corrections[:limit]
+        print(f"[フィルタ] limit={limit}: {len(corrections)}件")
 
     # Phase分離: スケジュール系 vs イベント系
     schedule_corrections = [c for c in corrections if c.is_schedule()]
@@ -949,10 +975,17 @@ def run_auto_apply(
     print(f"\n=== 自動適用開始 ===")
     print(f"修正シート: {correction_sheet}")
     print(f"対象月: {month}")
-    print(f"総修正件数: {len(corrections)}")
+    print(f"元の総件数: {len(all_corrections)}")
+    print(f"フィルタ後: {len(corrections)}件")
     print(f"  スケジュール修正: {len(schedule_corrections)}件 (利用者別タブ)")
     print(f"  イベント追加: {len(event_corrections)}件 (職員別タブ)")
     print(f"dry-run: {dry_run}")
+    if action_filter:
+        print(f"action: {action_filter}")
+    if business_type_filter:
+        print(f"business_type: {business_type_filter}")
+    if target_users:
+        print(f"target_users: {target_users}")
     print("")
 
     result = {
@@ -1202,6 +1235,12 @@ if __name__ == "__main__":
     parser.add_argument("--headed", action="store_true", help="ブラウザを表示")
     parser.add_argument("--dry-run", action="store_true", help="テスト実行（実際には保存しない）")
     parser.add_argument("--limit", type=int, help="適用する件数の上限")
+    parser.add_argument("--action", choices=["edit", "add", "delete", "date_change"],
+                        help="アクションでフィルタ")
+    parser.add_argument("--business-type",
+                        help="業務種別でフィルタ (医療保険, 介護保険, イベント)")
+    parser.add_argument("--user", action="append", dest="users",
+                        help="対象利用者名（複数指定可: --user 山田太郎 --user 佐藤花子）")
     args = parser.parse_args()
 
     run_auto_apply(
@@ -1210,4 +1249,7 @@ if __name__ == "__main__":
         headless=not args.headed,
         dry_run=args.dry_run,
         limit=args.limit,
+        action_filter=args.action,
+        business_type_filter=args.business_type,
+        target_users=args.users,
     )
