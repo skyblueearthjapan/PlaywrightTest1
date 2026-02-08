@@ -588,6 +588,34 @@ def api_diff():
         csv_path = output_path.replace(".json", ".csv")
         generate_correction_sheet(corrections, csv_path, format="csv")
 
+        # 差分結果CSVをGoogle Driveにアップロード
+        drive_file_info = None
+        try:
+            config = load_drive_config()
+            folder_id = config.get("folder_id", "")
+            if folder_id and os.path.exists(csv_path):
+                # ファイル名テンプレートから生成
+                ws = str(week_start).replace("-", "") if week_start else "unknown"
+                we = str(week_end).replace("-", "") if week_end else "unknown"
+                name_template = config.get("diff_result_csv_name", "diff_result_{week_start}_{week_end}.csv")
+                drive_filename = name_template.format(week_start=ws, week_end=we)
+                file_id = upload_to_drive(csv_path, folder_id, drive_filename, overwrite=True)
+                if file_id:
+                    drive_file_info = {
+                        "file_id": file_id,
+                        "filename": drive_filename,
+                        "folder_id": folder_id,
+                    }
+                    add_log(f"差分結果CSVをDriveにアップロード: {drive_filename} (ID: {file_id})")
+                else:
+                    add_log("警告: 差分結果CSVのDriveアップロードに失敗")
+            else:
+                if not folder_id:
+                    add_log("警告: Drive folder_idが未設定のためアップロードをスキップ")
+        except Exception as e:
+            add_log(f"警告: Driveアップロード中にエラー: {e}")
+            print(f"[WARN] Drive upload error: {e}")
+
         # サマリーテキスト生成
         time_changes = sum(1 for c in corrections if c.has_time_change())
         staff_changes = sum(1 for c in corrections if c.has_staff_change())
@@ -658,6 +686,7 @@ def api_diff():
                 "json": output_path,
                 "csv": csv_path,
             },
+            "drive_file": drive_file_info,
         }
 
         add_log(f"diff 完了: {summary_text}")
