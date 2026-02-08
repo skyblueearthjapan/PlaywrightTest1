@@ -398,38 +398,48 @@ def change_date(page, new_day: int) -> bool:
 
     try:
         # Strategy 1: jQuery UI Datepicker（実際のカイポケの構造）
-        datepicker = page.locator("#simple-select-days-range, .hasMultiDatepicker, .ui-datepicker").first
-        if datepicker.is_visible(timeout=2000):
-            # デートピッカー内の全tdからday_strに完全一致するセルを探す
-            day_cells = datepicker.locator("td[data-handler] a, td a").all()
-            for cell in day_cells:
-                try:
-                    cell_text = cell.text_content().strip()
-                    if cell_text == day_str:
-                        cell.click()
-                        page.wait_for_timeout(500)
-                        print(f"    日付を {new_day} に変更（デートピッカー）")
-                        return True
-                except Exception:
-                    continue
+        # #simple-select-days-range はinputフィールド。クリックでカレンダーが開く。
+        # カレンダーは #ui-datepicker-div に展開される（input内ではない）。
+        datepicker_input = page.locator("#simple-select-days-range, .hasMultiDatepicker").first
+        if datepicker_input.is_visible(timeout=2000):
+            # inputをクリックしてカレンダーポップアップを開く
+            datepicker_input.click()
+            page.wait_for_timeout(500)
 
-            # aタグ内にない場合、td自体のテキストで探す
-            all_cells = datepicker.locator("td").all()
-            for cell in all_cells:
-                try:
-                    cell_text = cell.text_content().strip()
-                    # "1" だけの場合と "1(水)" の場合に対応
-                    if cell_text == day_str or cell_text.startswith(day_str + "("):
-                        inner_a = cell.locator("a")
-                        if inner_a.count() > 0:
-                            inner_a.first.click()
-                        else:
+            # カレンダーポップアップ（#ui-datepicker-div）内の日付セルを探す
+            calendar = page.locator("#ui-datepicker-div")
+            if calendar.is_visible(timeout=3000):
+                # カレンダー内のaタグで日付を探す
+                day_cells = calendar.locator("td[data-handler='selectDay'] a, td a.ui-state-default").all()
+                for cell in day_cells:
+                    try:
+                        cell_text = cell.text_content().strip()
+                        if cell_text == day_str:
                             cell.click()
-                        page.wait_for_timeout(500)
-                        print(f"    日付を {new_day} に変更（デートピッカーセル）")
-                        return True
-                except Exception:
-                    continue
+                            page.wait_for_timeout(500)
+                            print(f"    日付を {new_day} に変更（デートピッカー）")
+                            return True
+                    except Exception:
+                        continue
+
+                # aタグ内にない場合、td自体のテキストで探す
+                all_cells = calendar.locator("td").all()
+                for cell in all_cells:
+                    try:
+                        cell_text = cell.text_content().strip()
+                        if cell_text == day_str or cell_text.startswith(day_str + "("):
+                            inner_a = cell.locator("a")
+                            if inner_a.count() > 0:
+                                inner_a.first.click()
+                            else:
+                                cell.click()
+                            page.wait_for_timeout(500)
+                            print(f"    日付を {new_day} に変更（デートピッカーセル）")
+                            return True
+                    except Exception:
+                        continue
+            else:
+                print("    警告: カレンダーポップアップが開きませんでした")
 
         # Strategy 2: <select> タグ（フォールバック）
         day_selectors = [
@@ -473,7 +483,7 @@ def edit_staff(page, staff1_name: str, staff2_name: str = "",
     try:
         # 新規追加の場合、職員情報入力ボタンをクリック
         if for_new_entry:
-            staff_info_btn = page.locator("input[value='職員情報入力']")
+            staff_info_btn = page.locator("input#btnInputStaff")
             if staff_info_btn.is_visible(timeout=3000):
                 staff_info_btn.click()
                 page.wait_for_timeout(1000)
@@ -782,37 +792,74 @@ def fill_nursing_insurance_fields(page, start_time: str, end_time: str) -> bool:
         nursing_radio = page.locator("input#inPopupInsuranceDivision01")
         if nursing_radio.is_visible(timeout=3000):
             nursing_radio.click()
-            page.wait_for_timeout(1000)
+            page.wait_for_timeout(2000)  # AJAX読み込み待ち（長めに）
             print("    保険区分: 介護保険 を選択")
 
-        # サービス種類: 訪問看護
+        # サービス種類: 訪問看護（AJAX後にオプションが読み込まれる）
         service_kind = page.locator("select#inPopupServiceKindId")
-        if service_kind.is_visible(timeout=3000):
+        if service_kind.is_visible(timeout=5000):
+            # オプションが読み込まれるまで待つ（空optionのみの場合がある）
+            for _ in range(10):
+                options = service_kind.locator("option").all()
+                if len(options) > 1:
+                    break
+                page.wait_for_timeout(500)
+
             options = service_kind.locator("option").all()
+            # デバッグ: 選択肢を出力
+            opt_texts = [o.text_content().strip() for o in options[:10]]
+            print(f"    ServiceKindId 選択肢: {opt_texts}")
+
+            selected = False
             for opt in options:
-                text = opt.text_content()
+                text = opt.text_content().strip()
                 # "訪問看護" にマッチ（"介護予防訪問看護" も可能だが通常は "訪問看護"）
                 if "訪問看護" in text and "予防" not in text:
                     service_kind.select_option(label=text)
                     page.wait_for_timeout(500)
                     print(f"    サービス種類: {text}")
+                    selected = True
                     break
+            if not selected:
+                # フォールバック: "訪問看護" を含む最初のオプションを選択
+                for opt in options:
+                    text = opt.text_content().strip()
+                    if "訪問看護" in text:
+                        service_kind.select_option(label=text)
+                        page.wait_for_timeout(500)
+                        print(f"    サービス種類(fallback): {text}")
+                        selected = True
+                        break
+            if not selected:
+                print("    警告: '訪問看護' オプションが見つかりません")
 
         # サービス区分: 通常の算定
         estimate1 = page.locator("select#inPopupEstimate1")
-        if estimate1.is_visible(timeout=3000):
+        if estimate1.is_visible(timeout=5000):
+            # オプションが読み込まれるまで待つ
+            for _ in range(10):
+                options = estimate1.locator("option").all()
+                if len(options) > 1:
+                    break
+                page.wait_for_timeout(500)
             options = estimate1.locator("option").all()
             for opt in options:
                 if "通常の算定" in opt.text_content():
                     estimate1.select_option(label=opt.text_content())
-                    page.wait_for_timeout(500)
+                    page.wait_for_timeout(1000)  # AJAX: Estimate4が連動で読み込まれる
                     print(f"    サービス区分: {opt.text_content()}")
                     break
 
         # 算定時間: 開始・終了時間から計算
         santei_time = calculate_santei_time(start_time, end_time)
         estimate4 = page.locator("select#inPopupEstimate4")
-        if estimate4.is_visible(timeout=3000):
+        if estimate4.is_visible(timeout=5000):
+            # オプションが読み込まれるまで待つ
+            for _ in range(10):
+                options = estimate4.locator("option").all()
+                if len(options) > 1:
+                    break
+                page.wait_for_timeout(500)
             options = estimate4.locator("option").all()
             for opt in options:
                 if santei_time in opt.text_content():
