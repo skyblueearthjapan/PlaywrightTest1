@@ -18,6 +18,8 @@
 """
 
 import sys
+import re
+import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -82,9 +84,63 @@ def calculate_santei_time(start_time: str, end_time: str) -> str:
 # 利用者選択・スケジュールエントリ操作
 # =============================================================================
 
+def _get_user_dropdown(page):
+    """利用者選択ドロップダウンを取得 (div#user_search select.form-control)"""
+    # スクリーンショットで確認済みの正確なセレクタ
+    selectors = [
+        "div#user_search select.form-control",
+        "td.pulldownUser select.form-control",
+        "div#user_search select",
+    ]
+    for selector in selectors:
+        dropdown = page.locator(selector)
+        try:
+            if dropdown.count() > 0 and dropdown.first.is_visible(timeout=2000):
+                return dropdown.first
+        except Exception:
+            continue
+    return None
+
+
+def _check_current_user(page, user_name: str) -> bool:
+    """現在選択されている利用者かどうかを確認（ドロップダウンの選択値 + ページタイトル）"""
+    # 方法1: ドロップダウンの選択中optionテキストで判定（最も正確）
+    dropdown = _get_user_dropdown(page)
+    if dropdown:
+        try:
+            # 選択中のoptionのテキストを取得
+            selected_text = dropdown.evaluate(
+                "el => el.options[el.selectedIndex] ? el.options[el.selectedIndex].text : ''"
+            )
+            if selected_text and name_matches(user_name, selected_text):
+                return True
+        except Exception:
+            pass
+
+    # 方法2: ページタイトル「○○様　月間スケジュール一覧」で判定
+    try:
+        # ページ上部のタイトルテキストを確認
+        title_selectors = [
+            "h1", "h2", "h3", "h4",
+            ".user-name", ".patient-name",
+            "#userName", ".page-title",
+        ]
+        for selector in title_selectors:
+            elems = page.locator(selector).all()
+            for elem in elems:
+                if elem.is_visible(timeout=300):
+                    text = elem.text_content()
+                    if name_matches(user_name, text):
+                        return True
+    except Exception:
+        pass
+
+    return False
+
+
 def select_user(page, user_name: str) -> bool:
     """
-    利用者を選択（ドロップダウンまたは「次へ」ボタン）
+    利用者を選択（div#user_search のドロップダウンを使用）
 
     Args:
         page: Playwrightのページオブジェクト
@@ -96,79 +152,172 @@ def select_user(page, user_name: str) -> bool:
     print(f"利用者を選択しています: {user_name}")
 
     # 現在の画面に表示されている利用者を確認
-    page_content = page.content()
-    if name_matches(user_name, page_content):
-        title_elem = page.locator("h3, h2, .user-name, .patient-name").first
-        if title_elem.is_visible():
-            title_text = title_elem.text_content()
-            if name_matches(user_name, title_text):
-                print(f"  すでに選択されています: {user_name}")
-                return True
+    if _check_current_user(page, user_name):
+        print(f"  すでに選択されています: {user_name}")
+        return True
 
-    # 方法1: ドロップダウンから選択
-    try:
-        user_selects = page.locator("select").all()
-        for select in user_selects:
-            options = select.locator("option").all_text_contents()
-            for opt in options:
-                if name_matches(user_name, opt):
-                    select.select_option(label=opt)
-                    page.wait_for_timeout(2000)
-                    print(f"  ドロップダウンから選択: {user_name}")
+    # 方法1: div#user_search のドロップダウンから直接選択（O(1)・最速）
+    dropdown = _get_user_dropdown(page)
+    if dropdown:
+        try:
+            # 全optionのテキストを取得して名前マッチ
+            options_data = dropdown.evaluate("""el => {
+                return Array.from(el.options).map((opt, i) => ({
+                    index: i,
+                    value: opt.value,
+                    text: opt.text
+                }));
+            }""")
+            for opt in options_data:
+                if name_matches(user_name, opt["text"]):
+                    dropdown.select_option(value=opt["value"])
+                    page.wait_for_load_state("networkidle", timeout=10000)
+                    page.wait_for_timeout(1000)
+                    print(f"  ドロップダウンから直接選択: {user_name} (value={opt['value']})")
                     return True
-    except Exception:
-        pass
+            print(f"  ドロップダウンに利用者が見つかりません: {user_name}")
+            print(f"  ドロップダウンの選択肢: {[o['text'] for o in options_data[:10]]}...")
+        except Exception as e:
+            print(f"  ドロップダウン選択でエラー: {e}")
 
-    # 方法2: 「次へ」ボタンで移動
-    max_attempts = 70  # 最大61件の利用者
+    # 方法2: 「次へ」ボタンで移動（フォールバック）
+    print(f"  フォールバック: 「次へ」ボタンで探索中...")
+    max_attempts = 70
     for i in range(max_attempts):
-        page_content = page.content()
-        if name_matches(user_name, page_content):
+        if _check_current_user(page, user_name):
             print(f"  {i+1}回目で発見: {user_name}")
             return True
 
-        next_btn = page.locator("text=次へ").first
-        if not next_btn.is_visible():
+        next_btn = page.locator("td.linkNextUser a, a:has-text('次へ')").first
+        try:
+            if not next_btn.is_visible(timeout=1000):
+                break
+            next_btn.click()
+            page.wait_for_load_state("networkidle", timeout=10000)
+            page.wait_for_timeout(1000)
+        except Exception:
             break
-        next_btn.click()
-        page.wait_for_timeout(1500)
 
     print(f"  利用者が見つかりません: {user_name}")
     return False
 
 
+def _save_debug_on_failure(page, day: int, start_time: str):
+    """click_schedule_entry失敗時のデバッグ情報を保存"""
+    try:
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        screenshot_path = f"artifacts/debug_click_entry_day{day}_{timestamp}.png"
+        page.screenshot(path=screenshot_path)
+        print(f"    デバッグ: スクリーンショット保存 → {screenshot_path}")
+
+        html_path = f"artifacts/debug_click_entry_day{day}_{timestamp}.html"
+        html_content = page.content()
+        with open(html_path, "w", encoding="utf-8") as f:
+            f.write(html_content)
+        print(f"    デバッグ: HTML保存 → {html_path}")
+    except Exception as debug_err:
+        print(f"    デバッグ保存エラー: {debug_err}")
+
+
 def click_schedule_entry(page, day: int, start_time: str) -> bool:
     """
     指定した日付・開始時間のスケジュールエントリをクリック
+
+    Strategy 1: 行の日にち列(td.tac.nowrap)の完全一致で行を特定し、
+                行内のaタグ(onclick付き)をクリック
+    Strategy 2: onclick属性をパースして5番目のパラメータ（日にち）で特定
+    同一日複数件: div.service-detail-area 内の時間テキストで絞り込み
     """
     print(f"  予定をクリック: {day}日 {start_time}")
+    day_str = str(day)
 
     try:
-        rows = page.locator("table tr").all()
+        candidate_links = []
 
+        # --- Strategy 1: 行の日にち列(td.tac.nowrap)で特定 ---
+        rows = page.locator("table tr").all()
         for row in rows:
             try:
-                row_text = row.text_content()
-                if str(day) in row_text and start_time in row_text:
-                    link = row.locator("a").first
+                day_cells = row.locator("td.tac.nowrap").all()
+                day_match = False
+                for cell in day_cells:
+                    cell_text = cell.text_content().strip()
+                    if cell_text == day_str:
+                        day_match = True
+                        break
+
+                if not day_match:
+                    continue
+
+                links = row.locator("a[onclick]").all()
+                for link in links:
                     if link.is_visible():
-                        link.click()
-                        page.wait_for_timeout(2000)
-                        return True
+                        time_text = ""
+                        try:
+                            detail_area = link.locator(
+                                "xpath=ancestor::div[contains(@class,'service-detail-area')]"
+                            ).first
+                            if detail_area.count() > 0:
+                                time_text = detail_area.inner_text()
+                        except Exception:
+                            pass
+                        candidate_links.append({"link": link, "time_text": time_text})
             except Exception:
                 continue
 
-        # 時間を含むリンクを直接探す
-        time_link = page.locator(f"a:has-text('{start_time}')").first
-        if time_link.is_visible():
-            time_link.click()
+        # --- Strategy 2: onclick属性パース（fallback） ---
+        if not candidate_links:
+            print(f"    Strategy 1失敗 → onclick属性パースにフォールバック")
+            all_links = page.locator("a[onclick*='Edit']").all()
+            for link in all_links:
+                try:
+                    onclick = link.get_attribute("onclick") or ""
+                    params = re.findall(r"'([^']*)'", onclick)
+                    if len(params) >= 5 and params[4] == day_str:
+                        time_text = ""
+                        try:
+                            detail_area = link.locator(
+                                "xpath=ancestor::div[contains(@class,'service-detail-area')]"
+                            ).first
+                            if detail_area.count() > 0:
+                                time_text = detail_area.inner_text()
+                        except Exception:
+                            pass
+                        candidate_links.append({"link": link, "time_text": time_text})
+                except Exception:
+                    continue
+
+        if not candidate_links:
+            print(f"    {day}日のエントリが見つかりません")
+            _save_debug_on_failure(page, day, start_time)
+            return False
+
+        # 1件のみ → そのままクリック
+        if len(candidate_links) == 1:
+            print(f"    {day}日に1件のエントリを発見")
+            candidate_links[0]["link"].click()
             page.wait_for_timeout(2000)
             return True
 
-        return False
+        # 複数件 → 時間で絞り込み
+        print(f"    {day}日に{len(candidate_links)}件のエントリを発見 → 時間 '{start_time}' で絞り込み")
+        for c in candidate_links:
+            if start_time in c["time_text"]:
+                print(f"    時間一致: {c['time_text'].strip()}")
+                c["link"].click()
+                page.wait_for_timeout(2000)
+                return True
+
+        # 時間で絞り込めなかった場合は最初の1件をクリック
+        print(f"    警告: 時間での絞り込み失敗。最初のエントリをクリック")
+        candidate_links[0]["link"].click()
+        page.wait_for_timeout(2000)
+        return True
 
     except Exception as e:
         print(f"    エラー: {e}")
+        _save_debug_on_failure(page, day, start_time)
         return False
 
 
