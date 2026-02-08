@@ -587,46 +587,30 @@ def api_diff():
         csv_path = output_path.replace(".json", ".csv")
         generate_correction_sheet(corrections, csv_path, format="csv")
 
-        # 差分結果CSVをGoogle Driveにアップロード
-        drive_file_info = None
+        # 差分結果CSVの内容を読み込み（GAS側でDriveアップロード用）
+        csv_content = ""
+        drive_upload_info = None
         try:
+            csv_abs_path = str(Path(csv_path).resolve())
+            if os.path.exists(csv_abs_path):
+                with open(csv_abs_path, "r", encoding="utf-8-sig") as f:
+                    csv_content = f.read()
+
+            # GAS側でアップロードする際の推奨ファイル名を生成
             config = load_drive_config()
             folder_id = config.get("folder_id", "")
-            csv_abs_path = str(Path(csv_path).resolve())
-            add_log(f"[Drive] csv_path={csv_path}, abs={csv_abs_path}, exists={os.path.exists(csv_abs_path)}, folder_id={folder_id[:8]}...")
-            print(f"[DEBUG Drive upload] csv_path={csv_path}, csv_abs_path={csv_abs_path}, exists={os.path.exists(csv_abs_path)}, folder_id={folder_id}", flush=True)
-            if folder_id and os.path.exists(csv_abs_path):
-                # ファイル名テンプレートから生成
-                ws = str(week_start).replace("-", "") if week_start else "unknown"
-                we = str(week_end).replace("-", "") if week_end else "unknown"
-                name_template = config.get("diff_result_csv_name", "diff_result_{week_start}_{week_end}.csv")
-                drive_filename = name_template.format(week_start=ws, week_end=we)
-                add_log(f"[Drive] uploading as {drive_filename}")
-                print(f"[DEBUG Drive upload] uploading {csv_abs_path} as {drive_filename}", flush=True)
-                file_id = upload_to_drive(csv_abs_path, folder_id, drive_filename, overwrite=True)
-                if file_id:
-                    drive_file_info = {
-                        "file_id": file_id,
-                        "filename": drive_filename,
-                        "folder_id": folder_id,
-                    }
-                    add_log(f"差分結果CSVをDriveにアップロード: {drive_filename} (ID: {file_id})")
-                else:
-                    add_log("警告: 差分結果CSVのDriveアップロードに失敗（upload_to_drive returned None）")
-                    print("[DEBUG Drive upload] upload_to_drive returned None", flush=True)
-            else:
-                if not folder_id:
-                    add_log("警告: Drive folder_idが未設定のためアップロードをスキップ")
-                    print("[DEBUG Drive upload] folder_id is empty", flush=True)
-                if not os.path.exists(csv_abs_path):
-                    add_log(f"警告: CSVファイルが見つかりません: {csv_abs_path}")
-                    print(f"[DEBUG Drive upload] CSV file not found: {csv_abs_path}", flush=True)
+            ws = str(week_start).replace("-", "") if week_start else "unknown"
+            we = str(week_end).replace("-", "") if week_end else "unknown"
+            name_template = config.get("diff_result_csv_name", "diff_result_{week_start}_{week_end}.csv")
+            drive_filename = name_template.format(week_start=ws, week_end=we)
+            drive_upload_info = {
+                "filename": drive_filename,
+                "folder_id": folder_id,
+            }
+            add_log(f"[Drive] CSV準備完了: {drive_filename} ({len(csv_content)}bytes), GAS側でアップロード予定")
         except Exception as e:
-            add_log(f"警告: Driveアップロード中にエラー: {e}")
-            print(f"[WARN] Drive upload error: {e}", flush=True)
-            import traceback
-            traceback.print_exc()
-            sys.stdout.flush()
+            add_log(f"警告: CSV読み込み中にエラー: {e}")
+            print(f"[WARN] CSV read error: {e}", flush=True)
 
         # サマリーテキスト生成
         time_changes = sum(1 for c in corrections if c.has_time_change())
@@ -701,7 +685,8 @@ def api_diff():
                 "json": output_path,
                 "csv": csv_path,
             },
-            "drive_file": drive_file_info,
+            "drive_file": drive_upload_info,
+            "csv_content": csv_content,
         }
 
         add_log(f"diff 完了: {summary_text}")
