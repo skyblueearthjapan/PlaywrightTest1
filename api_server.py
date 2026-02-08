@@ -593,13 +593,16 @@ def api_diff():
         try:
             config = load_drive_config()
             folder_id = config.get("folder_id", "")
-            if folder_id and os.path.exists(csv_path):
+            csv_abs_path = str(Path(csv_path).resolve())
+            print(f"[DEBUG Drive upload] csv_path={csv_path}, csv_abs_path={csv_abs_path}, exists={os.path.exists(csv_abs_path)}, folder_id={folder_id}")
+            if folder_id and os.path.exists(csv_abs_path):
                 # ファイル名テンプレートから生成
                 ws = str(week_start).replace("-", "") if week_start else "unknown"
                 we = str(week_end).replace("-", "") if week_end else "unknown"
                 name_template = config.get("diff_result_csv_name", "diff_result_{week_start}_{week_end}.csv")
                 drive_filename = name_template.format(week_start=ws, week_end=we)
-                file_id = upload_to_drive(csv_path, folder_id, drive_filename, overwrite=True)
+                print(f"[DEBUG Drive upload] uploading {csv_abs_path} as {drive_filename}")
+                file_id = upload_to_drive(csv_abs_path, folder_id, drive_filename, overwrite=True)
                 if file_id:
                     drive_file_info = {
                         "file_id": file_id,
@@ -609,12 +612,19 @@ def api_diff():
                     add_log(f"差分結果CSVをDriveにアップロード: {drive_filename} (ID: {file_id})")
                 else:
                     add_log("警告: 差分結果CSVのDriveアップロードに失敗")
+                    print("[DEBUG Drive upload] upload_to_drive returned None")
             else:
                 if not folder_id:
                     add_log("警告: Drive folder_idが未設定のためアップロードをスキップ")
+                    print("[DEBUG Drive upload] folder_id is empty")
+                if not os.path.exists(csv_abs_path):
+                    add_log(f"警告: CSVファイルが見つかりません: {csv_abs_path}")
+                    print(f"[DEBUG Drive upload] CSV file not found: {csv_abs_path}")
         except Exception as e:
             add_log(f"警告: Driveアップロード中にエラー: {e}")
             print(f"[WARN] Drive upload error: {e}")
+            import traceback
+            traceback.print_exc()
 
         # サマリーテキスト生成
         time_changes = sum(1 for c in corrections if c.has_time_change())
@@ -623,6 +633,7 @@ def api_diff():
         additions = sum(1 for c in corrections if c.action == "add")
         deletions = sum(1 for c in corrections if c.action == "delete")
         edits = sum(1 for c in corrections if c.action == "edit")
+        date_change_actions = sum(1 for c in corrections if c.action == "date_change")
 
         events = sum(1 for c in corrections if c.is_event())
         by_business_type = {}
@@ -630,7 +641,7 @@ def api_diff():
             bt = c.business_type or "(未設定)"
             by_business_type[bt] = by_business_type.get(bt, 0) + 1
 
-        summary_text = f"編集: {edits}件, 時間変更: {time_changes}件, スタッフ変更: {staff_changes}件, 日付変更: {date_changes}件, 追加: {additions}件, 削除: {deletions}件, イベント: {events}件"
+        summary_text = f"編集: {edits}件, 日付移動: {date_change_actions}件, 時間変更: {time_changes}件, スタッフ変更: {staff_changes}件, 日付変更: {date_changes}件, 追加: {additions}件, 削除: {deletions}件, イベント: {events}件"
 
         # correction_sheet JSONを文字列として含める
         correction_sheet_data = {
@@ -642,6 +653,7 @@ def api_diff():
                 "additions": additions,
                 "deletions": deletions,
                 "edits": edits,
+                "date_change_actions": date_change_actions,
                 "events": events,
                 "by_business_type": by_business_type,
             },
@@ -676,6 +688,7 @@ def api_diff():
                 "additions": additions,
                 "deletions": deletions,
                 "edits": edits,
+                "date_change_actions": date_change_actions,
                 "events": events,
                 "by_business_type": by_business_type,
                 "summary_text": summary_text,
