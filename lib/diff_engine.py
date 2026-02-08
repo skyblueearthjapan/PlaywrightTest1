@@ -25,7 +25,8 @@ class ScheduleEntry:
     user_name: str          # 利用者名
     date: str               # 日付（"1", "3" など）
     weekday: str            # 曜日
-    service_type: str       # サービス内容/業務種別
+    business_type: str      # 業務種別（"医療保険", "介護保険", or イベント名）
+    service_type: str       # サービス内容
     start_time: str         # 開始時間 (HH:MM)
     end_time: str           # 終了時間 (HH:MM)
     staff1_name: str        # 職員1名
@@ -37,12 +38,24 @@ class ScheduleEntry:
     remarks: str = ""       # 備考
 
     def get_key(self) -> str:
-        """利用者+日付+サービス種別でユニークキーを生成"""
-        return f"{self.user_name}|{self.date}|{self.service_type}"
+        """利用者+日付+業務種別+サービス種別でユニークキーを生成"""
+        return f"{self.user_name}|{self.date}|{self.business_type}|{self.service_type}"
 
     def get_time_key(self) -> str:
         """利用者+日付+開始時間でユニークキーを生成（時間変更の検出用）"""
         return f"{self.user_name}|{self.date}|{self.start_time}"
+
+    def is_medical_insurance(self) -> bool:
+        """医療保険かどうか"""
+        return self.business_type == "医療保険"
+
+    def is_nursing_insurance(self) -> bool:
+        """介護保険かどうか"""
+        return self.business_type == "介護保険"
+
+    def is_event(self) -> bool:
+        """イベント（業務種別が保険以外）かどうか"""
+        return self.business_type not in ("医療保険", "介護保険", "")
 
 
 @dataclass
@@ -60,7 +73,9 @@ class Correction:
     staff2_from: str        # 変更前の職員2
     staff2_to: str          # 変更後の職員2（削除の場合は空文字）
     service_type: str       # サービス内容
-    action: str             # "edit" or "delete" or "add"
+    action: str             # "edit" or "delete" or "add" or "date_change"
+    business_type: str = "" # 業務種別（"医療保険", "介護保険", or イベント名）
+    remarks: str = ""       # 備考（イベント名等）
 
     def has_date_change(self) -> bool:
         return self.date_from != self.date_to
@@ -72,6 +87,22 @@ class Correction:
     def has_staff_change(self) -> bool:
         return (self.staff1_from != self.staff1_to or
                 self.staff2_from != self.staff2_to)
+
+    def is_medical_insurance(self) -> bool:
+        """医療保険かどうか"""
+        return self.business_type == "医療保険"
+
+    def is_nursing_insurance(self) -> bool:
+        """介護保険かどうか"""
+        return self.business_type == "介護保険"
+
+    def is_event(self) -> bool:
+        """イベント（業務種別が保険以外）かどうか"""
+        return self.business_type not in ("医療保険", "介護保険", "")
+
+    def is_schedule(self) -> bool:
+        """通常のスケジュール（利用者別タブで操作）かどうか"""
+        return self.business_type in ("医療保険", "介護保険", "")
 
 
 def parse_time(time_str: str) -> tuple[int, int]:
@@ -157,6 +188,7 @@ def parse_kaipoke_csv(file_path: str) -> list[ScheduleEntry]:
                 user_name=row[11].strip(),
                 date=row[9].strip(),
                 weekday=row[10].strip(),
+                business_type=row[12].strip(),
                 service_type=row[13].strip(),
                 start_time=row[14].strip(),
                 end_time=row[15].strip(),
@@ -169,12 +201,14 @@ def parse_kaipoke_csv(file_path: str) -> list[ScheduleEntry]:
     if entries:
         e = entries[0]
         print(f"  [DEBUG]   先頭エントリ: 利用者='{e.user_name}', 日付='{e.date}', "
-              f"サービス='{e.service_type}', 時間='{e.start_time}-{e.end_time}', "
+              f"業務種別='{e.business_type}', サービス='{e.service_type}', "
+              f"時間='{e.start_time}-{e.end_time}', "
               f"職員1='{e.staff1_name}', 職員2='{e.staff2_name}'")
     if len(entries) > 1:
         e = entries[1]
         print(f"  [DEBUG]   2番目エントリ: 利用者='{e.user_name}', 日付='{e.date}', "
-              f"サービス='{e.service_type}', 時間='{e.start_time}-{e.end_time}', "
+              f"業務種別='{e.business_type}', サービス='{e.service_type}', "
+              f"時間='{e.start_time}-{e.end_time}', "
               f"職員1='{e.staff1_name}', 職員2='{e.staff2_name}'")
 
     return entries
@@ -212,6 +246,7 @@ def parse_optimized_csv(file_path: str) -> list[ScheduleEntry]:
                 user_name=row[0].strip(),
                 date=row[1].strip(),
                 weekday=row[2].strip() if len(row) > 2 else "",
+                business_type="",
                 service_type=row[3].strip() if len(row) > 3 else "",
                 start_time=row[4].strip() if len(row) > 4 else "",
                 end_time=row[5].strip() if len(row) > 5 else "",
@@ -343,6 +378,8 @@ def compare_schedules(
                     staff2_to=opt_entry.staff2_name,
                     service_type=opt_entry.service_type,
                     action="add",
+                    business_type=opt_entry.business_type,
+                    remarks=opt_entry.remarks,
                 ))
             continue
 
@@ -363,6 +400,8 @@ def compare_schedules(
                     staff2_to="",
                     service_type=cur_entry.service_type,
                     action="delete",
+                    business_type=cur_entry.business_type,
+                    remarks=cur_entry.remarks,
                 ))
             continue
 
@@ -418,6 +457,8 @@ def compare_schedules(
                                 staff2_to=opt_entry.staff2_name,
                                 service_type=cur_entry.service_type,
                                 action="edit",
+                                business_type=cur_entry.business_type,
+                                remarks=opt_entry.remarks,
                             ))
                         matched_current_local.add(cur_idx)
                         matched_optimized_local.add(opt_idx)
@@ -470,6 +511,8 @@ def compare_schedules(
                                 staff2_to=opt_entry.staff2_name,
                                 service_type=cur_entry.service_type,
                                 action="edit",
+                                business_type=cur_entry.business_type,
+                                remarks=opt_entry.remarks,
                             ))
                         matched_current_local.add(cur_idx)
                         matched_optimized_local.add(opt_idx)
@@ -514,6 +557,8 @@ def compare_schedules(
                             staff2_to=opt_entry.staff2_name,
                             service_type=cur_entry.service_type,
                             action="date_change",
+                            business_type=cur_entry.business_type,
+                            remarks=opt_entry.remarks,
                         ))
                         all_matched_current.add(cur_idx)
                         all_matched_optimized.add(opt_idx)
@@ -539,6 +584,8 @@ def compare_schedules(
                 staff2_to="",
                 service_type=cur_entry.service_type,
                 action="delete",
+                business_type=cur_entry.business_type,
+                remarks=cur_entry.remarks,
             ))
 
         # Pass 5: 追加の検出（optimizedにのみ存在するエントリ）
@@ -558,6 +605,8 @@ def compare_schedules(
                 staff2_to=opt_entry.staff2_name,
                 service_type=opt_entry.service_type,
                 action="add",
+                business_type=opt_entry.business_type,
+                remarks=opt_entry.remarks,
             ))
 
     print(f"\n  [DEBUG] ========== 比較結果サマリー ==========")
@@ -616,7 +665,8 @@ def generate_correction_sheet(
                 "終了時間(前)", "終了時間(後)",
                 "職員1(前)", "職員1(後)",
                 "職員2(前)", "職員2(後)",
-                "サービス内容", "アクション"
+                "サービス内容", "アクション",
+                "業務種別", "備考"
             ])
             for c in corrections:
                 writer.writerow([
@@ -625,8 +675,15 @@ def generate_correction_sheet(
                     c.end_time_from, c.end_time_to,
                     c.staff1_from, c.staff1_to,
                     c.staff2_from, c.staff2_to,
-                    c.service_type, c.action
+                    c.service_type, c.action,
+                    c.business_type, c.remarks
                 ])
+
+    # 業務種別ごとの集計
+    by_business_type = {}
+    for c in corrections:
+        bt = c.business_type or "(未設定)"
+        by_business_type[bt] = by_business_type.get(bt, 0) + 1
 
     print(f"修正シートを生成しました: {path}")
     print(f"  合計: {len(corrections)} 件")
@@ -635,6 +692,8 @@ def generate_correction_sheet(
     print(f"  日付変更: {sum(1 for c in corrections if c.has_date_change())} 件")
     print(f"  追加: {sum(1 for c in corrections if c.action == 'add')} 件")
     print(f"  削除: {sum(1 for c in corrections if c.action == 'delete')} 件")
+    for bt, count in sorted(by_business_type.items()):
+        print(f"  {bt}: {count} 件")
 
     return str(path)
 
@@ -794,10 +853,15 @@ def validate_correction_data(corrections: list[Correction]) -> dict:
                 item_errors.append("start_time_to が未設定です")
             if not c.end_time_to:
                 item_errors.append("end_time_to が未設定です")
-            if not c.staff1_to:
-                warnings.append(f"[{i}] {c.user_name} {c.date_to}日: 職員1が未設定です")
-            if not c.staff2_to:
-                warnings.append(f"[{i}] {c.user_name} {c.date_to}日: 職員2が未設定です（1人訪問）")
+            if not c.business_type:
+                warnings.append(f"[{i}] {c.user_name} {c.date_to}日: business_type が未設定です（デフォルト動作になります）")
+            if c.is_event() and not c.remarks:
+                warnings.append(f"[{i}] {c.user_name} {c.date_to}日: イベントですが備考（イベント名）が未設定です")
+            if not c.is_event():
+                if not c.staff1_to:
+                    warnings.append(f"[{i}] {c.user_name} {c.date_to}日: 職員1が未設定です")
+                if not c.staff2_to:
+                    warnings.append(f"[{i}] {c.user_name} {c.date_to}日: 職員2が未設定です（1人訪問）")
 
         elif c.action == "date_change":
             if not c.date_from:
@@ -834,6 +898,11 @@ def validate_correction_data(corrections: list[Correction]) -> dict:
         else:
             by_action[c.action]["valid"] += 1
 
+    by_business_type = {}
+    for c in corrections:
+        bt = c.business_type or "(未設定)"
+        by_business_type[bt] = by_business_type.get(bt, 0) + 1
+
     return {
         "valid": len(errors) == 0,
         "total_corrections": len(corrections),
@@ -841,6 +910,7 @@ def validate_correction_data(corrections: list[Correction]) -> dict:
         "errors": errors,
         "invalid_corrections": invalid_items,
         "by_action": by_action,
+        "by_business_type": by_business_type,
     }
 
 

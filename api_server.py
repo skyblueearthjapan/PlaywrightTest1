@@ -596,7 +596,13 @@ def api_diff():
         deletions = sum(1 for c in corrections if c.action == "delete")
         edits = sum(1 for c in corrections if c.action == "edit")
 
-        summary_text = f"編集: {edits}件, 時間変更: {time_changes}件, スタッフ変更: {staff_changes}件, 日付変更: {date_changes}件, 追加: {additions}件, 削除: {deletions}件"
+        events = sum(1 for c in corrections if c.is_event())
+        by_business_type = {}
+        for c in corrections:
+            bt = c.business_type or "(未設定)"
+            by_business_type[bt] = by_business_type.get(bt, 0) + 1
+
+        summary_text = f"編集: {edits}件, 時間変更: {time_changes}件, スタッフ変更: {staff_changes}件, 日付変更: {date_changes}件, 追加: {additions}件, 削除: {deletions}件, イベント: {events}件"
 
         # correction_sheet JSONを文字列として含める
         correction_sheet_data = {
@@ -608,6 +614,8 @@ def api_diff():
                 "additions": additions,
                 "deletions": deletions,
                 "edits": edits,
+                "events": events,
+                "by_business_type": by_business_type,
             },
             "corrections": [
                 {
@@ -624,6 +632,8 @@ def api_diff():
                     "staff2_to": c.staff2_to,
                     "service_type": c.service_type,
                     "action": c.action,
+                    "business_type": c.business_type,
+                    "remarks": c.remarks,
                 }
                 for c in corrections
             ],
@@ -638,6 +648,8 @@ def api_diff():
                 "additions": additions,
                 "deletions": deletions,
                 "edits": edits,
+                "events": events,
+                "by_business_type": by_business_type,
                 "summary_text": summary_text,
             },
             "corrections": correction_sheet_data["corrections"],

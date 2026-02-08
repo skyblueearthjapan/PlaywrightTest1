@@ -11,6 +11,10 @@
     python commands/auto_apply.py --sheet data/correction_sheet.json --month 2026-04
     python commands/auto_apply.py --sheet data/correction_sheet.json --month 2026-04 --dry-run  # テスト実行
     python commands/auto_apply.py --sheet data/correction_sheet.json --month 2026-04 --headed   # ブラウザ表示
+
+2フェーズ処理:
+    Phase 1: スケジュール修正（利用者別タブ） - 医療保険/介護保険の変更・追加・削除
+    Phase 2: イベント追加（職員別タブ） - 個別業務の新規登録
 """
 
 import sys
@@ -30,9 +34,44 @@ from lib.common import (
     save_artifacts,
     parse_month,
 )
-from lib.diff_engine import load_correction_sheet, Correction
+from lib.diff_engine import load_correction_sheet, Correction, parse_time
 from lib.stop_signal import is_stop_requested, clear_stop
 
+
+# =============================================================================
+# ヘルパー関数
+# =============================================================================
+
+def calculate_santei_time(start_time: str, end_time: str) -> str:
+    """
+    開始時間と終了時間から算定時間の選択値を計算（介護保険用）
+
+    カイポケの算定時間セレクトの選択肢:
+    - "20分未満"
+    - "30分未満"
+    - "30分以上～1時間未満"
+    - "1時間以上～1時間30分未満"
+    - "1時間30分以上"
+    """
+    sh, sm = parse_time(start_time)
+    eh, em = parse_time(end_time)
+    duration_minutes = (eh * 60 + em) - (sh * 60 + sm)
+
+    if duration_minutes < 20:
+        return "20分未満"
+    elif duration_minutes < 30:
+        return "30分未満"
+    elif duration_minutes < 60:
+        return "30分以上～1時間未満"
+    elif duration_minutes < 90:
+        return "1時間以上～1時間30分未満"
+    else:
+        return "1時間30分以上"
+
+
+# =============================================================================
+# 利用者選択・スケジュールエントリ操作
+# =============================================================================
 
 def select_user(page, user_name: str) -> bool:
     """
@@ -50,8 +89,6 @@ def select_user(page, user_name: str) -> bool:
     # 現在の画面に表示されている利用者を確認
     page_content = page.content()
     if user_name in page_content:
-        # すでに表示されている場合
-        # タイトルや利用者名表示エリアを確認
         title_elem = page.locator("h3, h2, .user-name, .patient-name").first
         if title_elem.is_visible():
             title_text = title_elem.text_content()
@@ -76,13 +113,11 @@ def select_user(page, user_name: str) -> bool:
     # 方法2: 「次へ」ボタンで移動
     max_attempts = 70  # 最大61件の利用者
     for i in range(max_attempts):
-        # 現在の利用者を確認
         page_content = page.content()
         if user_name in page_content:
             print(f"  {i+1}回目で発見: {user_name}")
             return True
 
-        # 次へボタンをクリック
         next_btn = page.locator("text=次へ").first
         if not next_btn.is_visible():
             break
@@ -96,27 +131,16 @@ def select_user(page, user_name: str) -> bool:
 def click_schedule_entry(page, day: int, start_time: str) -> bool:
     """
     指定した日付・開始時間のスケジュールエントリをクリック
-
-    Args:
-        page: Playwrightのページオブジェクト
-        day: 日付（1-31）
-        start_time: 開始時間（"HH:MM"）
-
-    Returns:
-        bool: 成功したかどうか
     """
     print(f"  予定をクリック: {day}日 {start_time}")
 
     try:
-        # テーブル行を探す
         rows = page.locator("table tr").all()
 
         for row in rows:
             try:
                 row_text = row.text_content()
-                # 日付と時間を含む行を探す
                 if str(day) in row_text and start_time in row_text:
-                    # リンクをクリック
                     link = row.locator("a").first
                     if link.is_visible():
                         link.click()
@@ -139,56 +163,40 @@ def click_schedule_entry(page, day: int, start_time: str) -> bool:
         return False
 
 
+# =============================================================================
+# 時間・日付・職員の編集
+# =============================================================================
+
 def edit_schedule_time(page, start_hour: int, start_min: int, end_hour: int, end_min: int) -> bool:
     """
-    スケジュールの時間を編集
+    スケジュールの時間を編集（6つのセレクト）
 
-    カイポケの編集ポップアップでは、時間は6つのセレクトで構成
+    セレクタ:
+    - #inPopupStartHour, #inPopupStartMinute1, #inPopupStartMinute2
+    - #inPopupEndHour, #inPopupEndMinute1, #inPopupEndMinute2
     """
     print(f"  時間変更: {start_hour:02d}:{start_min:02d} - {end_hour:02d}:{end_min:02d}")
 
     try:
-        # 分を十の位と一の位に分解
         start_min_tens = start_min // 10
         start_min_ones = start_min % 10
         end_min_tens = end_min // 10
         end_min_ones = end_min % 10
 
-        # 開始時
-        start_hour_select = page.locator("#inPopupStartHour")
-        if start_hour_select.is_visible():
-            start_hour_select.select_option(value=str(start_hour))
-            page.wait_for_timeout(200)
+        selectors_and_values = [
+            ("#inPopupStartHour", str(start_hour)),
+            ("#inPopupStartMinute1", str(start_min_tens)),
+            ("#inPopupStartMinute2", str(start_min_ones)),
+            ("#inPopupEndHour", str(end_hour)),
+            ("#inPopupEndMinute1", str(end_min_tens)),
+            ("#inPopupEndMinute2", str(end_min_ones)),
+        ]
 
-        # 開始分（十の位）
-        start_min1_select = page.locator("#inPopupStartMinute1")
-        if start_min1_select.is_visible():
-            start_min1_select.select_option(value=str(start_min_tens))
-            page.wait_for_timeout(200)
-
-        # 開始分（一の位）
-        start_min2_select = page.locator("#inPopupStartMinute2")
-        if start_min2_select.is_visible():
-            start_min2_select.select_option(value=str(start_min_ones))
-            page.wait_for_timeout(200)
-
-        # 終了時
-        end_hour_select = page.locator("#inPopupEndHour")
-        if end_hour_select.is_visible():
-            end_hour_select.select_option(value=str(end_hour))
-            page.wait_for_timeout(200)
-
-        # 終了分（十の位）
-        end_min1_select = page.locator("#inPopupEndMinute1")
-        if end_min1_select.is_visible():
-            end_min1_select.select_option(value=str(end_min_tens))
-            page.wait_for_timeout(200)
-
-        # 終了分（一の位）
-        end_min2_select = page.locator("#inPopupEndMinute2")
-        if end_min2_select.is_visible():
-            end_min2_select.select_option(value=str(end_min_ones))
-            page.wait_for_timeout(200)
+        for selector, value in selectors_and_values:
+            elem = page.locator(selector)
+            if elem.is_visible():
+                elem.select_option(value=value)
+                page.wait_for_timeout(200)
 
         return True
 
@@ -197,39 +205,111 @@ def edit_schedule_time(page, start_hour: int, start_min: int, end_hour: int, end
         return False
 
 
-def edit_staff(page, staff1_name: str, staff2_name: str = "") -> bool:
+def change_date(page, new_day: int) -> bool:
+    """
+    スケジュールの日付を変更
+    """
+    print(f"  日付変更: → {new_day}日")
+
+    try:
+        day_selectors = [
+            "#inPopupDay",
+            "select[name*='day']",
+            "select[name*='Day']",
+        ]
+
+        for selector in day_selectors:
+            day_select = page.locator(selector).first
+            if day_select.is_visible():
+                day_select.select_option(value=str(new_day))
+                page.wait_for_timeout(300)
+                print(f"    日付を {new_day} に変更")
+                return True
+
+        # セレクトが見つからない場合、すべてのセレクトを確認
+        all_selects = page.locator("select").all()
+        for select in all_selects:
+            try:
+                options = select.locator("option").all_text_contents()
+                if any(str(new_day) in opt for opt in options) and len(options) >= 28:
+                    select.select_option(value=str(new_day))
+                    page.wait_for_timeout(300)
+                    print(f"    日付を {new_day} に変更")
+                    return True
+            except Exception:
+                continue
+
+        print("    日付セレクトが見つかりません")
+        return False
+
+    except Exception as e:
+        print(f"    日付変更エラー: {e}")
+        return False
+
+
+def edit_staff(page, staff1_name: str, staff2_name: str = "",
+               for_new_entry: bool = False) -> bool:
     """
     職員を編集
+
+    PDF仕様セレクタ: select#chargeStaff1Id1, select#chargeStaff2Id1
+    新規追加時は「職員情報入力」ボタンを先にクリック
 
     Args:
         page: Playwrightのページオブジェクト
         staff1_name: 職員1名（空文字の場合は変更しない）
-        staff2_name: 職員2名（空文字の場合は削除）
-
-    Returns:
-        bool: 成功したかどうか
+        staff2_name: 職員2名（空文字の場合はクリア/未設定）
+        for_new_entry: 新規追加時はTrue（職員情報入力ボタンを押す）
     """
     try:
-        # 職員のセレクトを探す
-        all_selects = page.locator("select").all()
+        # 新規追加の場合、職員情報入力ボタンをクリック
+        if for_new_entry:
+            staff_info_btn = page.locator("input[value='職員情報入力']")
+            if staff_info_btn.is_visible(timeout=3000):
+                staff_info_btn.click()
+                page.wait_for_timeout(1000)
+                print("    「職員情報入力」ボタンをクリック")
 
-        # 職員2を空にする（削除）
-        if staff2_name == "":
-            for i, select in enumerate(all_selects):
-                try:
-                    selected_option = select.locator("option:checked")
-                    if selected_option.count() > 0:
-                        selected_text = selected_option.text_content()
-                        # 職員2として設定されているものを探す
-                        # 職員1以外で、名前が入っているもの
-                        if selected_text and staff1_name not in selected_text and selected_text != "-":
-                            # 空（最初のオプション）を選択
-                            select.select_option(index=0)
-                            page.wait_for_timeout(300)
-                            print(f"    職員2を削除: {selected_text}")
-                            return True
-                except Exception:
-                    continue
+        # 職員1を設定
+        if staff1_name:
+            staff1_select = page.locator("select#chargeStaff1Id1")
+            if staff1_select.is_visible(timeout=3000):
+                options = staff1_select.locator("option").all()
+                selected = False
+                for opt in options:
+                    opt_text = opt.text_content()
+                    if staff1_name in opt_text:
+                        staff1_select.select_option(label=opt_text)
+                        page.wait_for_timeout(300)
+                        print(f"    職員1設定: {staff1_name}")
+                        selected = True
+                        break
+                if not selected:
+                    print(f"    警告: 職員1 '{staff1_name}' が選択肢に見つかりません")
+            else:
+                print("    警告: select#chargeStaff1Id1 が見つかりません")
+
+        # 職員2を設定
+        staff2_select = page.locator("select#chargeStaff2Id1")
+        if staff2_select.is_visible(timeout=3000):
+            if staff2_name:
+                options = staff2_select.locator("option").all()
+                selected = False
+                for opt in options:
+                    opt_text = opt.text_content()
+                    if staff2_name in opt_text:
+                        staff2_select.select_option(label=opt_text)
+                        page.wait_for_timeout(300)
+                        print(f"    職員2設定: {staff2_name}")
+                        selected = True
+                        break
+                if not selected:
+                    print(f"    警告: 職員2 '{staff2_name}' が選択肢に見つかりません")
+            else:
+                # 職員2をクリア（最初のオプション = 空白）
+                staff2_select.select_option(index=0)
+                page.wait_for_timeout(300)
+                print("    職員2クリア")
 
         return True
 
@@ -238,29 +318,43 @@ def edit_staff(page, staff1_name: str, staff2_name: str = "") -> bool:
         return False
 
 
+# =============================================================================
+# 登録・削除・ダイアログ操作
+# =============================================================================
+
 def click_register_button(page) -> bool:
     """
-    「登録する」ボタンをクリック
+    「登録する」ボタンをクリック（input#btnRegisPop）
     """
     try:
-        register_button = page.locator("button:has-text('登録する'), a:has-text('登録する'), input[value='登録する']").first
-        if register_button.is_visible():
+        # Primary: PDF仕様のセレクタ
+        register_button = page.locator("input#btnRegisPop")
+        if register_button.is_visible(timeout=3000):
             register_button.click()
             page.wait_for_timeout(2000)
+        else:
+            # Fallback
+            register_button = page.locator(
+                "button:has-text('登録する'), a:has-text('登録する'), input[value='登録する']"
+            ).first
+            if register_button.is_visible():
+                register_button.click()
+                page.wait_for_timeout(2000)
+            else:
+                print("    登録ボタンが見つかりません")
+                return False
 
-            # 確認ダイアログ
-            try:
-                ok_btn = page.locator("button:has-text('OK'), button:has-text('はい')").first
-                if ok_btn.is_visible(timeout=2000):
-                    ok_btn.click()
-                    page.wait_for_timeout(1000)
-            except Exception:
-                pass
+        # 確認ダイアログ
+        try:
+            ok_btn = page.locator("button:has-text('OK'), button:has-text('はい')").first
+            if ok_btn.is_visible(timeout=2000):
+                ok_btn.click()
+                page.wait_for_timeout(1000)
+        except Exception:
+            pass
 
-            print("    登録完了")
-            return True
-
-        return False
+        print("    登録完了")
+        return True
 
     except Exception as e:
         print(f"    登録エラー: {e}")
@@ -289,73 +383,14 @@ def close_edit_dialog(page) -> bool:
         return False
 
 
-def change_date(page, new_day: int) -> bool:
-    """
-    スケジュールの日付を変更
-
-    Args:
-        page: Playwrightのページオブジェクト
-        new_day: 新しい日付（1-31）
-
-    Returns:
-        bool: 成功したかどうか
-    """
-    print(f"  日付変更: → {new_day}日")
-
-    try:
-        # 日付セレクトを探す（#inPopupDay または類似のID）
-        day_selectors = [
-            "#inPopupDay",
-            "select[name*='day']",
-            "select[name*='Day']",
-        ]
-
-        for selector in day_selectors:
-            day_select = page.locator(selector).first
-            if day_select.is_visible():
-                day_select.select_option(value=str(new_day))
-                page.wait_for_timeout(300)
-                print(f"    日付を {new_day} に変更")
-                return True
-
-        # セレクトが見つからない場合、すべてのセレクトを確認
-        all_selects = page.locator("select").all()
-        for select in all_selects:
-            try:
-                options = select.locator("option").all_text_contents()
-                # 1-31の日付を含むセレクトを探す
-                if any(str(new_day) in opt for opt in options) and len(options) >= 28:
-                    select.select_option(value=str(new_day))
-                    page.wait_for_timeout(300)
-                    print(f"    日付を {new_day} に変更")
-                    return True
-            except Exception:
-                continue
-
-        print("    日付セレクトが見つかりません")
-        return False
-
-    except Exception as e:
-        print(f"    日付変更エラー: {e}")
-        return False
-
-
 def delete_schedule_entry(page, day: int, start_time: str, dry_run: bool = False) -> bool:
     """
-    スケジュールエントリを削除
+    スケジュールエントリを削除（医療保険・介護保険共通）
 
-    Args:
-        page: Playwrightのページオブジェクト
-        day: 日付（1-31）
-        start_time: 開始時間（"HH:MM"）
-        dry_run: テスト実行
-
-    Returns:
-        bool: 成功したかどうか
+    PDF仕様: input#inPopupBtnDel
     """
     print(f"  削除: {day}日 {start_time}")
 
-    # 予定をクリックして編集画面を開く
     if not click_schedule_entry(page, day, start_time):
         print("    予定が見つかりません")
         return False
@@ -366,91 +401,231 @@ def delete_schedule_entry(page, day: int, start_time: str, dry_run: bool = False
         return True
 
     try:
-        # 削除ボタンを探す
-        delete_buttons = [
-            "button:has-text('削除')",
-            "a:has-text('削除')",
-            "input[value='削除']",
-            "button:has-text('予定を削除')",
-        ]
-
-        for selector in delete_buttons:
-            btn = page.locator(selector).first
-            if btn.is_visible():
-                btn.click()
+        # Primary: PDF仕様の削除ボタン
+        delete_btn = page.locator("input#inPopupBtnDel")
+        if delete_btn.is_visible(timeout=3000):
+            delete_btn.click()
+            page.wait_for_timeout(1000)
+        else:
+            # Fallback
+            delete_btn = page.locator(
+                "button:has-text('削除'), a:has-text('削除'), input[value*='削除']"
+            ).first
+            if delete_btn.is_visible():
+                delete_btn.click()
                 page.wait_for_timeout(1000)
+            else:
+                print("    削除ボタンが見つかりません")
+                close_edit_dialog(page)
+                return False
 
-                # 確認ダイアログ
-                try:
-                    ok_btn = page.locator("button:has-text('OK'), button:has-text('はい'), button:has-text('削除する')").first
-                    if ok_btn.is_visible(timeout=2000):
-                        ok_btn.click()
-                        page.wait_for_timeout(1000)
-                except Exception:
-                    pass
+        # 確認ダイアログ
+        try:
+            ok_btn = page.locator(
+                "button:has-text('OK'), button:has-text('はい'), button:has-text('削除する')"
+            ).first
+            if ok_btn.is_visible(timeout=2000):
+                ok_btn.click()
+                page.wait_for_timeout(1000)
+        except Exception:
+            pass
 
-                print("    削除完了")
-                return True
-
-        print("    削除ボタンが見つかりません")
-        close_edit_dialog(page)
-        return False
+        print("    削除完了")
+        return True
 
     except Exception as e:
         print(f"    削除エラー: {e}")
         return False
 
 
-def add_schedule_entry(page, day: int, start_time: str, end_time: str,
-                       staff1: str, staff2: str, service_type: str,
-                       dry_run: bool = False) -> bool:
+# =============================================================================
+# 新規追加: 保険種別フォーム入力
+# =============================================================================
+
+def click_new_add_button(page) -> bool:
+    """「新規追加」ボタンをクリック"""
+    add_buttons = [
+        "text=新規追加",
+        "button:has-text('追加')",
+        "a:has-text('追加')",
+        "button:has-text('新規登録')",
+    ]
+    for selector in add_buttons:
+        btn = page.locator(selector).first
+        if btn.is_visible(timeout=2000):
+            btn.click()
+            page.wait_for_timeout(2000)
+            return True
+    print("    新規追加ボタンが見つかりません")
+    return False
+
+
+def fill_medical_insurance_fields(page) -> bool:
     """
-    新しいスケジュールエントリを追加
+    医療保険の新規追加: 上部セクションのフィールドを設定
+
+    PDF「02_新規追加・医療保険」仕様:
+    - 保険区分: radio#inPopupInsuranceDivision02 (医療保険)
+    - サービス区分: select#inPopupEstimate1 → "精神科訪問看護"
+    - 基本療養費: select#inPopupEstimate2 → "Ⅰ"
+    - 職員資格: select#inPopupEstimate3 → "看護師等"
+    """
+    try:
+        # 保険区分: 医療保険を選択
+        medical_radio = page.locator("input#inPopupInsuranceDivision02")
+        if medical_radio.is_visible(timeout=3000):
+            medical_radio.click()
+            page.wait_for_timeout(1000)
+            print("    保険区分: 医療保険 を選択")
+        else:
+            print("    警告: radio#inPopupInsuranceDivision02 が見つかりません")
+            return False
+
+        # サービス区分: 精神科訪問看護
+        estimate1 = page.locator("select#inPopupEstimate1")
+        if estimate1.is_visible(timeout=3000):
+            options = estimate1.locator("option").all()
+            for opt in options:
+                if "精神科訪問看護" in opt.text_content():
+                    estimate1.select_option(label=opt.text_content())
+                    page.wait_for_timeout(500)
+                    print(f"    サービス区分: {opt.text_content()}")
+                    break
+
+        # 基本療養費: Ⅰ
+        estimate2 = page.locator("select#inPopupEstimate2")
+        if estimate2.is_visible(timeout=3000):
+            options = estimate2.locator("option").all()
+            for opt in options:
+                text = opt.text_content()
+                if "Ⅰ" in text and "Ⅱ" not in text and "Ⅲ" not in text and "Ⅳ" not in text:
+                    estimate2.select_option(label=text)
+                    page.wait_for_timeout(500)
+                    print(f"    基本療養費: {text}")
+                    break
+
+        # 職員資格: 看護師等
+        estimate3 = page.locator("select#inPopupEstimate3")
+        if estimate3.is_visible(timeout=3000):
+            options = estimate3.locator("option").all()
+            for opt in options:
+                if "看護師等" in opt.text_content():
+                    estimate3.select_option(label=opt.text_content())
+                    page.wait_for_timeout(500)
+                    print(f"    職員資格: {opt.text_content()}")
+                    break
+
+        return True
+
+    except Exception as e:
+        print(f"    医療保険フィールド設定エラー: {e}")
+        return False
+
+
+def fill_nursing_insurance_fields(page, start_time: str, end_time: str) -> bool:
+    """
+    介護保険の新規追加: 上部セクションのフィールドを設定
+
+    PDF「05_新規追加・介護保険」仕様:
+    - 保険区分: radio#inPopupInsuranceDivision01 (介護保険, デフォルト)
+    - サービス種類: select#inPopupServiceKindId → "訪問看護"
+    - サービス区分: select#inPopupEstimate1 → "通常の算定"
+    - 算定時間: select#inPopupEstimate4 → 時間から計算
+    - サービス内容: auto-populates (read-only)
+    """
+    try:
+        # 保険区分: 介護保険（デフォルトのはずだが念のため）
+        nursing_radio = page.locator("input#inPopupInsuranceDivision01")
+        if nursing_radio.is_visible(timeout=3000):
+            nursing_radio.click()
+            page.wait_for_timeout(1000)
+            print("    保険区分: 介護保険 を選択")
+
+        # サービス種類: 訪問看護
+        service_kind = page.locator("select#inPopupServiceKindId")
+        if service_kind.is_visible(timeout=3000):
+            options = service_kind.locator("option").all()
+            for opt in options:
+                text = opt.text_content()
+                # "訪問看護" にマッチ（"介護予防訪問看護" も可能だが通常は "訪問看護"）
+                if "訪問看護" in text and "予防" not in text:
+                    service_kind.select_option(label=text)
+                    page.wait_for_timeout(500)
+                    print(f"    サービス種類: {text}")
+                    break
+
+        # サービス区分: 通常の算定
+        estimate1 = page.locator("select#inPopupEstimate1")
+        if estimate1.is_visible(timeout=3000):
+            options = estimate1.locator("option").all()
+            for opt in options:
+                if "通常の算定" in opt.text_content():
+                    estimate1.select_option(label=opt.text_content())
+                    page.wait_for_timeout(500)
+                    print(f"    サービス区分: {opt.text_content()}")
+                    break
+
+        # 算定時間: 開始・終了時間から計算
+        santei_time = calculate_santei_time(start_time, end_time)
+        estimate4 = page.locator("select#inPopupEstimate4")
+        if estimate4.is_visible(timeout=3000):
+            options = estimate4.locator("option").all()
+            for opt in options:
+                if santei_time in opt.text_content():
+                    estimate4.select_option(label=opt.text_content())
+                    page.wait_for_timeout(500)
+                    print(f"    算定時間: {opt.text_content()}")
+                    break
+
+        return True
+
+    except Exception as e:
+        print(f"    介護保険フィールド設定エラー: {e}")
+        return False
+
+
+def add_schedule_entry(page, correction: Correction, dry_run: bool = False) -> bool:
+    """
+    新しいスケジュールエントリを追加（保険種別による分岐あり）
 
     Args:
         page: Playwrightのページオブジェクト
-        day: 日付（1-31）
-        start_time: 開始時間（"HH:MM"）
-        end_time: 終了時間（"HH:MM"）
-        staff1: 職員1名
-        staff2: 職員2名
-        service_type: サービス内容
+        correction: 修正データ（business_type で分岐）
         dry_run: テスト実行
-
-    Returns:
-        bool: 成功したかどうか
     """
-    print(f"  追加: {day}日 {start_time}-{end_time}")
+    day = int(correction.date_to) if correction.date_to.isdigit() else 1
+    print(f"  追加: {day}日 {correction.start_time_to}-{correction.end_time_to} "
+          f"(業務種別: {correction.business_type})")
 
     try:
-        # 「追加」または「新規登録」ボタンを探す
-        add_buttons = [
-            "button:has-text('追加')",
-            "a:has-text('追加')",
-            "button:has-text('新規登録')",
-            "a:has-text('新規登録')",
-            "button:has-text('予定を追加')",
-        ]
-
-        clicked = False
-        for selector in add_buttons:
-            btn = page.locator(selector).first
-            if btn.is_visible():
-                btn.click()
-                page.wait_for_timeout(2000)
-                clicked = True
-                break
-
-        if not clicked:
-            print("    追加ボタンが見つかりません")
+        # Step 1: 新規追加ボタンをクリック
+        if not click_new_add_button(page):
             return False
 
-        # 日付を設定
+        # Step 2: 保険種別に応じた上部フィールド設定
+        if correction.is_medical_insurance():
+            if not fill_medical_insurance_fields(page):
+                close_edit_dialog(page)
+                return False
+        elif correction.is_nursing_insurance():
+            if not fill_nursing_insurance_fields(
+                page, correction.start_time_to, correction.end_time_to
+            ):
+                close_edit_dialog(page)
+                return False
+        else:
+            # business_type が空 or 不明 → 医療保険をデフォルトとする
+            print(f"    警告: 業務種別 '{correction.business_type}' が不明です。医療保険として処理します。")
+            if not fill_medical_insurance_fields(page):
+                close_edit_dialog(page)
+                return False
+
+        # Step 3: 日付を設定
         change_date(page, day)
 
-        # 時間を設定
-        start_parts = start_time.split(":")
-        end_parts = end_time.split(":")
+        # Step 4: 時間を設定
+        start_parts = correction.start_time_to.split(":")
+        end_parts = correction.end_time_to.split(":")
         if len(start_parts) >= 2 and len(end_parts) >= 2:
             edit_schedule_time(
                 page,
@@ -458,8 +633,15 @@ def add_schedule_entry(page, day: int, start_time: str, end_time: str,
                 int(end_parts[0]), int(end_parts[1])
             )
 
-        # 職員を設定（TODO: 実装が必要）
+        # Step 5: 職員を設定（新規追加なので for_new_entry=True）
+        edit_staff(
+            page,
+            correction.staff1_to,
+            correction.staff2_to,
+            for_new_entry=True
+        )
 
+        # Step 6: 登録
         if dry_run:
             print("  [dry-run] 登録をスキップ")
             close_edit_dialog(page)
@@ -472,49 +654,209 @@ def add_schedule_entry(page, day: int, start_time: str, end_time: str,
         return False
 
 
+# =============================================================================
+# イベント作成（職員別タブ）
+# =============================================================================
+
+def navigate_to_staff_tab(page) -> bool:
+    """職員別タブに遷移"""
+    try:
+        staff_tab = page.locator("text=職員別").first
+        if staff_tab.is_visible(timeout=3000):
+            staff_tab.click()
+            page.wait_for_timeout(2000)
+            print("  職員別タブに遷移しました")
+            return True
+        print("  職員別タブが見つかりません")
+        return False
+    except Exception as e:
+        print(f"  職員別タブ遷移エラー: {e}")
+        return False
+
+
+def navigate_to_user_tab(page) -> bool:
+    """利用者別タブに戻る"""
+    try:
+        user_tab = page.locator("text=利用者別").first
+        if user_tab.is_visible(timeout=3000):
+            user_tab.click()
+            page.wait_for_timeout(2000)
+            print("  利用者別タブに遷移しました")
+            return True
+        print("  利用者別タブが見つかりません")
+        return False
+    except Exception as e:
+        print(f"  利用者別タブ遷移エラー: {e}")
+        return False
+
+
+def select_staff_member(page, staff_name: str) -> bool:
+    """
+    職員別タブで職員を選択
+
+    PDF仕様: select#staffMemberInternalId
+    """
+    try:
+        staff_select = page.locator("select#staffMemberInternalId")
+        if staff_select.is_visible(timeout=3000):
+            options = staff_select.locator("option").all()
+            for opt in options:
+                opt_text = opt.text_content()
+                if staff_name in opt_text:
+                    staff_select.select_option(label=opt_text)
+                    page.wait_for_timeout(1500)
+                    print(f"  職員を選択: {staff_name}")
+                    return True
+        # Fallback: 「次へ」「前へ」ボタンで移動
+        nav_buttons = page.locator("text=▸▸, text=次へ")
+        for i in range(70):
+            page_text = page.content()
+            if staff_name in page_text:
+                print(f"  {i+1}回目で職員を発見: {staff_name}")
+                return True
+            btn = nav_buttons.first
+            if btn.is_visible():
+                btn.click()
+                page.wait_for_timeout(1500)
+            else:
+                break
+        print(f"  職員が見つかりません: {staff_name}")
+        return False
+    except Exception as e:
+        print(f"  職員選択エラー: {e}")
+        return False
+
+
+def add_event_entry(page, correction: Correction, dry_run: bool = False) -> bool:
+    """
+    イベント（個別業務）を新規登録
+
+    PDF「07_イベントリクエストの作成」仕様:
+    - button#individualMonthlyShiftAssignPopup → 個別業務の新規登録
+    - input[name="popupSelectedIndividual"] → 新しく登録する
+    - input#popupIndividualName → イベント名（備考欄の値）
+    - 時間・日付設定
+    - button#popupIndividualButtonAdd → 登録
+    """
+    day = int(correction.date_to) if correction.date_to.isdigit() else 1
+    event_name = correction.remarks or correction.business_type
+    print(f"  イベント追加: {day}日 {correction.start_time_to}-{correction.end_time_to} "
+          f"イベント名: '{event_name}'")
+
+    try:
+        # Step 1: 「個別業務の新規登録」ボタンをクリック
+        new_event_btn = page.locator("button#individualMonthlyShiftAssignPopup")
+        if not new_event_btn.is_visible(timeout=3000):
+            # Fallback
+            new_event_btn = page.locator("text=個別業務の新規登録").first
+            if not new_event_btn.is_visible(timeout=2000):
+                print("    「個別業務の新規登録」ボタンが見つかりません")
+                return False
+        new_event_btn.click()
+        page.wait_for_timeout(2000)
+
+        # Step 2: 「新しく登録する」ラジオを選択
+        new_register_radio = page.locator("input[name='popupSelectedIndividual']").first
+        if new_register_radio.is_visible(timeout=3000):
+            new_register_radio.click()
+            page.wait_for_timeout(500)
+            print("    「新しく登録する」を選択")
+
+        # Step 3: イベント名を入力
+        event_name_input = page.locator("input#popupIndividualName")
+        if event_name_input.is_visible(timeout=3000):
+            event_name_input.fill(event_name)
+            page.wait_for_timeout(300)
+            print(f"    イベント名入力: {event_name}")
+
+        # Step 4: 時間を設定
+        start_parts = correction.start_time_to.split(":")
+        end_parts = correction.end_time_to.split(":")
+        if len(start_parts) >= 2 and len(end_parts) >= 2:
+            edit_schedule_time(
+                page,
+                int(start_parts[0]), int(start_parts[1]),
+                int(end_parts[0]), int(end_parts[1])
+            )
+
+        # Step 5: 日付を設定
+        change_date(page, day)
+
+        # Step 6: 登録
+        if dry_run:
+            print("  [dry-run] イベント登録をスキップ")
+            close_edit_dialog(page)
+            return True
+
+        # イベント用の登録ボタン: button#popupIndividualButtonAdd
+        add_btn = page.locator("button#popupIndividualButtonAdd")
+        if not add_btn.is_visible(timeout=3000):
+            add_btn = page.locator("text=登録する").first
+        if add_btn.is_visible():
+            add_btn.click()
+            page.wait_for_timeout(2000)
+
+            # 確認ダイアログ
+            try:
+                ok_btn = page.locator("button:has-text('OK'), button:has-text('はい')").first
+                if ok_btn.is_visible(timeout=2000):
+                    ok_btn.click()
+                    page.wait_for_timeout(1000)
+            except Exception:
+                pass
+
+            print("    イベント登録完了")
+            return True
+        else:
+            print("    イベント登録ボタンが見つかりません")
+            return False
+
+    except Exception as e:
+        print(f"    イベント追加エラー: {e}")
+        return False
+
+
+# =============================================================================
+# 修正適用のルーティング
+# =============================================================================
+
 def apply_correction(page, correction: Correction, dry_run: bool = False) -> bool:
     """
-    1件の修正を適用
+    1件の修正を適用（スケジュール系のみ。イベントは別フロー）
 
     Args:
         page: Playwrightのページオブジェクト
         correction: 修正データ
-        dry_run: テスト実行（実際には保存しない）
-
-    Returns:
-        bool: 成功したかどうか
+        dry_run: テスト実行
     """
     action = correction.action
+    biz_type = correction.business_type or "(不明)"
 
-    # アクションタイプごとに処理を分岐
     if action == "delete":
-        print(f"\n=== 削除: {correction.user_name} {correction.date_from}日 ===")
+        # 削除は医療保険・介護保険で操作が完全に同じ
+        print(f"\n=== 削除: {correction.user_name} {correction.date_from}日 [{biz_type}] ===")
         day = int(correction.date_from) if correction.date_from.isdigit() else 1
         return delete_schedule_entry(page, day, correction.start_time_from, dry_run)
 
     elif action == "add":
-        print(f"\n=== 追加: {correction.user_name} {correction.date_to}日 ===")
-        day = int(correction.date_to) if correction.date_to.isdigit() else 1
-        return add_schedule_entry(
-            page, day,
-            correction.start_time_to, correction.end_time_to,
-            correction.staff1_to, correction.staff2_to,
-            correction.service_type, dry_run
-        )
+        print(f"\n=== 追加: {correction.user_name} {correction.date_to}日 [{biz_type}] ===")
+        if correction.is_event():
+            # イベントは apply_correction からは呼ばれない（Phase 2で処理）
+            print("    警告: イベントは apply_correction 経由ではなく、Phase 2で処理してください")
+            return False
+        return add_schedule_entry(page, correction, dry_run)
 
     elif action == "date_change":
-        print(f"\n=== 日付変更: {correction.user_name} {correction.date_from}日 → {correction.date_to}日 ===")
-        # 既存エントリを開く
+        print(f"\n=== 日付変更: {correction.user_name} "
+              f"{correction.date_from}日 → {correction.date_to}日 [{biz_type}] ===")
         day = int(correction.date_from) if correction.date_from.isdigit() else 1
         if not click_schedule_entry(page, day, correction.start_time_from):
             print("  予定が見つかりません")
             return False
 
-        # 日付を変更
         new_day = int(correction.date_to) if correction.date_to.isdigit() else 1
         change_date(page, new_day)
 
-        # 時間変更があれば適用
         if correction.has_time_change():
             start_parts = correction.start_time_to.split(":")
             end_parts = correction.end_time_to.split(":")
@@ -525,7 +867,6 @@ def apply_correction(page, correction: Correction, dry_run: bool = False) -> boo
                     int(end_parts[0]), int(end_parts[1])
                 )
 
-        # 職員変更があれば適用
         if correction.has_staff_change():
             edit_staff(page, correction.staff1_to, correction.staff2_to)
 
@@ -537,31 +878,26 @@ def apply_correction(page, correction: Correction, dry_run: bool = False) -> boo
             return click_register_button(page)
 
     else:  # edit
-        print(f"\n=== 修正適用: {correction.user_name} {correction.date_from}日 ===")
-
-        # 予定をクリックして編集画面を開く
+        # 変更は医療保険・介護保険共通（上部フィールドはREAD-ONLY）
+        print(f"\n=== 変更: {correction.user_name} {correction.date_from}日 [{biz_type}] ===")
         day = int(correction.date_from) if correction.date_from.isdigit() else 1
         if not click_schedule_entry(page, day, correction.start_time_from):
             print("  予定が見つかりません")
             return False
 
-        # 時間変更
         if correction.has_time_change():
-            # 時間をパース
             start_parts = correction.start_time_to.split(":")
             end_parts = correction.end_time_to.split(":")
             if len(start_parts) >= 2 and len(end_parts) >= 2:
-                start_hour = int(start_parts[0])
-                start_min = int(start_parts[1])
-                end_hour = int(end_parts[0])
-                end_min = int(end_parts[1])
-                edit_schedule_time(page, start_hour, start_min, end_hour, end_min)
+                edit_schedule_time(
+                    page,
+                    int(start_parts[0]), int(start_parts[1]),
+                    int(end_parts[0]), int(end_parts[1])
+                )
 
-        # 職員変更
         if correction.has_staff_change():
             edit_staff(page, correction.staff1_to, correction.staff2_to)
 
-        # 登録
         if dry_run:
             print("  [dry-run] 登録をスキップ")
             close_edit_dialog(page)
@@ -569,6 +905,10 @@ def apply_correction(page, correction: Correction, dry_run: bool = False) -> boo
         else:
             return click_register_button(page)
 
+
+# =============================================================================
+# メインエンジン: 2フェーズ処理
+# =============================================================================
 
 def run_auto_apply(
     correction_sheet: str,
@@ -579,6 +919,10 @@ def run_auto_apply(
 ) -> dict:
     """
     修正シートに基づいてスケジュールを自動適用
+
+    2フェーズ処理:
+      Phase 1: スケジュール修正（利用者別タブ） - 利用者ごとにグループ化
+      Phase 2: イベント追加（職員別タブ） - 職員ごとにグループ化
 
     Args:
         correction_sheet: 修正シートのパス（JSON）
@@ -598,15 +942,23 @@ def run_auto_apply(
     if limit:
         corrections = corrections[:limit]
 
+    # Phase分離: スケジュール系 vs イベント系
+    schedule_corrections = [c for c in corrections if c.is_schedule()]
+    event_corrections = [c for c in corrections if c.is_event() and c.action == "add"]
+
     print(f"\n=== 自動適用開始 ===")
     print(f"修正シート: {correction_sheet}")
     print(f"対象月: {month}")
-    print(f"修正件数: {len(corrections)}")
+    print(f"総修正件数: {len(corrections)}")
+    print(f"  スケジュール修正: {len(schedule_corrections)}件 (利用者別タブ)")
+    print(f"  イベント追加: {len(event_corrections)}件 (職員別タブ)")
     print(f"dry-run: {dry_run}")
     print("")
 
     result = {
         "total": len(corrections),
+        "schedule_total": len(schedule_corrections),
+        "event_total": len(event_corrections),
         "success": 0,
         "failed": 0,
         "skipped": 0,
@@ -617,19 +969,18 @@ def run_auto_apply(
         browser, context, page = create_browser_context(p, headless=headless)
 
         try:
-            # ログイン
+            # ログイン & ナビゲーション
             login(page, save_state=True, context=context)
             page.wait_for_timeout(1000)
             dismiss_popup(page)
 
-            # ナビゲーション
             goto_receipt(page)
             goto_yoriyori(page)
             goto_monthly_schedule(page)
             set_service_month(page, month)
             page.wait_for_timeout(1000)
 
-            # 安全確認: 月が正しく設定されたか検証
+            # 月の検証
             from lib.common import to_reiwa
             target_year, target_month_num = parse_month(month)
             target_reiwa = to_reiwa(target_year)
@@ -658,68 +1009,177 @@ def run_auto_apply(
 
             print(f"月の検証OK: {actual_month or expected_month_text}")
 
-            # 利用者ごとにグループ化
-            users = {}
-            for c in corrections:
-                if c.user_name not in users:
-                    users[c.user_name] = []
-                users[c.user_name].append(c)
+            # ========================================
+            # Phase 1: スケジュール修正（利用者別タブ）
+            # ========================================
+            if schedule_corrections:
+                print(f"\n{'='*50}")
+                print(f"Phase 1: スケジュール修正 ({len(schedule_corrections)}件)")
+                print(f"{'='*50}")
 
-            # 利用者ごとに処理
-            for user_name, user_corrections in users.items():
-                # 非常停止チェック
-                if is_stop_requested():
-                    print(f"\n非常停止が要求されました！処理を中断します。")
-                    result["stopped"] = True
-                    break
+                # 利用者ごとにグループ化
+                users = {}
+                for c in schedule_corrections:
+                    if c.user_name not in users:
+                        users[c.user_name] = []
+                    users[c.user_name].append(c)
 
-                print(f"\n--- 利用者: {user_name} ({len(user_corrections)}件) ---")
+                for user_name, user_corrections in users.items():
+                    if is_stop_requested():
+                        print(f"\n非常停止が要求されました！Phase 1を中断します。")
+                        result["stopped"] = True
+                        break
 
-                # 利用者を選択
-                if not select_user(page, user_name):
-                    print(f"  利用者の選択に失敗: {user_name}")
-                    for c in user_corrections:
-                        result["skipped"] += 1
-                        result["details"].append({
-                            "user": user_name,
-                            "date": c.date_from,
-                            "status": "skipped",
-                            "reason": "user_not_found",
-                        })
-                    continue
+                    print(f"\n--- 利用者: {user_name} ({len(user_corrections)}件) ---")
 
-                # 各修正を適用
-                for correction in user_corrections:
-                    try:
-                        success = apply_correction(page, correction, dry_run)
-                        if success:
-                            result["success"] += 1
+                    if not select_user(page, user_name):
+                        print(f"  利用者の選択に失敗: {user_name}")
+                        for c in user_corrections:
+                            result["skipped"] += 1
                             result["details"].append({
                                 "user": user_name,
-                                "date": correction.date_from,
-                                "status": "success",
+                                "date": c.date_from or c.date_to,
+                                "action": c.action,
+                                "business_type": c.business_type,
+                                "status": "skipped",
+                                "reason": "user_not_found",
                             })
-                        else:
+                        continue
+
+                    for correction in user_corrections:
+                        if is_stop_requested():
+                            result["stopped"] = True
+                            break
+
+                        try:
+                            success = apply_correction(page, correction, dry_run)
+                            if success:
+                                result["success"] += 1
+                                result["details"].append({
+                                    "user": user_name,
+                                    "date": correction.date_from or correction.date_to,
+                                    "action": correction.action,
+                                    "business_type": correction.business_type,
+                                    "status": "success",
+                                })
+                            else:
+                                result["failed"] += 1
+                                result["details"].append({
+                                    "user": user_name,
+                                    "date": correction.date_from or correction.date_to,
+                                    "action": correction.action,
+                                    "business_type": correction.business_type,
+                                    "status": "failed",
+                                })
+                        except Exception as e:
+                            print(f"  エラー: {e}")
                             result["failed"] += 1
                             result["details"].append({
                                 "user": user_name,
-                                "date": correction.date_from,
-                                "status": "failed",
+                                "date": correction.date_from or correction.date_to,
+                                "action": correction.action,
+                                "business_type": correction.business_type,
+                                "status": "error",
+                                "reason": str(e),
                             })
-                    except Exception as e:
-                        print(f"  エラー: {e}")
-                        result["failed"] += 1
-                        result["details"].append({
-                            "user": user_name,
-                            "date": correction.date_from,
-                            "status": "error",
-                            "reason": str(e),
-                        })
 
-                    page.wait_for_timeout(1000)
+                        page.wait_for_timeout(1000)
+
+            # ========================================
+            # Phase 2: イベント追加（職員別タブ）
+            # ========================================
+            if event_corrections and not result.get("stopped"):
+                print(f"\n{'='*50}")
+                print(f"Phase 2: イベント追加 ({len(event_corrections)}件)")
+                print(f"{'='*50}")
+
+                # 職員別タブに遷移
+                if not navigate_to_staff_tab(page):
+                    print("  職員別タブへの遷移に失敗。イベント追加をスキップします。")
+                    for c in event_corrections:
+                        result["skipped"] += 1
+                        result["details"].append({
+                            "staff": c.staff1_to,
+                            "date": c.date_to,
+                            "action": "event_add",
+                            "business_type": c.business_type,
+                            "status": "skipped",
+                            "reason": "staff_tab_navigation_failed",
+                        })
+                else:
+                    # 職員ごとにグループ化
+                    staff_groups = {}
+                    for c in event_corrections:
+                        staff_key = c.staff1_to
+                        if staff_key not in staff_groups:
+                            staff_groups[staff_key] = []
+                        staff_groups[staff_key].append(c)
+
+                    for staff_name, staff_corrections in staff_groups.items():
+                        if is_stop_requested():
+                            print(f"\n非常停止が要求されました！Phase 2を中断します。")
+                            result["stopped"] = True
+                            break
+
+                        print(f"\n--- 職員: {staff_name} ({len(staff_corrections)}件) ---")
+
+                        if not select_staff_member(page, staff_name):
+                            print(f"  職員の選択に失敗: {staff_name}")
+                            for c in staff_corrections:
+                                result["skipped"] += 1
+                                result["details"].append({
+                                    "staff": staff_name,
+                                    "date": c.date_to,
+                                    "action": "event_add",
+                                    "business_type": c.business_type,
+                                    "status": "skipped",
+                                    "reason": "staff_not_found",
+                                })
+                            continue
+
+                        for correction in staff_corrections:
+                            if is_stop_requested():
+                                result["stopped"] = True
+                                break
+
+                            try:
+                                success = add_event_entry(page, correction, dry_run)
+                                if success:
+                                    result["success"] += 1
+                                    result["details"].append({
+                                        "staff": staff_name,
+                                        "date": correction.date_to,
+                                        "action": "event_add",
+                                        "business_type": correction.business_type,
+                                        "event_name": correction.remarks,
+                                        "status": "success",
+                                    })
+                                else:
+                                    result["failed"] += 1
+                                    result["details"].append({
+                                        "staff": staff_name,
+                                        "date": correction.date_to,
+                                        "action": "event_add",
+                                        "business_type": correction.business_type,
+                                        "status": "failed",
+                                    })
+                            except Exception as e:
+                                print(f"  エラー: {e}")
+                                result["failed"] += 1
+                                result["details"].append({
+                                    "staff": staff_name,
+                                    "date": correction.date_to,
+                                    "action": "event_add",
+                                    "business_type": correction.business_type,
+                                    "status": "error",
+                                    "reason": str(e),
+                                })
+
+                            page.wait_for_timeout(1000)
 
             print(f"\n=== 自動適用完了 ===")
-            print(f"成功: {result['success']} / 失敗: {result['failed']} / スキップ: {result['skipped']} / 合計: {result['total']}")
+            print(f"成功: {result['success']} / 失敗: {result['failed']} / "
+                  f"スキップ: {result['skipped']} / 合計: {result['total']}")
 
         except Exception as e:
             print(f"エラーが発生しました: {e}")
