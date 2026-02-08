@@ -366,38 +366,70 @@ def edit_schedule_time(page, start_hour: int, start_min: int, end_hour: int, end
 def change_date(page, new_day: int) -> bool:
     """
     スケジュールの日付を変更
+
+    カイポケの編集ポップアップでは、日付選択は jQuery UI Datepicker
+    (#simple-select-days-range.hasMultiDatepicker) で実装されている。
+    <select> ではなく、カレンダーグリッド内の日付セル(td)をクリックする。
+
+    Strategy 1: jQuery UI Datepicker のカレンダーセルをクリック
+    Strategy 2: <select> タグからの選択（フォールバック）
     """
     print(f"  日付変更: → {new_day}日")
+    day_str = str(new_day)
 
     try:
+        # Strategy 1: jQuery UI Datepicker（実際のカイポケの構造）
+        datepicker = page.locator("#simple-select-days-range, .hasMultiDatepicker, .ui-datepicker").first
+        if datepicker.is_visible(timeout=2000):
+            # デートピッカー内の全tdからday_strに完全一致するセルを探す
+            day_cells = datepicker.locator("td[data-handler] a, td a").all()
+            for cell in day_cells:
+                try:
+                    cell_text = cell.text_content().strip()
+                    if cell_text == day_str:
+                        cell.click()
+                        page.wait_for_timeout(500)
+                        print(f"    日付を {new_day} に変更（デートピッカー）")
+                        return True
+                except Exception:
+                    continue
+
+            # aタグ内にない場合、td自体のテキストで探す
+            all_cells = datepicker.locator("td").all()
+            for cell in all_cells:
+                try:
+                    cell_text = cell.text_content().strip()
+                    # "1" だけの場合と "1(水)" の場合に対応
+                    if cell_text == day_str or cell_text.startswith(day_str + "("):
+                        inner_a = cell.locator("a")
+                        if inner_a.count() > 0:
+                            inner_a.first.click()
+                        else:
+                            cell.click()
+                        page.wait_for_timeout(500)
+                        print(f"    日付を {new_day} に変更（デートピッカーセル）")
+                        return True
+                except Exception:
+                    continue
+
+        # Strategy 2: <select> タグ（フォールバック）
         day_selectors = [
             "#inPopupDay",
             "select[name*='day']",
             "select[name*='Day']",
         ]
-
         for selector in day_selectors:
             day_select = page.locator(selector).first
-            if day_select.is_visible():
-                day_select.select_option(value=str(new_day))
-                page.wait_for_timeout(300)
-                print(f"    日付を {new_day} に変更")
-                return True
-
-        # セレクトが見つからない場合、すべてのセレクトを確認
-        all_selects = page.locator("select").all()
-        for select in all_selects:
             try:
-                options = select.locator("option").all_text_contents()
-                if any(str(new_day) in opt for opt in options) and len(options) >= 28:
-                    select.select_option(value=str(new_day))
+                if day_select.is_visible(timeout=1000):
+                    day_select.select_option(value=day_str)
                     page.wait_for_timeout(300)
-                    print(f"    日付を {new_day} に変更")
+                    print(f"    日付を {new_day} に変更（セレクト）")
                     return True
             except Exception:
                 continue
 
-        print("    日付セレクトが見つかりません")
+        print("    日付変更に失敗: デートピッカーもセレクトも見つかりません")
         return False
 
     except Exception as e:
@@ -436,7 +468,7 @@ def edit_staff(page, staff1_name: str, staff2_name: str = "",
                 selected = False
                 for opt in options:
                     opt_text = opt.text_content()
-                    if staff1_name in opt_text:
+                    if name_matches(staff1_name, opt_text):
                         staff1_select.select_option(label=opt_text)
                         page.wait_for_timeout(300)
                         print(f"    職員1設定: {staff1_name}")
@@ -444,6 +476,9 @@ def edit_staff(page, staff1_name: str, staff2_name: str = "",
                         break
                 if not selected:
                     print(f"    警告: 職員1 '{staff1_name}' が選択肢に見つかりません")
+                    # デバッグ: 選択肢を出力
+                    opt_names = [o.text_content().strip() for o in options[:10]]
+                    print(f"    選択肢: {opt_names}")
             else:
                 print("    警告: select#chargeStaff1Id1 が見つかりません")
 
@@ -455,7 +490,7 @@ def edit_staff(page, staff1_name: str, staff2_name: str = "",
                 selected = False
                 for opt in options:
                     opt_text = opt.text_content()
-                    if staff2_name in opt_text:
+                    if name_matches(staff2_name, opt_text):
                         staff2_select.select_option(label=opt_text)
                         page.wait_for_timeout(300)
                         print(f"    職員2設定: {staff2_name}")
@@ -519,12 +554,25 @@ def click_register_button(page) -> bool:
         return False
 
 
+def _accept_dialog(dialog):
+    """confirmダイアログを自動的にOKする"""
+    dialog.accept()
+
+
 def close_edit_dialog(page) -> bool:
     """
     編集ダイアログを閉じる（キャンセル）
+
+    カイポケの閉じるボタン(button.close.closeOn)は
+    confirm('入力内容を登録せずに終了しますか？') を発火するため、
+    dialog イベントハンドラでOKを自動応答する。
     """
     try:
+        # confirmダイアログの自動応答を設定
+        page.on("dialog", _accept_dialog)
+
         cancel_buttons = [
+            "button.close.closeOn",
             "button:has-text('キャンセル')",
             "button:has-text('閉じる')",
             "a:has-text('キャンセル')",
@@ -532,12 +580,22 @@ def close_edit_dialog(page) -> bool:
         ]
         for selector in cancel_buttons:
             btn = page.locator(selector).first
-            if btn.is_visible():
-                btn.click()
-                page.wait_for_timeout(1000)
-                return True
+            try:
+                if btn.is_visible(timeout=1000):
+                    btn.click()
+                    page.wait_for_timeout(1000)
+                    page.remove_listener("dialog", _accept_dialog)
+                    return True
+            except Exception:
+                continue
+
+        page.remove_listener("dialog", _accept_dialog)
         return False
     except Exception:
+        try:
+            page.remove_listener("dialog", _accept_dialog)
+        except Exception:
+            pass
         return False
 
 
@@ -601,19 +659,28 @@ def delete_schedule_entry(page, day: int, start_time: str, dry_run: bool = False
 # =============================================================================
 
 def click_new_add_button(page) -> bool:
-    """「新規追加」ボタンをクリック"""
+    """
+    「新規追加」ボタンをクリック
+
+    カイポケ実際の構造:
+      <button type="button" class="btn btn-sms btn-sm"
+              onclick="showHNC097807Add(...)" title="新規追加">新規追加</button>
+    """
     add_buttons = [
+        "button[title='新規追加']",
+        "#btn_area button:has-text('新規追加')",
+        "button:has-text('新規追加')",
         "text=新規追加",
-        "button:has-text('追加')",
-        "a:has-text('追加')",
-        "button:has-text('新規登録')",
     ]
     for selector in add_buttons:
         btn = page.locator(selector).first
-        if btn.is_visible(timeout=2000):
-            btn.click()
-            page.wait_for_timeout(2000)
-            return True
+        try:
+            if btn.is_visible(timeout=2000):
+                btn.click()
+                page.wait_for_timeout(2000)
+                return True
+        except Exception:
+            continue
     print("    新規追加ボタンが見つかりません")
     return False
 
@@ -817,14 +884,32 @@ def add_schedule_entry(page, correction: Correction, dry_run: bool = False) -> b
 # =============================================================================
 
 def navigate_to_staff_tab(page) -> bool:
-    """職員別タブに遷移"""
+    """
+    職員別タブに遷移
+
+    カイポケの実際の構造:
+      <ul class="nav nav-tabs">
+        <li><a>利用者別</a></li>
+        <li><a onclick="submitForm(3);">職員別</a></li>
+      </ul>
+    """
     try:
-        staff_tab = page.locator("text=職員別").first
-        if staff_tab.is_visible(timeout=3000):
-            staff_tab.click()
-            page.wait_for_timeout(2000)
-            print("  職員別タブに遷移しました")
-            return True
+        tab_selectors = [
+            ".nav-tabs a:has-text('職員別')",
+            "a[onclick*='submitForm(3)']",
+            "text=職員別",
+        ]
+        for selector in tab_selectors:
+            staff_tab = page.locator(selector).first
+            try:
+                if staff_tab.is_visible(timeout=2000):
+                    staff_tab.click()
+                    page.wait_for_load_state("networkidle", timeout=10000)
+                    page.wait_for_timeout(2000)
+                    print("  職員別タブに遷移しました")
+                    return True
+            except Exception:
+                continue
         print("  職員別タブが見つかりません")
         return False
     except Exception as e:
@@ -833,14 +918,30 @@ def navigate_to_staff_tab(page) -> bool:
 
 
 def navigate_to_user_tab(page) -> bool:
-    """利用者別タブに戻る"""
+    """
+    利用者別タブに戻る
+
+    カイポケの実際の構造:
+      <ul class="nav nav-tabs">
+        <li class="active"><a>利用者別</a></li>
+      </ul>
+    """
     try:
-        user_tab = page.locator("text=利用者別").first
-        if user_tab.is_visible(timeout=3000):
-            user_tab.click()
-            page.wait_for_timeout(2000)
-            print("  利用者別タブに遷移しました")
-            return True
+        tab_selectors = [
+            ".nav-tabs a:has-text('利用者別')",
+            "text=利用者別",
+        ]
+        for selector in tab_selectors:
+            user_tab = page.locator(selector).first
+            try:
+                if user_tab.is_visible(timeout=2000):
+                    user_tab.click()
+                    page.wait_for_load_state("networkidle", timeout=10000)
+                    page.wait_for_timeout(2000)
+                    print("  利用者別タブに遷移しました")
+                    return True
+            except Exception:
+                continue
         print("  利用者別タブが見つかりません")
         return False
     except Exception as e:
@@ -905,6 +1006,73 @@ def select_staff_member(page, staff_name: str) -> bool:
     return False
 
 
+def click_calendar_day(page, day: int, popup_selector: str = "") -> bool:
+    """
+    カレンダーグリッドから指定日をクリック（イベントポップアップ用）
+
+    イベントポップアップのカレンダーはtable内のtdに日付が表示されており、
+    selectドロップダウンではなくクリック操作で日付を選択する。
+
+    Args:
+        page: Playwrightのページオブジェクト
+        day: クリックする日（1-31）
+        popup_selector: ポップアップのCSSセレクタ（スコープ限定用）
+    """
+    print(f"  カレンダー日付クリック: {day}日")
+    day_str = str(day)
+
+    try:
+        # ポップアップ内のカレンダーテーブルを探す
+        scope = page
+        if popup_selector:
+            popup = page.locator(popup_selector)
+            if popup.is_visible(timeout=2000):
+                scope = popup
+
+        # Strategy 1: カレンダーセル（td）から日付テキスト完全一致でクリック
+        # カレンダーのtdは通常 class="calendar-day" や数字のみを含む
+        calendar_cells = scope.locator("table td").all()
+        for cell in calendar_cells:
+            try:
+                cell_text = cell.text_content().strip()
+                if cell_text == day_str:
+                    # クリック可能かチェック（ヘッダー行やdisabledでないか）
+                    tag = cell.evaluate("el => el.tagName")
+                    if tag.upper() == "TH":
+                        continue
+                    # aタグやリンクが中にあればそちらをクリック
+                    inner_link = cell.locator("a")
+                    if inner_link.count() > 0:
+                        inner_link.first.click()
+                    else:
+                        cell.click()
+                    page.wait_for_timeout(500)
+                    print(f"    カレンダーから {day}日 をクリック")
+                    return True
+            except Exception:
+                continue
+
+        # Strategy 2: aタグ内のテキストで探す（カレンダーがa[href]で構成されている場合）
+        calendar_links = scope.locator("table td a").all()
+        for link in calendar_links:
+            try:
+                link_text = link.text_content().strip()
+                if link_text == day_str:
+                    link.click()
+                    page.wait_for_timeout(500)
+                    print(f"    カレンダーリンクから {day}日 をクリック")
+                    return True
+            except Exception:
+                continue
+
+        print(f"    カレンダーに {day}日 が見つかりません")
+        return False
+
+    except Exception as e:
+        print(f"    カレンダー日付クリックエラー: {e}")
+        return False
+
+
 def add_event_entry(page, correction: Correction, dry_run: bool = False) -> bool:
     """
     イベント（個別業務）を新規登録
@@ -934,26 +1102,54 @@ def add_event_entry(page, correction: Correction, dry_run: bool = False) -> bool
         page.wait_for_timeout(2000)
 
         # Step 2: 「新しく登録する」ラジオを選択
-        # ラジオボタンは2つ: 「既存から選択」(value=0等) / 「新しく登録する」(value=1等)
+        # ラジオボタンは2つ: 「既存から選択」/ 「新しく登録する」
         # 「新しく登録する」を選択すると input#popupIndividualName が enabled になる
-        radios = page.locator("input[name='popupSelectedIndividual']").all()
-        print(f"    ラジオボタン数: {len(radios)}")
-        if len(radios) >= 2:
-            # 2番目のラジオ = 「新しく登録する」
-            radios[1].click()
-            page.wait_for_timeout(1000)
-            print("    「新しく登録する」を選択（2番目のラジオ）")
-        elif len(radios) == 1:
-            radios[0].click()
-            page.wait_for_timeout(1000)
-            print("    ラジオボタンをクリック（1つのみ）")
-        else:
-            # ラジオが見つからない場合、ラベルテキストで探す
-            new_label = page.locator("label:has-text('新しく登録')").first
-            if new_label.is_visible(timeout=2000):
-                new_label.click()
+        # 順序に依存しないよう、ラベルテキストまたはvalue属性で特定する
+        selected_radio = False
+
+        # 方法1: ラベルテキストで「新しく登録する」を特定
+        new_register_label = page.locator("label:has-text('新しく登録')").first
+        if new_register_label.is_visible(timeout=2000):
+            # ラベルのfor属性またはラベル内のinputをクリック
+            label_for = new_register_label.get_attribute("for")
+            if label_for:
+                radio = page.locator(f"input#{label_for}")
+                if radio.count() > 0:
+                    radio.click()
+                    page.wait_for_timeout(1000)
+                    print("    「新しく登録する」を選択（ラベルfor属性経由）")
+                    selected_radio = True
+            if not selected_radio:
+                new_register_label.click()
                 page.wait_for_timeout(1000)
                 print("    「新しく登録する」ラベルをクリック")
+                selected_radio = True
+
+        # 方法2: ラジオボタンから隣接ラベルを確認して特定
+        if not selected_radio:
+            radios = page.locator("input[name='popupSelectedIndividual']").all()
+            print(f"    ラジオボタン数: {len(radios)}")
+            for i, radio in enumerate(radios):
+                try:
+                    # 隣接するラベルのテキストを確認
+                    label_text = radio.evaluate("""el => {
+                        const label = el.nextElementSibling || el.parentElement;
+                        return label ? label.textContent.trim() : '';
+                    }""")
+                    if "新しく登録" in label_text:
+                        radio.click()
+                        page.wait_for_timeout(1000)
+                        print(f"    「新しく登録する」を選択（ラジオ[{i}]）")
+                        selected_radio = True
+                        break
+                except Exception:
+                    continue
+
+            # フォールバック: 最後のラジオ（通常は「新しく登録する」）
+            if not selected_radio and radios:
+                radios[-1].click()
+                page.wait_for_timeout(1000)
+                print(f"    最後のラジオボタンを選択（フォールバック）")
 
         # Step 3: イベント名を入力（ラジオ選択後にenabledになるのを待つ）
         event_name_input = page.locator("input#popupIndividualName")
@@ -990,8 +1186,8 @@ def add_event_entry(page, correction: Correction, dry_run: bool = False) -> bool
                 int(end_parts[0]), int(end_parts[1])
             )
 
-        # Step 5: 日付を設定
-        change_date(page, day)
+        # Step 5: 日付を設定（イベントポップアップはカレンダーグリッド）
+        click_calendar_day(page, day, "form#formIndividualMonthlyShiftAssignPopup")
 
         # Step 6: 登録
         if dry_run:
@@ -1172,7 +1368,9 @@ def run_auto_apply(
         print(f"[フィルタ] business_type={business_type_filter}: {len(corrections)}件")
 
     if target_users:
-        corrections = [c for c in corrections if c.user_name in target_users]
+        normalized_targets = [normalize_name(u) for u in target_users]
+        corrections = [c for c in corrections
+                       if normalize_name(c.user_name) in normalized_targets]
         print(f"[フィルタ] users={target_users}: {len(corrections)}件")
 
     if limit:
