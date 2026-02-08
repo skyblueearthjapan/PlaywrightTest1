@@ -42,6 +42,15 @@ from lib.stop_signal import is_stop_requested, clear_stop
 # ヘルパー関数
 # =============================================================================
 
+def normalize_name(name: str) -> str:
+    """名前のスペースを正規化（全角スペース↔半角スペースどちらでもマッチ可能に）"""
+    return name.replace("\u3000", " ").strip()
+
+
+def name_matches(needle: str, haystack: str) -> bool:
+    """名前が含まれているか判定（全角/半角スペースを無視して比較）"""
+    return normalize_name(needle) in normalize_name(haystack)
+
 def calculate_santei_time(start_time: str, end_time: str) -> str:
     """
     開始時間と終了時間から算定時間の選択値を計算（介護保険用）
@@ -88,11 +97,11 @@ def select_user(page, user_name: str) -> bool:
 
     # 現在の画面に表示されている利用者を確認
     page_content = page.content()
-    if user_name in page_content:
+    if name_matches(user_name, page_content):
         title_elem = page.locator("h3, h2, .user-name, .patient-name").first
         if title_elem.is_visible():
             title_text = title_elem.text_content()
-            if user_name in title_text:
+            if name_matches(user_name, title_text):
                 print(f"  すでに選択されています: {user_name}")
                 return True
 
@@ -102,7 +111,7 @@ def select_user(page, user_name: str) -> bool:
         for select in user_selects:
             options = select.locator("option").all_text_contents()
             for opt in options:
-                if user_name in opt:
+                if name_matches(user_name, opt):
                     select.select_option(label=opt)
                     page.wait_for_timeout(2000)
                     print(f"  ドロップダウンから選択: {user_name}")
@@ -114,7 +123,7 @@ def select_user(page, user_name: str) -> bool:
     max_attempts = 70  # 最大61件の利用者
     for i in range(max_attempts):
         page_content = page.content()
-        if user_name in page_content:
+        if name_matches(user_name, page_content):
             print(f"  {i+1}回目で発見: {user_name}")
             return True
 
