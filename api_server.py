@@ -545,7 +545,6 @@ def api_diff():
                 return jsonify({"success": False, "error": f"{optimized_name} のダウンロードに失敗"}), 500
 
             # ダウンロードしたファイルのサイズを確認
-            import os
             cur_size = os.path.getsize(current_local) if os.path.exists(current_local) else 0
             opt_size = os.path.getsize(optimized_local) if os.path.exists(optimized_local) else 0
             print(f"  [DEBUG] ダウンロード完了: current={cur_size}bytes, optimized={opt_size}bytes")
