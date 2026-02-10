@@ -240,82 +240,53 @@ def dismiss_popup(page: Page) -> None:
         pass
 
 
+def _page_has_element(page: Page, selector: str, timeout: int = 5000) -> bool:
+    """ページ上に指定セレクタの要素が表示されているか確認"""
+    try:
+        el = page.locator(selector).first
+        el.wait_for(state="visible", timeout=timeout)
+        return True
+    except Exception:
+        return False
+
+
 def goto_receipt(page: Page, timeout: int = 60000) -> None:
     """
     レセプト画面に遷移
-
-    ポップアップがレセプトボタンを覆っている場合はdismiss_popupを再実行してリトライする。
 
     Args:
         page: Playwrightのページオブジェクト
         timeout: タイムアウト（ミリ秒、デフォルト60秒）
     """
     # サイドバー内の「レセプト」リンクを特定するセレクタ（優先度順）
-    # "text=レセプト" は通知メール件名等にもマッチするため使用しない
     receipt_selectors = [
-        "#gNavBiz-wrap a:has(i.sprite-rezept)",       # アイコンクラスで特定（最も確実）
-        "a[onclick*=\"pushClickIconEvent('レセプト')\"]",  # onclick属性で特定
-        "#gNavBiz-wrap a:has-text('レセプト')",        # サイドバー内にスコープ
+        "#gNavBiz-wrap a:has(i.sprite-rezept)",
+        "a[onclick*=\"pushClickIconEvent('レセプト')\"]",
+        "#gNavBiz-wrap a:has-text('レセプト')",
     ]
 
-    max_attempts = 3
-    for attempt in range(max_attempts):
+    print("レセプトボタンをクリックしています...")
+    clicked = False
+    for selector in receipt_selectors:
         try:
-            print("レセプトボタンをクリックしています...")
-            clicked = False
-            for selector in receipt_selectors:
-                try:
-                    btn = page.locator(selector).first
-                    btn.wait_for(state="visible", timeout=5000)
-                    btn.click(timeout=10000)
-                    clicked = True
-                    break
-                except Exception:
-                    continue
+            btn = page.locator(selector).first
+            btn.wait_for(state="visible", timeout=5000)
+            btn.click(timeout=10000)
+            clicked = True
+            break
+        except Exception:
+            continue
 
-            if not clicked:
-                raise RuntimeError("レセプトリンクが見つかりません")
+    if not clicked:
+        raise RuntimeError("レセプトリンクが見つかりません")
 
-            try:
-                page.wait_for_load_state("networkidle", timeout=timeout)
-            except Exception:
-                print("  (networkidle待機がタイムアウト、domcontentloadedで続行)")
-                page.wait_for_load_state("domcontentloaded", timeout=timeout)
-            page.wait_for_timeout(1000)
-
-            # SSO エラーページ検出
-            # 「処理を続行できませんでした」「トップへ戻る」が表示される
-            page_content = page.content()
-            if "処理を続行できませんでした" in page_content or (
-                "トップへ戻る" in page_content and "sso.do" in page.url
-            ):
-                raise RuntimeError("SSO_ERROR")
-
-            print("レセプト画面を表示しました")
-            return
-        except RuntimeError as e:
-            if str(e) == "SSO_ERROR":
-                # SSOエラーは呼び出し元（setup_monthly_schedule_page）で回復する
-                raise
-            if attempt < max_attempts - 1:
-                print(f"  レセプトボタンのクリック失敗（{e}）")
-                print(f"  ポップアップ除去を再試行します... ({attempt + 2}/{max_attempts})")
-                dismiss_popup(page)
-                page.wait_for_timeout(1000)
-            else:
-                raise RuntimeError(
-                    f"レセプトボタンをクリックできませんでした（{max_attempts}回試行）: {e}"
-                )
-        except Exception as e:
-            if attempt < max_attempts - 1:
-                print(f"  レセプトボタンのクリック失敗（{e}）")
-                print(f"  ポップアップ除去を再試行します... ({attempt + 2}/{max_attempts})")
-                dismiss_popup(page)
-                page.wait_for_timeout(1000)
-            else:
-                raise RuntimeError(
-                    f"レセプトボタンをクリックできませんでした（{max_attempts}回試行）: {e}"
-                )
+    try:
+        page.wait_for_load_state("networkidle", timeout=timeout)
+    except Exception:
+        print("  (networkidle待機がタイムアウト、domcontentloadedで続行)")
+        page.wait_for_load_state("domcontentloaded", timeout=timeout)
+    page.wait_for_timeout(1000)
+    print("レセプト画面を表示しました")
 
 
 def goto_yoriyori(page: Page, timeout: int = 60000) -> None:
@@ -592,49 +563,72 @@ def setup_monthly_schedule_page(
     ログイン → レセプト → 訪問看護 → 月間スケジュール → 月設定 → 月検証
     を一括で行う共通セットアップ関数
 
-    毎回Cookieをクリアして新規ログインすることでSSO失敗を防ぐ。
-    SSOエラーが発生した場合は「トップへ戻る→再ログイン→レセプト」で回復する。
+    各ステップ後に「次のステップに必要な要素が見えるか」を確認。
+    見えなければ（SSOエラー等）最初からやり直す。
 
     Args:
         page: Playwrightのページオブジェクト
         context: ブラウザコンテキスト（state保存用）
         month_str: "2026-04" 形式の月文字列
     """
-    # 毎回新規ログイン（force=True: Cookieクリア→ログインフォームから入る）
-    if not login(page, save_state=True, context=context, force=True):
-        raise RuntimeError("ログインに失敗しました")
-    page.wait_for_timeout(1000)
-    dismiss_popup(page)
+    max_retries = 3
 
-    # レセプト遷移（SSOエラー時は回復して再試行）
-    max_sso_retries = 2
-    for sso_attempt in range(max_sso_retries):
+    for attempt in range(max_retries):
         try:
+            if attempt > 0:
+                print(f"\n=== セットアップ再試行 ({attempt + 1}/{max_retries}) ===")
+
+            # Step 1: ログイン（毎回Cookie クリアして新規ログイン）
+            if not login(page, save_state=True, context=context, force=True):
+                raise RuntimeError("ログインに失敗しました")
+            page.wait_for_timeout(1000)
+            dismiss_popup(page)
+
+            # Step 1 検証: サイドバーにレセプトリンクがあるか
+            if not _page_has_element(page, "#gNavBiz-wrap a:has(i.sprite-rezept)", timeout=5000):
+                print("ログイン後にサイドバーが見つかりません。やり直します...")
+                continue
+
+            # Step 2: レセプト遷移
             goto_receipt(page)
-            break  # 成功
-        except RuntimeError as e:
-            if "SSO_ERROR" in str(e) and sso_attempt < max_sso_retries - 1:
-                print("SSOエラーが検出されました。トップへ戻る→再ログイン→レセプトで回復します...")
-                # トップへ戻る
+
+            # Step 2 検証: 訪問看護リンクが見えるか（＝正しくレセプト画面にいる）
+            if not _page_has_element(page, "text=訪問看護/1260192047", timeout=8000):
+                print("レセプト遷移後に訪問看護リンクが見つかりません（SSOエラー等の可能性）")
+                print(f"  現在のURL: {page.url}")
+                # トップへ戻るリンクがあればクリック
                 try:
-                    page.click("text=トップへ戻る", timeout=5000)
-                    page.wait_for_load_state("domcontentloaded", timeout=30000)
+                    page.click("text=トップへ戻る", timeout=3000)
                     page.wait_for_timeout(1000)
                 except Exception:
                     pass
-                # 再ログイン（force=True）
-                if not login(page, save_state=True, context=context, force=True):
-                    raise RuntimeError("SSO回復: 再ログインに失敗しました")
-                page.wait_for_timeout(1000)
-                dismiss_popup(page)
-            else:
-                raise
+                continue
 
-    goto_yoriyori(page)
-    goto_monthly_schedule(page)
-    set_service_month(page, month_str)
-    page.wait_for_timeout(1000)
-    verify_service_month(page, month_str)
+            # Step 3: 訪問看護遷移
+            goto_yoriyori(page)
+
+            # Step 3 検証: 月間スケジュール管理リンクが見えるか
+            if not _page_has_element(page, "text=月間スケジュール管理", timeout=8000):
+                print("訪問看護遷移後に月間スケジュールリンクが見つかりません")
+                print(f"  現在のURL: {page.url}")
+                continue
+
+            # Step 4: 月間スケジュール → 月設定 → 検証
+            goto_monthly_schedule(page)
+            set_service_month(page, month_str)
+            page.wait_for_timeout(1000)
+            verify_service_month(page, month_str)
+
+            # 全ステップ成功
+            return
+
+        except Exception as e:
+            if attempt < max_retries - 1:
+                print(f"セットアップ失敗（{e}）。最初からやり直します...")
+            else:
+                raise RuntimeError(
+                    f"セットアップに{max_retries}回失敗しました。最後のエラー: {e}"
+                )
 
 
 def check_session(page: Page) -> bool:
