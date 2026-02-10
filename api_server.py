@@ -90,9 +90,8 @@ log_lock = threading.Lock()
 # noVNCトークン管理
 vnc_tokens = {}  # {token: expiry_time}
 
-# 実行中のプロセス
-current_process = None
-process_lock = threading.Lock()
+# job_state / current_task の排他ロック
+job_state_lock = threading.Lock()
 
 
 def add_log(message: str):
@@ -166,13 +165,14 @@ current_task = {
 @app.route('/api/status', methods=['GET'])
 def api_status():
     """サーバー状態確認"""
-    return jsonify({
-        "status": "running",
-        "current_task": current_task,
-        "job": job_state,
-        "stop_requested": is_stop_requested(),
-        "timestamp": datetime.now().isoformat(),
-    })
+    with job_state_lock:
+        return jsonify({
+            "status": "running",
+            "current_task": dict(current_task),
+            "job": dict(job_state),
+            "stop_requested": is_stop_requested(),
+            "timestamp": datetime.now().isoformat(),
+        })
 
 
 @app.route('/api/stop', methods=['POST'])
@@ -188,21 +188,22 @@ def api_stop():
     request_stop()
     add_log("非常停止が要求されました")
 
-    if current_task["running"]:
-        current_task["command"] = f"{current_task['command']}(停止中)"
-        add_log(f"実行中のタスクを停止します: {current_task['command']}")
+    with job_state_lock:
+        if current_task["running"]:
+            current_task["command"] = f"{current_task['command']}(停止中)"
+            add_log(f"実行中のタスクを停止します: {current_task['command']}")
 
-    if job_state["state"] == "running":
-        job_state["state"] = "stopped"
-        job_state["progress"] = "stopped"
-        job_state["ended_at"] = datetime.now().isoformat()
+        if job_state["state"] == "running":
+            job_state["state"] = "stopped"
+            job_state["progress"] = "stopped"
+            job_state["ended_at"] = datetime.now().isoformat()
 
-    return jsonify({
-        "success": True,
-        "message": "非常停止を要求しました。現在の利用者の処理完了後に停止します。",
-        "current_task": current_task,
-        "job": job_state,
-    })
+        return jsonify({
+            "success": True,
+            "message": "非常停止を要求しました。現在の利用者の処理完了後に停止します。",
+            "current_task": dict(current_task),
+            "job": dict(job_state),
+        })
 
 
 @app.route('/api/expand', methods=['POST'])
@@ -210,22 +211,23 @@ def api_expand():
     """月間スケジュール展開 API"""
     global current_task
 
-    if current_task["running"]:
-        return jsonify({
-            "success": False,
-            "error": "別のタスクが実行中です",
-            "current_task": current_task,
-        }), 409
-
-    try:
-        data = request.get_json() or {}
-        month = data.get("month", "2026-04")
+    with job_state_lock:
+        if current_task["running"]:
+            return jsonify({
+                "success": False,
+                "error": "別のタスクが実行中です",
+                "current_task": dict(current_task),
+            }), 409
 
         current_task = {
             "running": True,
             "command": "expand",
             "started_at": datetime.now().isoformat(),
         }
+
+    try:
+        data = request.get_json() or {}
+        month = data.get("month", "2026-04")
 
         clear_stop()  # 非常停止フラグをクリア
         add_log(f"expand 開始 (month={month})")
@@ -250,7 +252,8 @@ def api_expand():
         }), 500
 
     finally:
-        current_task = {"running": False, "command": None, "started_at": None}
+        with job_state_lock:
+            current_task = {"running": False, "command": None, "started_at": None}
 
 
 @app.route('/api/export', methods=['POST'])
@@ -258,24 +261,24 @@ def api_export():
     """CSV出力 API（Drive自動保存対応）"""
     global current_task
 
-    if current_task["running"]:
-        return jsonify({
-            "success": False,
-            "error": "別のタスクが実行中です",
-            "current_task": current_task,
-        }), 409
+    with job_state_lock:
+        if current_task["running"]:
+            return jsonify({
+                "success": False,
+                "error": "別のタスクが実行中です",
+                "current_task": dict(current_task),
+            }), 409
+        current_task = {
+            "running": True,
+            "command": "export",
+            "started_at": datetime.now().isoformat(),
+        }
 
     try:
         data = request.get_json() or {}
         month = data.get("month", "2026-04")
         out_path = data.get("out_path")
         auto_drive_upload = data.get("auto_drive_upload", False)
-
-        current_task = {
-            "running": True,
-            "command": "export",
-            "started_at": datetime.now().isoformat(),
-        }
 
         clear_stop()  # 非常停止フラグをクリア
         add_log(f"export 開始 (month={month})")
@@ -342,7 +345,8 @@ def api_export():
         }), 500
 
     finally:
-        current_task = {"running": False, "command": None, "started_at": None}
+        with job_state_lock:
+            current_task = {"running": False, "command": None, "started_at": None}
 
 
 @app.route('/api/apply', methods=['POST'])
@@ -350,12 +354,19 @@ def api_apply():
     """差分適用 API（インラインcorrectionデータ対応）"""
     global current_task
 
-    if current_task["running"]:
-        return jsonify({
-            "success": False,
-            "error": "別のタスクが実行中です",
-            "current_task": current_task,
-        }), 409
+    with job_state_lock:
+        if current_task["running"]:
+            return jsonify({
+                "success": False,
+                "error": "別のタスクが実行中です",
+                "current_task": dict(current_task),
+            }), 409
+
+        current_task = {
+            "running": True,
+            "command": "apply",
+            "started_at": datetime.now().isoformat(),
+        }
 
     try:
         data = request.get_json() or {}
@@ -383,12 +394,6 @@ def api_apply():
                 "success": False,
                 "error": f"修正シートが見つかりません: {correction_sheet}",
             }), 404
-
-        current_task = {
-            "running": True,
-            "command": "apply",
-            "started_at": datetime.now().isoformat(),
-        }
 
         clear_stop()  # 非常停止フラグをクリア
         filter_info = ""
@@ -430,7 +435,8 @@ def api_apply():
         }), 500
 
     finally:
-        current_task = {"running": False, "command": None, "started_at": None}
+        with job_state_lock:
+            current_task = {"running": False, "command": None, "started_at": None}
 
 
 @app.route('/api/config', methods=['GET', 'POST'])
@@ -850,20 +856,21 @@ def kaipoke_run():
             "vnc": { "ready": true, "url": "https://.../novnc/?token=..." }
         }
     """
-    global job_state, current_process
+    global job_state
 
     # 既に実行中なら現状を返す（冪等）
-    if job_state["state"] == "running":
-        vnc_token = generate_vnc_token()
-        return jsonify({
-            "ok": True,
-            "job": job_state,
-            "vnc": {
-                "ready": True,
-                "url": f"https://{VPS_HOST}/novnc/vnc.html?token={vnc_token}"
-            },
-            "message": "既に実行中です"
-        })
+    with job_state_lock:
+        if job_state["state"] == "running":
+            vnc_token = generate_vnc_token()
+            return jsonify({
+                "ok": True,
+                "job": dict(job_state),
+                "vnc": {
+                    "ready": True,
+                    "url": f"https://{VPS_HOST}/novnc/vnc.html?token={vnc_token}"
+                },
+                "message": "既に実行中です"
+            })
 
     try:
         data = request.get_json() or {}
@@ -872,15 +879,16 @@ def kaipoke_run():
 
         # ジョブ状態を更新
         job_id = f"job_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        job_state.update({
-            "id": job_id,
-            "state": "running",
-            "progress": "starting",
-            "started_at": datetime.now().isoformat(),
-            "ended_at": None,
-            "last_error": None,
-            "mode": mode,
-        })
+        with job_state_lock:
+            job_state.update({
+                "id": job_id,
+                "state": "running",
+                "progress": "starting",
+                "started_at": datetime.now().isoformat(),
+                "ended_at": None,
+                "last_error": None,
+                "mode": mode,
+            })
 
         add_log(f"ジョブ開始: {job_id} (mode={mode})")
 
@@ -891,7 +899,8 @@ def kaipoke_run():
         def run_playwright():
             global job_state
             try:
-                job_state["progress"] = "running"
+                with job_state_lock:
+                    job_state["progress"] = "running"
                 add_log(f"Playwright実行中... (mode={mode})")
 
                 if mode == "expand":
@@ -916,16 +925,18 @@ def kaipoke_run():
                     time.sleep(5)
                     result = {"message": "待機モード完了"}
 
-                job_state["state"] = "idle"
-                job_state["progress"] = "done"
-                job_state["ended_at"] = datetime.now().isoformat()
+                with job_state_lock:
+                    job_state["state"] = "idle"
+                    job_state["progress"] = "done"
+                    job_state["ended_at"] = datetime.now().isoformat()
                 add_log(f"ジョブ完了: {result}")
 
             except Exception as e:
-                job_state["state"] = "failed"
-                job_state["progress"] = "error"
-                job_state["last_error"] = str(e)
-                job_state["ended_at"] = datetime.now().isoformat()
+                with job_state_lock:
+                    job_state["state"] = "failed"
+                    job_state["progress"] = "error"
+                    job_state["last_error"] = str(e)
+                    job_state["ended_at"] = datetime.now().isoformat()
                 add_log(f"ジョブエラー: {e}")
 
         # スレッドで実行
@@ -934,7 +945,7 @@ def kaipoke_run():
 
         return jsonify({
             "ok": True,
-            "job": job_state,
+            "job": dict(job_state),
             "vnc": {
                 "ready": True,
                 "url": f"https://{VPS_HOST}/novnc/vnc.html?token={vnc_token}"
@@ -957,27 +968,27 @@ def kaipoke_stop():
     """
     global job_state
 
-    if job_state["state"] != "running":
-        return jsonify({
-            "ok": True,
-            "job": job_state,
-            "message": "実行中のジョブはありません"
-        })
+    with job_state_lock:
+        if job_state["state"] != "running":
+            return jsonify({
+                "ok": True,
+                "job": dict(job_state),
+                "message": "実行中のジョブはありません"
+            })
 
-    try:
-        add_log("停止リクエスト受信")
-
-        # 状態を更新
         job_state["state"] = "stopped"
         job_state["progress"] = "stopped"
         job_state["ended_at"] = datetime.now().isoformat()
 
+    try:
+        add_log("停止リクエスト受信")
         add_log("ジョブを停止しました")
 
-        return jsonify({
-            "ok": True,
-            "job": job_state
-        })
+        with job_state_lock:
+            return jsonify({
+                "ok": True,
+                "job": dict(job_state)
+            })
 
     except Exception as e:
         add_log(f"stop エラー: {e}")
@@ -993,24 +1004,25 @@ def kaipoke_status():
     """
     状態取得 API
     """
-    vnc_url = None
-    if job_state["state"] == "running":
-        vnc_token = generate_vnc_token()
-        vnc_url = f"https://{VPS_HOST}/novnc/vnc.html?token={vnc_token}"
+    with job_state_lock:
+        vnc_url = None
+        if job_state["state"] == "running":
+            vnc_token = generate_vnc_token()
+            vnc_url = f"https://{VPS_HOST}/novnc/vnc.html?token={vnc_token}"
 
-    return jsonify({
-        "ok": True,
-        "server": {
-            "name": "kaipoke-rpa",
-            "time": datetime.now().isoformat(),
-            "host": VPS_HOST
-        },
-        "job": job_state,
-        "vnc": {
-            "ready": job_state["state"] == "running",
-            "url": vnc_url
-        }
-    })
+        return jsonify({
+            "ok": True,
+            "server": {
+                "name": "kaipoke-rpa",
+                "time": datetime.now().isoformat(),
+                "host": VPS_HOST
+            },
+            "job": dict(job_state),
+            "vnc": {
+                "ready": job_state["state"] == "running",
+                "url": vnc_url
+            }
+        })
 
 
 @app.route('/api/kaipoke/logs', methods=['GET'])

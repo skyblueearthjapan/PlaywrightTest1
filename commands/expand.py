@@ -24,12 +24,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from playwright.sync_api import sync_playwright
 from lib.common import (
     create_browser_context,
-    login,
-    dismiss_popup,
-    goto_receipt,
-    goto_yoriyori,
-    goto_monthly_schedule,
-    set_service_month,
+    setup_monthly_schedule_page,
     save_artifacts,
 )
 from lib.stop_signal import is_stop_requested, clear_stop
@@ -226,56 +221,11 @@ def run_expand(month: str = "2026-04", headless: bool = True, dry_run: bool = Fa
         page.on("dialog", handle_dialog)
 
         try:
-            # ログイン
-            login(page, save_state=True, context=context)
-            page.wait_for_timeout(1000)
-
-            # ポップアップを閉じる
-            dismiss_popup(page)
-
-            # レセプト画面に遷移
-            goto_receipt(page)
-
-            # 訪問看護/よりより画面に遷移
-            goto_yoriyori(page)
-
-            # 月間スケジュール管理画面に遷移
-            goto_monthly_schedule(page)
-
-            # サービス提供月を設定
-            set_service_month(page, month)
-            page.wait_for_timeout(1000)
-
-            # 安全確認: 月が正しく設定されたか検証
-            from lib.common import parse_month, to_reiwa
-            target_year, target_month = parse_month(month)
-            target_reiwa = to_reiwa(target_year)
-            expected_month_text = f"令和{target_reiwa}年{target_month}月"
-
-            # <select>から現在の月を再確認
-            actual_month = ""
-            try:
-                selects = page.locator("select")
-                for i in range(selects.count()):
-                    select = selects.nth(i)
-                    if select.is_visible(timeout=1000):
-                        text = select.evaluate(
-                            "el => el.options[el.selectedIndex] ? el.options[el.selectedIndex].text : ''"
-                        )
-                        if text and "令和" in text and "月" in text:
-                            actual_month = text.strip()
-                            break
-            except Exception:
-                pass
-
-            if actual_month and expected_month_text not in actual_month:
-                error_msg = f"月の設定が不正です！期待: {expected_month_text}, 実際: {actual_month}"
-                print(f"エラー: {error_msg}")
-                save_artifacts(page, Path("artifacts"), "expand_wrong_month")
-                raise RuntimeError(error_msg)
+            # 共通セットアップ（ログイン→ナビゲーション→月設定→月検証）
+            setup_monthly_schedule_page(page, context, month)
 
             print(f"\n=== Block 1: 週間パターン展開開始 ===")
-            print(f"対象月: {month}（確認済み: {actual_month or expected_month_text}）")
+            print(f"対象月: {month}")
             print(f"最大利用者数: {MAX_USERS}")
             print("")
 

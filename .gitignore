@@ -46,3 +46,4 @@ server_log.txt
 # 一時ファイル
 nul
 *.zip
+*.pdf

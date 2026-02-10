@@ -27,12 +27,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from playwright.sync_api import sync_playwright
 from lib.common import (
     create_browser_context,
-    login,
-    dismiss_popup,
-    goto_receipt,
-    goto_yoriyori,
-    goto_monthly_schedule,
-    set_service_month,
+    setup_monthly_schedule_page,
+    ensure_session,
     save_artifacts,
     parse_month,
 )
@@ -397,20 +393,26 @@ def change_date(page, new_day: int) -> bool:
     day_str = str(new_day)
 
     try:
-        # Strategy 1: jQuery UI Datepicker（実際のカイポケの構造）
-        # #simple-select-days-range はinputフィールド。クリックでカレンダーが開く。
-        # カレンダーは #ui-datepicker-div に展開される（input内ではない）。
-        datepicker_input = page.locator("#simple-select-days-range, .hasMultiDatepicker").first
+        # Strategy 1: jQuery UI Datepicker - inputをクリックしてポップアップを開く
+        # セレクタは #simple-select-days-range のみ（.hasMultiDatepickerは複数マッチするため避ける）
+        datepicker_input = page.locator("#simple-select-days-range")
         if datepicker_input.is_visible(timeout=2000):
-            # inputをクリックしてカレンダーポップアップを開く
+            print(f"    デートピッカー input 検出")
             datepicker_input.click()
-            page.wait_for_timeout(500)
+            page.wait_for_timeout(1000)
 
-            # カレンダーポップアップ（#ui-datepicker-div）内の日付セルを探す
-            calendar = page.locator("#ui-datepicker-div")
-            if calendar.is_visible(timeout=3000):
+            # カレンダーポップアップを複数セレクタで探す
+            calendar = None
+            for cal_selector in ["#ui-datepicker-div", ".ui-datepicker", ".datepicker"]:
+                cal = page.locator(cal_selector)
+                if cal.count() > 0 and cal.first.is_visible(timeout=1000):
+                    calendar = cal.first
+                    print(f"    カレンダー検出: {cal_selector}")
+                    break
+
+            if calendar:
                 # カレンダー内のaタグで日付を探す
-                day_cells = calendar.locator("td[data-handler='selectDay'] a, td a.ui-state-default").all()
+                day_cells = calendar.locator("td a").all()
                 for cell in day_cells:
                     try:
                         cell_text = cell.text_content().strip()
@@ -421,25 +423,46 @@ def change_date(page, new_day: int) -> bool:
                             return True
                     except Exception:
                         continue
-
-                # aタグ内にない場合、td自体のテキストで探す
-                all_cells = calendar.locator("td").all()
-                for cell in all_cells:
-                    try:
-                        cell_text = cell.text_content().strip()
-                        if cell_text == day_str or cell_text.startswith(day_str + "("):
-                            inner_a = cell.locator("a")
-                            if inner_a.count() > 0:
-                                inner_a.first.click()
-                            else:
-                                cell.click()
-                            page.wait_for_timeout(500)
-                            print(f"    日付を {new_day} に変更（デートピッカーセル）")
-                            return True
-                    except Exception:
-                        continue
             else:
-                print("    警告: カレンダーポップアップが開きませんでした")
+                print("    カレンダーポップアップが見つかりません。JS で日付を設定します")
+
+            # Strategy 1b: JavaScript で jQuery UI Datepicker API を使う
+            try:
+                # 現在の入力値を取得してデバッグ出力
+                current_val = datepicker_input.input_value()
+                print(f"    現在の入力値: '{current_val}'")
+
+                # jQuery datepicker API で日付を変更
+                result = page.evaluate(f"""() => {{
+                    const el = document.querySelector('#simple-select-days-range');
+                    if (!el) return 'element not found';
+                    const currentVal = el.value;
+                    // 現在の値から年月を抽出して新しい日付を構成
+                    // 形式: "YYYY/MM/DD" or "YYYY-MM-DD" etc.
+                    const match = currentVal.match(/(\\d{{4}})[\\/-](\\d{{1,2}})/);
+                    if (match) {{
+                        const year = match[1];
+                        const month = match[2].padStart(2, '0');
+                        const day = '{day_str}'.padStart(2, '0');
+                        const newVal = year + '/' + month + '/' + day;
+                        el.value = newVal;
+                        if (typeof $ !== 'undefined' && $(el).datepicker) {{
+                            $(el).datepicker('setDate', newVal);
+                        }}
+                        $(el).trigger('change');
+                        return 'set to ' + newVal;
+                    }}
+                    return 'could not parse: ' + currentVal;
+                }}""")
+                print(f"    JS datepicker結果: {result}")
+                if result and result.startswith("set to"):
+                    page.wait_for_timeout(500)
+                    print(f"    日付を {new_day} に変更（JavaScript）")
+                    return True
+            except Exception as js_err:
+                print(f"    JS datepicker エラー: {js_err}")
+        else:
+            print("    #simple-select-days-range が見つかりません")
 
         # Strategy 2: <select> タグ（フォールバック）
         day_selectors = [
@@ -483,11 +506,24 @@ def edit_staff(page, staff1_name: str, staff2_name: str = "",
     try:
         # 新規追加の場合、職員情報入力ボタンをクリック
         if for_new_entry:
-            staff_info_btn = page.locator("input#btnInputStaff")
-            if staff_info_btn.is_visible(timeout=3000):
-                staff_info_btn.click()
-                page.wait_for_timeout(1000)
-                print("    「職員情報入力」ボタンをクリック")
+            staff_btn_found = False
+            for btn_selector in [
+                "input#btnInputStaff",
+                "#btnInputStaff",
+                "input[value='職員情報入力']:visible",
+            ]:
+                staff_info_btn = page.locator(btn_selector).first
+                try:
+                    if staff_info_btn.is_visible(timeout=2000):
+                        staff_info_btn.click()
+                        page.wait_for_timeout(1000)
+                        print(f"    「職員情報入力」ボタンをクリック ({btn_selector})")
+                        staff_btn_found = True
+                        break
+                except Exception:
+                    continue
+            if not staff_btn_found:
+                print("    警告: 職員情報入力ボタンが見つかりません")
 
         # 職員1を設定
         if staff1_name:
@@ -1477,45 +1513,8 @@ def run_auto_apply(
         browser, context, page = create_browser_context(p, headless=headless)
 
         try:
-            # ログイン & ナビゲーション
-            login(page, save_state=True, context=context)
-            page.wait_for_timeout(1000)
-            dismiss_popup(page)
-
-            goto_receipt(page)
-            goto_yoriyori(page)
-            goto_monthly_schedule(page)
-            set_service_month(page, month)
-            page.wait_for_timeout(1000)
-
-            # 月の検証
-            from lib.common import to_reiwa
-            target_year, target_month_num = parse_month(month)
-            target_reiwa = to_reiwa(target_year)
-            expected_month_text = f"令和{target_reiwa}年{target_month_num}月"
-
-            actual_month = ""
-            try:
-                selects = page.locator("select")
-                for i in range(selects.count()):
-                    select = selects.nth(i)
-                    if select.is_visible(timeout=1000):
-                        text = select.evaluate(
-                            "el => el.options[el.selectedIndex] ? el.options[el.selectedIndex].text : ''"
-                        )
-                        if text and "令和" in text and "月" in text:
-                            actual_month = text.strip()
-                            break
-            except Exception:
-                pass
-
-            if actual_month and expected_month_text not in actual_month:
-                error_msg = f"月の設定が不正です！期待: {expected_month_text}, 実際: {actual_month}"
-                print(f"エラー: {error_msg}")
-                save_artifacts(page, Path("artifacts"), "auto_apply_wrong_month")
-                raise RuntimeError(error_msg)
-
-            print(f"月の検証OK: {actual_month or expected_month_text}")
+            # 共通セットアップ（ログイン→ナビゲーション→月設定→月検証）
+            setup_monthly_schedule_page(page, context, month)
 
             # ========================================
             # Phase 1: スケジュール修正（利用者別タブ）
@@ -1559,37 +1558,50 @@ def run_auto_apply(
                             result["stopped"] = True
                             break
 
-                        try:
-                            success = apply_correction(page, correction, dry_run)
-                            if success:
-                                result["success"] += 1
-                                result["details"].append({
-                                    "user": user_name,
-                                    "date": correction.date_from or correction.date_to,
-                                    "action": correction.action,
-                                    "business_type": correction.business_type,
-                                    "status": "success",
-                                })
-                            else:
+                        max_retries = 1
+                        for attempt in range(max_retries + 1):
+                            try:
+                                # リトライ時はセッション復旧を試みる
+                                if attempt > 0:
+                                    print(f"  リトライ ({attempt}/{max_retries})")
+                                    if not ensure_session(page, context, month):
+                                        raise RuntimeError("セッション復旧に失敗")
+                                    select_user(page, user_name)
+
+                                success = apply_correction(page, correction, dry_run)
+                                if success:
+                                    result["success"] += 1
+                                    result["details"].append({
+                                        "user": user_name,
+                                        "date": correction.date_from or correction.date_to,
+                                        "action": correction.action,
+                                        "business_type": correction.business_type,
+                                        "status": "success",
+                                    })
+                                else:
+                                    result["failed"] += 1
+                                    result["details"].append({
+                                        "user": user_name,
+                                        "date": correction.date_from or correction.date_to,
+                                        "action": correction.action,
+                                        "business_type": correction.business_type,
+                                        "status": "failed",
+                                    })
+                                break  # 成功 or 通常失敗 → リトライしない
+                            except Exception as e:
+                                if attempt < max_retries:
+                                    print(f"  エラー（リトライします）: {e}")
+                                    continue
+                                print(f"  エラー: {e}")
                                 result["failed"] += 1
                                 result["details"].append({
                                     "user": user_name,
                                     "date": correction.date_from or correction.date_to,
                                     "action": correction.action,
                                     "business_type": correction.business_type,
-                                    "status": "failed",
+                                    "status": "error",
+                                    "reason": str(e),
                                 })
-                        except Exception as e:
-                            print(f"  エラー: {e}")
-                            result["failed"] += 1
-                            result["details"].append({
-                                "user": user_name,
-                                "date": correction.date_from or correction.date_to,
-                                "action": correction.action,
-                                "business_type": correction.business_type,
-                                "status": "error",
-                                "reason": str(e),
-                            })
 
                         page.wait_for_timeout(1000)
 

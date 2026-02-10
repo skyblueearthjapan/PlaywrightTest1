@@ -186,28 +186,52 @@ def login(page: Page, save_state: bool = False, context: BrowserContext = None, 
 
 
 def dismiss_popup(page: Page) -> None:
-    """ポップアップや通知バーを閉じる（表示されている場合）"""
+    """ポップアップや通知バーを閉じる（表示されている場合）
+
+    カイポケはKARTE（マーケティングツール）の広告ポップアップを表示することがある。
+    z-index: 2147483642 でサイドバーを覆い隠すため、確実に除去する必要がある。
+    """
     try:
-        # 黄色い通知バー「ログアウト発生をともなうリリースについて」のXボタンを閉じる
+        # 1. KARTE広告ポップアップをJavaScriptで強制除去
+        #    （閉じるボタンのクリックより確実）
+        removed = page.evaluate("""() => {
+            let count = 0;
+            // KARTEのルート要素をすべて除去
+            document.querySelectorAll('.karte-r, .karte-g, [id^="karte-"]').forEach(el => {
+                el.remove();
+                count++;
+            });
+            // 高z-indexのオーバーレイも除去（z-index > 2147483000）
+            document.querySelectorAll('*').forEach(el => {
+                const z = parseInt(window.getComputedStyle(el).zIndex);
+                if (z > 2147483000) {
+                    el.remove();
+                    count++;
+                }
+            });
+            return count;
+        }""")
+        if removed > 0:
+            print(f"  KARTE広告ポップアップを除去しました（{removed}要素）")
+            page.wait_for_timeout(500)
+
+        # 2. 通知バーの閉じるボタン（KARTE以外）
         close_buttons = [
+            ".karte-close",
+            "[aria-label='閉じる']",
             "button.close",
             "a.close",
             ".notification-close",
             "[aria-label='Close']",
-            "text=×",
         ]
         for selector in close_buttons:
             try:
                 close_btn = page.locator(selector).first
-                if close_btn.is_visible(timeout=1000):
+                if close_btn.is_visible(timeout=500):
                     close_btn.click()
                     page.wait_for_timeout(300)
             except Exception:
                 continue
-
-        # 画面中央のポップアップを閉じるためにクリック
-        page.mouse.click(400, 650)
-        page.wait_for_timeout(500)
     except Exception:
         pass
 
@@ -216,19 +240,35 @@ def goto_receipt(page: Page, timeout: int = 60000) -> None:
     """
     レセプト画面に遷移
 
+    ポップアップがレセプトボタンを覆っている場合はdismiss_popupを再実行してリトライする。
+
     Args:
         page: Playwrightのページオブジェクト
         timeout: タイムアウト（ミリ秒、デフォルト60秒）
     """
-    print("レセプトボタンをクリックしています...")
-    page.click("text=レセプト")
-    try:
-        page.wait_for_load_state("networkidle", timeout=timeout)
-    except Exception:
-        print("  (networkidle待機がタイムアウト、domcontentloadedで続行)")
-        page.wait_for_load_state("domcontentloaded", timeout=timeout)
-    page.wait_for_timeout(1000)
-    print("レセプト画面を表示しました")
+    max_attempts = 3
+    for attempt in range(max_attempts):
+        try:
+            print("レセプトボタンをクリックしています...")
+            page.click("text=レセプト", timeout=10000)
+            try:
+                page.wait_for_load_state("networkidle", timeout=timeout)
+            except Exception:
+                print("  (networkidle待機がタイムアウト、domcontentloadedで続行)")
+                page.wait_for_load_state("domcontentloaded", timeout=timeout)
+            page.wait_for_timeout(1000)
+            print("レセプト画面を表示しました")
+            return
+        except Exception as e:
+            if attempt < max_attempts - 1:
+                print(f"  レセプトボタンのクリック失敗（ポップアップ妨害の可能性）: {e}")
+                print(f"  ポップアップ除去を再試行します... ({attempt + 2}/{max_attempts})")
+                dismiss_popup(page)
+                page.wait_for_timeout(1000)
+            else:
+                raise RuntimeError(
+                    f"レセプトボタンをクリックできませんでした（{max_attempts}回試行）: {e}"
+                )
 
 
 def goto_yoriyori(page: Page, timeout: int = 60000) -> None:
@@ -455,6 +495,135 @@ def set_service_month(page: Page, month_str: str) -> None:
             return
 
     print(f"警告: 目標の月({target_text})に到達できませんでした")
+
+
+def verify_service_month(page: Page, month_str: str) -> None:
+    """
+    サービス提供月が正しく設定されているか検証
+
+    Args:
+        page: Playwrightのページオブジェクト
+        month_str: "2026-04" 形式の月文字列
+
+    Raises:
+        RuntimeError: 月の設定が不正な場合
+    """
+    year, month = parse_month(month_str)
+    reiwa_year = to_reiwa(year)
+    expected = f"令和{reiwa_year}年{month}月"
+
+    actual = ""
+    try:
+        selects = page.locator("select")
+        for i in range(selects.count()):
+            select = selects.nth(i)
+            if select.is_visible(timeout=1000):
+                text = select.evaluate(
+                    "el => el.options[el.selectedIndex] ? el.options[el.selectedIndex].text : ''"
+                )
+                if text and "令和" in text and "月" in text:
+                    actual = text.strip()
+                    break
+    except Exception:
+        pass
+
+    if actual and expected not in actual:
+        error_msg = f"月の設定が不正です！期待: {expected}, 実際: {actual}"
+        print(f"エラー: {error_msg}")
+        save_artifacts(page, Path("artifacts"), "wrong_month")
+        raise RuntimeError(error_msg)
+
+    print(f"月の検証OK: {actual or expected}")
+
+
+def setup_monthly_schedule_page(
+    page: Page,
+    context: BrowserContext,
+    month_str: str,
+) -> None:
+    """
+    ログイン → レセプト → 訪問看護 → 月間スケジュール → 月設定 → 月検証
+    を一括で行う共通セットアップ関数
+
+    Args:
+        page: Playwrightのページオブジェクト
+        context: ブラウザコンテキスト（state保存用）
+        month_str: "2026-04" 形式の月文字列
+    """
+    if not login(page, save_state=True, context=context):
+        raise RuntimeError("ログインに失敗しました")
+    page.wait_for_timeout(1000)
+    dismiss_popup(page)
+    goto_receipt(page)
+    goto_yoriyori(page)
+    goto_monthly_schedule(page)
+    set_service_month(page, month_str)
+    page.wait_for_timeout(1000)
+    verify_service_month(page, month_str)
+
+
+def check_session(page: Page) -> bool:
+    """
+    セッションが有効かどうかを確認
+
+    ログインフォーム（#form\\:corporation_id）が表示されていたらセッション切れ。
+    エラーページ（システムエラー等）もセッション無効とみなす。
+
+    Returns:
+        bool: セッションが有効ならTrue
+    """
+    try:
+        current_url = page.url
+        # ログインページにリダイレクトされている
+        if "biztop" in current_url:
+            login_form = page.locator("#form\\:corporation_id")
+            if login_form.is_visible(timeout=2000):
+                return False
+        # エラーページ
+        if "error" in current_url.lower() or "nonmember" in current_url.lower():
+            return False
+        # ページ内容でエラー検出
+        content = page.content()
+        if "システムエラー" in content or "処理を続行できませんでした" in content:
+            return False
+        return True
+    except Exception:
+        return False
+
+
+def ensure_session(page: Page, context: BrowserContext, month_str: str = None) -> bool:
+    """
+    セッションが切れていたら再ログイン＋ナビゲーションを復旧
+
+    Args:
+        page: Playwrightのページオブジェクト
+        context: ブラウザコンテキスト
+        month_str: 復旧後に月間スケジュール画面まで戻る場合の月（Noneなら再ログインのみ）
+
+    Returns:
+        bool: 復旧に成功したらTrue
+    """
+    if check_session(page):
+        return True
+
+    print("セッション切れを検出。再ログインします...")
+    try:
+        login(page, save_state=True, context=context)
+        page.wait_for_timeout(1000)
+        dismiss_popup(page)
+
+        if month_str:
+            goto_receipt(page)
+            goto_yoriyori(page)
+            goto_monthly_schedule(page)
+            set_service_month(page, month_str)
+            page.wait_for_timeout(1000)
+
+        print("セッション復旧完了")
+        return True
+    except Exception as e:
+        print(f"セッション復旧に失敗: {e}")
+        return False
 
 
 def save_artifacts(page: Page, out_dir: Path, prefix: str = "") -> None:
