@@ -554,22 +554,21 @@ def verify_service_month(page: Page, month_str: str) -> None:
     print(f"月の検証OK: {actual or expected}")
 
 
-def setup_monthly_schedule_page(
+def setup_yoriyori_page(
     page: Page,
     context: BrowserContext,
-    month_str: str,
 ) -> None:
     """
-    ログイン → レセプト → 訪問看護 → 月間スケジュール → 月設定 → 月検証
-    を一括で行う共通セットアップ関数
+    ログイン → レセプト → 訪問看護 まで遷移する共通セットアップ
 
     各ステップ後に「次のステップに必要な要素が見えるか」を確認。
-    見えなければ（SSOエラー等）最初からやり直す。
+    見えなければ（SSOエラー等）最初からやり直す（最大3回）。
+
+    expand, export, apply 等すべてのコマンドがこの関数を使う。
 
     Args:
         page: Playwrightのページオブジェクト
         context: ブラウザコンテキスト（state保存用）
-        month_str: "2026-04" 形式の月文字列
     """
     max_retries = 3
 
@@ -596,7 +595,6 @@ def setup_monthly_schedule_page(
             if not _page_has_element(page, "text=訪問看護/1260192047", timeout=8000):
                 print("レセプト遷移後に訪問看護リンクが見つかりません（SSOエラー等の可能性）")
                 print(f"  現在のURL: {page.url}")
-                # トップへ戻るリンクがあればクリック
                 try:
                     page.click("text=トップへ戻る", timeout=3000)
                     page.wait_for_timeout(1000)
@@ -607,19 +605,8 @@ def setup_monthly_schedule_page(
             # Step 3: 訪問看護遷移
             goto_yoriyori(page)
 
-            # Step 3 検証: 月間スケジュール管理リンクが見えるか
-            if not _page_has_element(page, "text=月間スケジュール管理", timeout=8000):
-                print("訪問看護遷移後に月間スケジュールリンクが見つかりません")
-                print(f"  現在のURL: {page.url}")
-                continue
-
-            # Step 4: 月間スケジュール → 月設定 → 検証
-            goto_monthly_schedule(page)
-            set_service_month(page, month_str)
-            page.wait_for_timeout(1000)
-            verify_service_month(page, month_str)
-
             # 全ステップ成功
+            print("訪問看護画面に到達しました")
             return
 
         except Exception as e:
@@ -629,6 +616,30 @@ def setup_monthly_schedule_page(
                 raise RuntimeError(
                     f"セットアップに{max_retries}回失敗しました。最後のエラー: {e}"
                 )
+
+
+def setup_monthly_schedule_page(
+    page: Page,
+    context: BrowserContext,
+    month_str: str,
+) -> None:
+    """
+    ログイン → レセプト → 訪問看護 → 月間スケジュール → 月設定 → 月検証
+    を一括で行う共通セットアップ関数
+
+    Args:
+        page: Playwrightのページオブジェクト
+        context: ブラウザコンテキスト（state保存用）
+        month_str: "2026-04" 形式の月文字列
+    """
+    # ログイン → レセプト → 訪問看護（検証・リトライ付き）
+    setup_yoriyori_page(page, context)
+
+    # 訪問看護 → 月間スケジュール → 月設定 → 検証
+    goto_monthly_schedule(page)
+    set_service_month(page, month_str)
+    page.wait_for_timeout(1000)
+    verify_service_month(page, month_str)
 
 
 def check_session(page: Page) -> bool:

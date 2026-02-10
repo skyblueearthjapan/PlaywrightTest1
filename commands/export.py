@@ -26,10 +26,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from playwright.sync_api import sync_playwright
 from lib.common import (
     create_browser_context,
-    login,
-    dismiss_popup,
-    goto_receipt,
-    goto_yoriyori,
+    setup_yoriyori_page,
     goto_export_page,
     parse_month,
     to_reiwa,
@@ -207,18 +204,8 @@ def run_export(
         browser, context, page = create_browser_context(p, headless=headless)
 
         try:
-            # ログイン
-            login(page, save_state=True, context=context)
-            page.wait_for_timeout(1000)
-
-            # ポップアップを閉じる
-            dismiss_popup(page)
-
-            # レセプト画面に遷移
-            goto_receipt(page)
-
-            # 訪問看護/よりより画面に遷移
-            goto_yoriyori(page)
+            # ログイン → レセプト → 訪問看護（検証・リトライ付き）
+            setup_yoriyori_page(page, context)
 
             # 出力対象選択画面に遷移（上部ナビゲーションの各種情報出力▼→出力対象選択）
             goto_export_page(page)
