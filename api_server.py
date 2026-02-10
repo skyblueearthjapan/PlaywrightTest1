@@ -279,6 +279,8 @@ def api_export():
         month = data.get("month", "2026-04")
         out_path = data.get("out_path")
         auto_drive_upload = data.get("auto_drive_upload", False)
+        week_start = data.get("week_start")  # "2026-04-06" or "20260406"
+        week_end = data.get("week_end")       # "2026-04-12" or "20260412"
 
         clear_stop()  # 非常停止フラグをクリア
         add_log(f"export 開始 (month={month})")
@@ -305,6 +307,29 @@ def api_export():
                 result["csv_content"] = csv_content
                 result["row_count"] = csv_content.count("\n")
                 result["file_size_bytes"] = csv_path.stat().st_size
+
+        # export_timestamp を追加
+        result["export_timestamp"] = datetime.now().isoformat()
+
+        # drive_file 情報を追加（GAS側でDriveアップロードする際に使用）
+        try:
+            config = load_drive_config()
+            folder_id = config.get("folder_id")
+            if folder_id:
+                month_str = month.replace("-", "")
+                drive_filename = config.get("current_csv_name", "kaipoke_export_{month}.csv")
+                drive_filename = drive_filename.replace("{month}", month_str)
+                result["drive_file"] = {
+                    "filename": drive_filename,
+                    "folder_id": folder_id,
+                }
+                # week_start/week_end が指定された場合、検証用ファイル名も追加
+                if week_start and week_end:
+                    ws = week_start.replace("-", "")
+                    we = week_end.replace("-", "")
+                    result["drive_file"]["verification_filename"] = f"kaipoke_current_{ws}_{we}_post_apply.csv"
+        except Exception:
+            pass
 
         # Google Driveに自動アップロード（Shared Drive使用時のみ有効）
         if auto_drive_upload and result.get("success"):

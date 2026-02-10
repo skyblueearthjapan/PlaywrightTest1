@@ -72,12 +72,13 @@ def calculate_santei_time(start_time: str, end_time: str) -> str:
     """
     開始時間と終了時間から算定時間の選択値を計算（介護保険用）
 
-    カイポケの算定時間セレクトの選択肢:
+    カイポケの算定時間セレクトの選択肢（実際の表記）:
+    - "なし"
     - "20分未満"
     - "30分未満"
     - "30分以上～1時間未満"
-    - "1時間以上～1時間30分未満"
-    - "1時間30分以上"
+    - "1時間以上～1時間半未満"
+    - "1時間半以上"
     """
     sh, sm = parse_time(start_time)
     eh, em = parse_time(end_time)
@@ -90,9 +91,9 @@ def calculate_santei_time(start_time: str, end_time: str) -> str:
     elif duration_minutes < 60:
         return "30分以上～1時間未満"
     elif duration_minutes < 90:
-        return "1時間以上～1時間30分未満"
+        return "1時間以上～1時間半未満"
     else:
-        return "1時間30分以上"
+        return "1時間半以上"
 
 
 # =============================================================================
@@ -235,6 +236,56 @@ def _save_debug_on_failure(page, day: int, start_time: str):
         print(f"    デバッグ保存エラー: {debug_err}")
 
 
+def _remove_floating_overlays(page):
+    """画面上のフローティング要素を除去（クリックブロック防止）"""
+    try:
+        page.evaluate("""() => {
+            // ASPエラーバナー、お問合せボタン、KARTE等を除去
+            const selectors = [
+                '.karte-r', '.karte-g', '[id^="karte-"]',
+                '[class*="asp-error"]', '[class*="floating"]',
+                '[class*="chat-widget"]', '[id*="inquiry"]',
+            ];
+            selectors.forEach(sel => {
+                document.querySelectorAll(sel).forEach(el => el.remove());
+            });
+            // 高z-indexのオーバーレイを除去
+            document.querySelectorAll('*').forEach(el => {
+                const z = parseInt(window.getComputedStyle(el).zIndex);
+                if (z > 2147483000) el.remove();
+            });
+            // position:fixedの小さな要素（バナー、チャット等）を除去
+            document.querySelectorAll('*').forEach(el => {
+                const style = window.getComputedStyle(el);
+                if (style.position === 'fixed' && el.tagName !== 'HTML' && el.tagName !== 'BODY') {
+                    const rect = el.getBoundingClientRect();
+                    // ヘッダー（top=0, 幅が広い）は残す、小さいバナーは除去
+                    if (rect.height < 100 && rect.bottom > 500) {
+                        el.remove();
+                    }
+                }
+            });
+        }""")
+    except Exception:
+        pass
+
+
+def _click_with_scroll(page, link, timeout=10000):
+    """要素をスクロール表示してからクリック（フォールバック: force click）"""
+    try:
+        link.scroll_into_view_if_needed(timeout=3000)
+        page.wait_for_timeout(300)
+        link.click(timeout=timeout)
+        return True
+    except Exception:
+        try:
+            # force clickでオーバーレイを無視
+            link.click(force=True, timeout=5000)
+            return True
+        except Exception as e2:
+            raise e2
+
+
 def click_schedule_entry(page, day: int, start_time: str) -> bool:
     """
     指定した日付・開始時間のスケジュールエントリをクリック
@@ -246,6 +297,9 @@ def click_schedule_entry(page, day: int, start_time: str) -> bool:
     """
     print(f"  予定をクリック: {day}日 {start_time}")
     day_str = str(day)
+
+    # フローティング要素を除去（クリックブロック防止）
+    _remove_floating_overlays(page)
 
     try:
         candidate_links = []
@@ -311,7 +365,7 @@ def click_schedule_entry(page, day: int, start_time: str) -> bool:
         # 1件のみ → そのままクリック
         if len(candidate_links) == 1:
             print(f"    {day}日に1件のエントリを発見")
-            candidate_links[0]["link"].click()
+            _click_with_scroll(page, candidate_links[0]["link"])
             page.wait_for_timeout(2000)
             return True
 
@@ -320,13 +374,13 @@ def click_schedule_entry(page, day: int, start_time: str) -> bool:
         for c in candidate_links:
             if start_time in c["time_text"]:
                 print(f"    時間一致: {c['time_text'].strip()}")
-                c["link"].click()
+                _click_with_scroll(page, c["link"])
                 page.wait_for_timeout(2000)
                 return True
 
         # 時間で絞り込めなかった場合は最初の1件をクリック
         print(f"    警告: 時間での絞り込み失敗。最初のエントリをクリック")
-        candidate_links[0]["link"].click()
+        _click_with_scroll(page, candidate_links[0]["link"])
         page.wait_for_timeout(2000)
         return True
 
@@ -339,6 +393,58 @@ def click_schedule_entry(page, day: int, start_time: str) -> bool:
 # =============================================================================
 # 時間・日付・職員の編集
 # =============================================================================
+
+def _set_event_time(page, start_hour: int, start_min: int, end_hour: int, end_min: int) -> bool:
+    """
+    イベントポップアップ(form#formIndividualMonthlyShiftAssignPopup)の時間を設定
+
+    イベントフォームの時間セレクトはname属性のみ（IDなし）:
+    - popupIndividualStartHour: 開始時 (値: "00"-"23")
+    - popupIndividualStartMinRight: 開始分・十の位 (値: "0"-"5")
+    - popupIndividualStartMinLeft: 開始分・一の位 (値: "0"-"9")
+    - popupIndividualEndHour: 終了時 (値: "00"-"23")
+    - popupIndividualEndMinRight: 終了分・十の位 (値: "0"-"5")
+    - popupIndividualEndMinLeft: 終了分・一の位 (値: "0"-"9")
+    """
+    print(f"  時間変更: {start_hour:02d}:{start_min:02d} - {end_hour:02d}:{end_min:02d}")
+
+    start_min_tens = start_min // 10
+    start_min_ones = start_min % 10
+    end_min_tens = end_min // 10
+    end_min_ones = end_min % 10
+
+    try:
+        form = page.locator("form#formIndividualMonthlyShiftAssignPopup")
+        if form.count() > 0 and form.is_visible(timeout=2000):
+            # name属性でセレクト要素を特定（時の値は"00"形式、分は"0"形式）
+            name_value_pairs = [
+                ("popupIndividualStartHour", f"{start_hour:02d}"),
+                ("popupIndividualStartMinRight", str(start_min_tens)),
+                ("popupIndividualStartMinLeft", str(start_min_ones)),
+                ("popupIndividualEndHour", f"{end_hour:02d}"),
+                ("popupIndividualEndMinRight", str(end_min_tens)),
+                ("popupIndividualEndMinLeft", str(end_min_ones)),
+            ]
+
+            for name, val in name_value_pairs:
+                sel = form.locator(f"select[name='{name}']")
+                if sel.count() > 0 and sel.is_visible(timeout=1000):
+                    sel.select_option(value=val)
+                    page.wait_for_timeout(200)
+                else:
+                    print(f"    警告: select[name='{name}'] が見つかりません")
+
+            print(f"    イベント時間設定完了")
+            return True
+
+        # フォールバック: 通常のスケジュール用セレクタ
+        print(f"    イベントフォーム未検出、通常セレクタにフォールバック")
+        return edit_schedule_time(page, start_hour, start_min, end_hour, end_min)
+
+    except Exception as e:
+        print(f"    イベント時間設定エラー: {e}")
+        return edit_schedule_time(page, start_hour, start_min, end_hour, end_min)
+
 
 def edit_schedule_time(page, start_hour: int, start_min: int, end_hour: int, end_min: int) -> bool:
     """
@@ -378,6 +484,44 @@ def edit_schedule_time(page, start_hour: int, start_min: int, end_hour: int, end
         return False
 
 
+def _set_add_modal_date(page, day: int) -> bool:
+    """
+    新規追加モーダルでの日付設定
+
+    新規追加モーダルではインラインカレンダー（jQuery UI Datepicker）が
+    直接表示されている。#simple-select-days-rangeはinputではなくdivの場合がある。
+    戦略:
+    1. モーダル内の既に表示されているカレンダーセルを直接クリック
+    2. フォールバック: change_date（既存の汎用関数）
+    """
+    print(f"  日付変更: → {day}日")
+    day_str = str(day)
+
+    try:
+        # Strategy 1: div#simple-select-days-range 内のインラインカレンダー
+        # (新規追加モーダルでは #simple-select-days-range は DIV.hasMultiDatepicker)
+        datepicker_div = page.locator("#simple-select-days-range .ui-datepicker-inline")
+        if datepicker_div.count() > 0 and datepicker_div.is_visible(timeout=2000):
+            cal_table = datepicker_div.locator("table.ui-datepicker-calendar")
+            if cal_table.count() > 0:
+                day_links = cal_table.locator("td a").all()
+                for link in day_links:
+                    if link.text_content().strip() == day_str:
+                        link.click()
+                        page.wait_for_timeout(500)
+                        print(f"    インラインカレンダーから {day} 日を選択")
+                        return True
+                print(f"    警告: インラインカレンダーに {day} 日が見つかりません")
+
+        # Strategy 2: フォールバック
+        print(f"    インラインカレンダー未検出、change_dateにフォールバック")
+        return change_date(page, day)
+
+    except Exception as e:
+        print(f"    新規追加日付設定エラー: {e}")
+        return change_date(page, day)
+
+
 def change_date(page, new_day: int) -> bool:
     """
     スケジュールの日付を変更
@@ -393,74 +537,80 @@ def change_date(page, new_day: int) -> bool:
     day_str = str(new_day)
 
     try:
-        # Strategy 1: jQuery UI Datepicker - inputをクリックしてポップアップを開く
-        # セレクタは #simple-select-days-range のみ（.hasMultiDatepickerは複数マッチするため避ける）
-        datepicker_input = page.locator("#simple-select-days-range")
-        if datepicker_input.is_visible(timeout=2000):
-            print(f"    デートピッカー input 検出")
-            datepicker_input.click()
-            page.wait_for_timeout(1000)
-
-            # カレンダーポップアップを複数セレクタで探す
-            calendar = None
-            for cal_selector in ["#ui-datepicker-div", ".ui-datepicker", ".datepicker"]:
-                cal = page.locator(cal_selector)
-                if cal.count() > 0 and cal.first.is_visible(timeout=1000):
-                    calendar = cal.first
-                    print(f"    カレンダー検出: {cal_selector}")
-                    break
-
-            if calendar:
-                # カレンダー内のaタグで日付を探す
-                day_cells = calendar.locator("td a").all()
-                for cell in day_cells:
-                    try:
-                        cell_text = cell.text_content().strip()
-                        if cell_text == day_str:
-                            cell.click()
+        datepicker_el = page.locator("#simple-select-days-range")
+        if datepicker_el.is_visible(timeout=2000):
+            # Strategy 1: インラインカレンダー（DIV.hasMultiDatepicker内）
+            inline_cal = datepicker_el.locator(".ui-datepicker-inline")
+            if inline_cal.count() > 0 and inline_cal.is_visible(timeout=1000):
+                cal_table = inline_cal.locator("table.ui-datepicker-calendar")
+                if cal_table.count() > 0:
+                    day_links = cal_table.locator("td a").all()
+                    for link in day_links:
+                        if link.text_content().strip() == day_str:
+                            link.click()
                             page.wait_for_timeout(500)
-                            print(f"    日付を {new_day} に変更（デートピッカー）")
+                            print(f"    インラインカレンダーから {new_day} 日を選択")
                             return True
-                    except Exception:
-                        continue
-            else:
-                print("    カレンダーポップアップが見つかりません。JS で日付を設定します")
+                    print(f"    警告: インラインカレンダーに {new_day} 日が見つかりません")
 
-            # Strategy 1b: JavaScript で jQuery UI Datepicker API を使う
-            try:
-                # 現在の入力値を取得してデバッグ出力
-                current_val = datepicker_input.input_value()
-                print(f"    現在の入力値: '{current_val}'")
+            # Strategy 2: INPUT要素の場合 - クリックしてポップアップカレンダーを開く
+            tag_name = datepicker_el.evaluate("el => el.tagName")
+            if tag_name == "INPUT":
+                print(f"    デートピッカー input 検出")
+                datepicker_el.click()
+                page.wait_for_timeout(1000)
 
-                # jQuery datepicker API で日付を変更
-                result = page.evaluate(f"""() => {{
-                    const el = document.querySelector('#simple-select-days-range');
-                    if (!el) return 'element not found';
-                    const currentVal = el.value;
-                    // 現在の値から年月を抽出して新しい日付を構成
-                    // 形式: "YYYY/MM/DD" or "YYYY-MM-DD" etc.
-                    const match = currentVal.match(/(\\d{{4}})[\\/-](\\d{{1,2}})/);
-                    if (match) {{
-                        const year = match[1];
-                        const month = match[2].padStart(2, '0');
-                        const day = '{day_str}'.padStart(2, '0');
-                        const newVal = year + '/' + month + '/' + day;
-                        el.value = newVal;
-                        if (typeof $ !== 'undefined' && $(el).datepicker) {{
-                            $(el).datepicker('setDate', newVal);
+                calendar = None
+                for cal_selector in ["#ui-datepicker-div", ".ui-datepicker", ".datepicker"]:
+                    cal = page.locator(cal_selector)
+                    if cal.count() > 0 and cal.first.is_visible(timeout=1000):
+                        calendar = cal.first
+                        print(f"    カレンダー検出: {cal_selector}")
+                        break
+
+                if calendar:
+                    day_cells = calendar.locator("td a").all()
+                    for cell in day_cells:
+                        try:
+                            cell_text = cell.text_content().strip()
+                            if cell_text == day_str:
+                                cell.click()
+                                page.wait_for_timeout(500)
+                                print(f"    日付を {new_day} に変更（デートピッカー）")
+                                return True
+                        except Exception:
+                            continue
+
+                # Strategy 2b: JS datepicker API
+                try:
+                    current_val = datepicker_el.input_value()
+                    result = page.evaluate(f"""() => {{
+                        const el = document.querySelector('#simple-select-days-range');
+                        if (!el) return 'element not found';
+                        const currentVal = el.value;
+                        const match = currentVal.match(/(\\d{{4}})[\\/-](\\d{{1,2}})/);
+                        if (match) {{
+                            const year = match[1];
+                            const month = match[2].padStart(2, '0');
+                            const day = '{day_str}'.padStart(2, '0');
+                            const newVal = year + '/' + month + '/' + day;
+                            el.value = newVal;
+                            if (typeof $ !== 'undefined' && $(el).datepicker) {{
+                                $(el).datepicker('setDate', newVal);
+                            }}
+                            $(el).trigger('change');
+                            return 'set to ' + newVal;
                         }}
-                        $(el).trigger('change');
-                        return 'set to ' + newVal;
-                    }}
-                    return 'could not parse: ' + currentVal;
-                }}""")
-                print(f"    JS datepicker結果: {result}")
-                if result and result.startswith("set to"):
-                    page.wait_for_timeout(500)
-                    print(f"    日付を {new_day} に変更（JavaScript）")
-                    return True
-            except Exception as js_err:
-                print(f"    JS datepicker エラー: {js_err}")
+                        return 'could not parse: ' + currentVal;
+                    }}""")
+                    if result and result.startswith("set to"):
+                        page.wait_for_timeout(500)
+                        print(f"    日付を {new_day} に変更（JavaScript）")
+                        return True
+                except Exception as js_err:
+                    print(f"    JS datepicker エラー: {js_err}")
+            else:
+                print(f"    #simple-select-days-range はDIVですがインラインカレンダーが見つかりません")
         else:
             print("    #simple-select-days-range が見つかりません")
 
@@ -505,45 +655,64 @@ def edit_staff(page, staff1_name: str, staff2_name: str = "",
     """
     try:
         # 新規追加の場合、職員情報入力ボタンをクリック
+        # デバッグで判明: #btnInputStaff(input)は hidden、#input_staff_on(span)が visible
         if for_new_entry:
             staff_btn_found = False
             for btn_selector in [
+                "span#input_staff_on",
+                "input[value='職員情報入力']",
                 "input#btnInputStaff",
                 "#btnInputStaff",
-                "input[value='職員情報入力']:visible",
+                "button:has-text('職員情報入力')",
+                "a:has-text('職員情報入力')",
             ]:
                 staff_info_btn = page.locator(btn_selector).first
                 try:
                     if staff_info_btn.is_visible(timeout=2000):
-                        staff_info_btn.click()
-                        page.wait_for_timeout(1000)
+                        _click_with_scroll(page, staff_info_btn)
+                        page.wait_for_timeout(2000)
                         print(f"    「職員情報入力」ボタンをクリック ({btn_selector})")
                         staff_btn_found = True
                         break
                 except Exception:
                     continue
             if not staff_btn_found:
-                print("    警告: 職員情報入力ボタンが見つかりません")
+                # デバッグ: モーダル内のボタン/inputを列挙
+                try:
+                    buttons = page.locator(".modal:visible input[type='button'], .modal:visible input[type='submit'], .modal:visible button").all()
+                    btn_info = []
+                    for b in buttons[:15]:
+                        val = b.get_attribute("value") or b.text_content() or ""
+                        bid = b.get_attribute("id") or ""
+                        btn_info.append(f"{bid}={val.strip()[:20]}")
+                    print(f"    警告: 職員情報入力ボタンが見つかりません。モーダル内ボタン: {btn_info}")
+                except Exception:
+                    print("    警告: 職員情報入力ボタンが見つかりません")
 
         # 職員1を設定
         if staff1_name:
             staff1_select = page.locator("select#chargeStaff1Id1")
             if staff1_select.is_visible(timeout=3000):
-                options = staff1_select.locator("option").all()
-                selected = False
-                for opt in options:
-                    opt_text = opt.text_content()
-                    if name_matches(staff1_name, opt_text):
-                        staff1_select.select_option(label=opt_text)
-                        page.wait_for_timeout(300)
-                        print(f"    職員1設定: {staff1_name}")
-                        selected = True
-                        break
-                if not selected:
-                    print(f"    警告: 職員1 '{staff1_name}' が選択肢に見つかりません")
-                    # デバッグ: 選択肢を出力
-                    opt_names = [o.text_content().strip() for o in options[:10]]
-                    print(f"    選択肢: {opt_names}")
+                if staff1_name == "未割当":
+                    # 「未割当」の場合は '-'（未設定）を選択
+                    staff1_select.select_option(index=0)
+                    page.wait_for_timeout(300)
+                    print(f"    職員1設定: 未割当（'-'を選択）")
+                else:
+                    options = staff1_select.locator("option").all()
+                    selected = False
+                    for opt in options:
+                        opt_text = opt.text_content()
+                        if name_matches(staff1_name, opt_text):
+                            staff1_select.select_option(label=opt_text)
+                            page.wait_for_timeout(300)
+                            print(f"    職員1設定: {staff1_name}")
+                            selected = True
+                            break
+                    if not selected:
+                        print(f"    警告: 職員1 '{staff1_name}' が選択肢に見つかりません")
+                        opt_names = [o.text_content().strip() for o in options[:10]]
+                        print(f"    選択肢: {opt_names}")
             else:
                 print("    警告: select#chargeStaff1Id1 が見つかりません")
 
@@ -897,12 +1066,20 @@ def fill_nursing_insurance_fields(page, start_time: str, end_time: str) -> bool:
                     break
                 page.wait_for_timeout(500)
             options = estimate4.locator("option").all()
+            selected = False
             for opt in options:
                 if santei_time in opt.text_content():
                     estimate4.select_option(label=opt.text_content())
-                    page.wait_for_timeout(500)
-                    print(f"    算定時間: {opt.text_content()}")
+                    page.wait_for_timeout(1000)
+                    print(f"    算定時間: {opt.text_content().strip()}")
+                    selected = True
                     break
+            if not selected:
+                opt_texts = [o.text_content().strip() for o in options]
+                print(f"    警告: 算定時間 '{santei_time}' が選択肢に見つかりません")
+                print(f"    選択肢: {opt_texts}")
+        else:
+            print("    警告: select#inPopupEstimate4 が見つかりません")
 
         return True
 
@@ -947,8 +1124,8 @@ def add_schedule_entry(page, correction: Correction, dry_run: bool = False) -> b
                 close_edit_dialog(page)
                 return False
 
-        # Step 3: 日付を設定
-        change_date(page, day)
+        # Step 3: 日付を設定（新規追加用: インラインカレンダーを使用）
+        _set_add_modal_date(page, day)
 
         # Step 4: 時間を設定
         start_parts = correction.start_time_to.split(":")
@@ -1193,14 +1370,15 @@ def add_event_entry(page, correction: Correction, dry_run: bool = False) -> bool
 
     try:
         # Step 1: 「個別業務の新規登録」ボタンをクリック
+        _remove_floating_overlays(page)
         new_event_btn = page.locator("button#individualMonthlyShiftAssignPopup")
-        if not new_event_btn.is_visible(timeout=3000):
+        if not new_event_btn.is_visible(timeout=5000):
             # Fallback
             new_event_btn = page.locator("text=個別業務の新規登録").first
-            if not new_event_btn.is_visible(timeout=2000):
+            if not new_event_btn.is_visible(timeout=3000):
                 print("    「個別業務の新規登録」ボタンが見つかりません")
                 return False
-        new_event_btn.click()
+        _click_with_scroll(page, new_event_btn)
         page.wait_for_timeout(2000)
 
         # Step 2: 「新しく登録する」ラジオを選択
@@ -1278,11 +1456,11 @@ def add_event_entry(page, correction: Correction, dry_run: bool = False) -> bool
             close_edit_dialog(page)
             return False
 
-        # Step 4: 時間を設定
+        # Step 4: 時間を設定（イベントポップアップ用セレクタを調査・使用）
         start_parts = correction.start_time_to.split(":")
         end_parts = correction.end_time_to.split(":")
         if len(start_parts) >= 2 and len(end_parts) >= 2:
-            edit_schedule_time(
+            _set_event_time(
                 page,
                 int(start_parts[0]), int(start_parts[1]),
                 int(end_parts[0]), int(end_parts[1])
@@ -1499,6 +1677,9 @@ def run_auto_apply(
         print(f"target_users: {target_users}")
     print("")
 
+    import time as _time
+    _start_time = _time.time()
+
     result = {
         "total": len(corrections),
         "schedule_total": len(schedule_corrections),
@@ -1506,6 +1687,7 @@ def run_auto_apply(
         "success": 0,
         "failed": 0,
         "skipped": 0,
+        "warnings": [],
         "details": [],
     }
 
@@ -1578,6 +1760,15 @@ def run_auto_apply(
                                         "business_type": correction.business_type,
                                         "status": "success",
                                     })
+                                    # 未割当の警告を追加
+                                    if correction.staff1_to == "未割当":
+                                        result["warnings"].append({
+                                            "type": "unassigned_staff",
+                                            "user": user_name,
+                                            "date": correction.date_from or correction.date_to,
+                                            "action": correction.action,
+                                            "message": "職員1を未割当（'-'）で登録しました",
+                                        })
                                 else:
                                     result["failed"] += 1
                                     result["details"].append({
@@ -1657,6 +1848,10 @@ def run_auto_apply(
                                 })
                             continue
 
+                        # 職員切替後のページ安定待機
+                        page.wait_for_timeout(2000)
+                        _remove_floating_overlays(page)
+
                         for correction in staff_corrections:
                             if is_stop_requested():
                                 result["stopped"] = True
@@ -1697,9 +1892,15 @@ def run_auto_apply(
 
                             page.wait_for_timeout(1000)
 
+            # 実行時間・タイムスタンプを記録
+            result["execution_time_sec"] = round(_time.time() - _start_time, 1)
+            result["completed_at"] = datetime.datetime.now().isoformat()
+
             print(f"\n=== 自動適用完了 ===")
             print(f"成功: {result['success']} / 失敗: {result['failed']} / "
                   f"スキップ: {result['skipped']} / 合計: {result['total']}")
+            if result["warnings"]:
+                print(f"警告: {len(result['warnings'])}件")
 
         except Exception as e:
             print(f"エラーが発生しました: {e}")
