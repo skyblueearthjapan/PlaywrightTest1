@@ -246,11 +246,32 @@ def goto_receipt(page: Page, timeout: int = 60000) -> None:
         page: Playwrightのページオブジェクト
         timeout: タイムアウト（ミリ秒、デフォルト60秒）
     """
+    # サイドバー内の「レセプト」リンクを特定するセレクタ（優先度順）
+    # "text=レセプト" は通知メール件名等にもマッチするため使用しない
+    receipt_selectors = [
+        "#gNavBiz-wrap a:has(i.sprite-rezept)",       # アイコンクラスで特定（最も確実）
+        "a[onclick*=\"pushClickIconEvent('レセプト')\"]",  # onclick属性で特定
+        "#gNavBiz-wrap a:has-text('レセプト')",        # サイドバー内にスコープ
+    ]
+
     max_attempts = 3
     for attempt in range(max_attempts):
         try:
             print("レセプトボタンをクリックしています...")
-            page.click("text=レセプト", timeout=10000)
+            clicked = False
+            for selector in receipt_selectors:
+                try:
+                    btn = page.locator(selector).first
+                    btn.wait_for(state="visible", timeout=5000)
+                    btn.click(timeout=10000)
+                    clicked = True
+                    break
+                except Exception:
+                    continue
+
+            if not clicked:
+                raise RuntimeError("レセプトリンクが見つかりません")
+
             try:
                 page.wait_for_load_state("networkidle", timeout=timeout)
             except Exception:
@@ -261,7 +282,7 @@ def goto_receipt(page: Page, timeout: int = 60000) -> None:
             return
         except Exception as e:
             if attempt < max_attempts - 1:
-                print(f"  レセプトボタンのクリック失敗（ポップアップ妨害の可能性）: {e}")
+                print(f"  レセプトボタンのクリック失敗（{e}）")
                 print(f"  ポップアップ除去を再試行します... ({attempt + 2}/{max_attempts})")
                 dismiss_popup(page)
                 page.wait_for_timeout(1000)
