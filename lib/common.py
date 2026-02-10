@@ -61,7 +61,8 @@ def create_browser_context(playwright, headless: bool = False, use_state: bool =
     return browser, context, page
 
 
-def login(page: Page, save_state: bool = False, context: BrowserContext = None, timeout: int = 60000) -> bool:
+def login(page: Page, save_state: bool = False, context: BrowserContext = None,
+          timeout: int = 60000, force: bool = False) -> bool:
     """
     カイポケにログイン
 
@@ -70,6 +71,7 @@ def login(page: Page, save_state: bool = False, context: BrowserContext = None, 
         save_state: ログイン状態を保存するか
         context: storage_state保存用のコンテキスト
         timeout: タイムアウト（ミリ秒、デフォルト60秒）
+        force: Trueの場合、Cookieをクリアして毎回ログインフォームから入る
 
     Returns:
         bool: ログイン成功かどうか
@@ -80,6 +82,11 @@ def login(page: Page, save_state: bool = False, context: BrowserContext = None, 
 
     if not corp_id or not user_id or not password:
         raise ValueError(".env ファイルに KAIPOKE_CORP_ID, KAIPOKE_USER_ID, KAIPOKE_PASSWORD が設定されていません")
+
+    # force=True: Cookieをクリアして必ずログインフォームを表示させる
+    if force and context:
+        print("セッションをクリアして新規ログインします...")
+        context.clear_cookies()
 
     print(f"ログインページを開いています: {LOGIN_URL}")
     page.goto(LOGIN_URL, timeout=timeout)
@@ -92,48 +99,45 @@ def login(page: Page, save_state: bool = False, context: BrowserContext = None, 
         page.wait_for_load_state("domcontentloaded", timeout=timeout)
 
     # エラーページチェック（最優先）
-    # エラーページのURLには "kaipokebiz" や "nonmember" が含まれることがある
     current_url = page.url
     page_content = page.content()
 
-    # エラーページの特徴的なテキストをチェック
     is_error_page = (
         "error" in current_url.lower() or
         "nonmember" in current_url.lower() or
         "システムエラー" in page_content or
         "処理を続行できませんでした" in page_content or
-        "トップへ戻る" in page_content and "ブラウザの「戻る」" in page_content
+        ("トップへ戻る" in page_content and "ブラウザの「戻る」" in page_content)
     )
 
     if is_error_page:
         print("エラーページが検出されました。ログインページに戻ります...")
-        # トップへ戻るボタンをクリックするか、直接ログインURLへ
         try:
             page.click("text=トップへ戻る", timeout=5000)
             page.wait_for_load_state("domcontentloaded", timeout=timeout)
             page.wait_for_timeout(1000)
         except Exception:
-            # ボタンがない場合は直接ログインURLへ
             page.goto(LOGIN_URL, timeout=timeout)
             page.wait_for_load_state("domcontentloaded", timeout=timeout)
 
-    # すでにログイン済みかチェック（エラーページでないことを確認後）
-    current_url = page.url
-    if "biztop" not in current_url and "error" not in current_url.lower() and "nonmember" not in current_url.lower():
-        # ダッシュボードの特徴的な要素をチェック
-        try:
-            dashboard_element = page.locator("text=レセプト").first
-            if dashboard_element.is_visible(timeout=3000):
-                print(f"すでにログイン済みです（URL: {current_url}）")
-                return True
-        except Exception:
-            pass
+    # force=Falseの場合のみ、ログイン済みチェックでスキップ可能
+    if not force:
+        current_url = page.url
+        if "biztop" not in current_url and "error" not in current_url.lower() and "nonmember" not in current_url.lower():
+            try:
+                dashboard_element = page.locator("#gNavBiz-wrap").first
+                if dashboard_element.is_visible(timeout=3000):
+                    print(f"すでにログイン済みです（URL: {current_url}）")
+                    return True
+            except Exception:
+                pass
 
     # ログインフォームが表示されているか確認
     corp_id_field = page.locator("#form\\:corporation_id")
     if not corp_id_field.is_visible(timeout=5000):
-        # フォームがない場合、ログインURLへ再度遷移
         print("ログインフォームが見つかりません。ログインURLへ再遷移します...")
+        if context:
+            context.clear_cookies()
         page.goto(LOGIN_URL, timeout=timeout)
         page.wait_for_load_state("domcontentloaded", timeout=timeout)
         page.wait_for_timeout(1000)
@@ -278,8 +282,30 @@ def goto_receipt(page: Page, timeout: int = 60000) -> None:
                 print("  (networkidle待機がタイムアウト、domcontentloadedで続行)")
                 page.wait_for_load_state("domcontentloaded", timeout=timeout)
             page.wait_for_timeout(1000)
+
+            # SSO エラーページ検出
+            # 「処理を続行できませんでした」「トップへ戻る」が表示される
+            page_content = page.content()
+            if "処理を続行できませんでした" in page_content or (
+                "トップへ戻る" in page_content and "sso.do" in page.url
+            ):
+                raise RuntimeError("SSO_ERROR")
+
             print("レセプト画面を表示しました")
             return
+        except RuntimeError as e:
+            if str(e) == "SSO_ERROR":
+                # SSOエラーは呼び出し元（setup_monthly_schedule_page）で回復する
+                raise
+            if attempt < max_attempts - 1:
+                print(f"  レセプトボタンのクリック失敗（{e}）")
+                print(f"  ポップアップ除去を再試行します... ({attempt + 2}/{max_attempts})")
+                dismiss_popup(page)
+                page.wait_for_timeout(1000)
+            else:
+                raise RuntimeError(
+                    f"レセプトボタンをクリックできませんでした（{max_attempts}回試行）: {e}"
+                )
         except Exception as e:
             if attempt < max_attempts - 1:
                 print(f"  レセプトボタンのクリック失敗（{e}）")
@@ -566,16 +592,44 @@ def setup_monthly_schedule_page(
     ログイン → レセプト → 訪問看護 → 月間スケジュール → 月設定 → 月検証
     を一括で行う共通セットアップ関数
 
+    毎回Cookieをクリアして新規ログインすることでSSO失敗を防ぐ。
+    SSOエラーが発生した場合は「トップへ戻る→再ログイン→レセプト」で回復する。
+
     Args:
         page: Playwrightのページオブジェクト
         context: ブラウザコンテキスト（state保存用）
         month_str: "2026-04" 形式の月文字列
     """
-    if not login(page, save_state=True, context=context):
+    # 毎回新規ログイン（force=True: Cookieクリア→ログインフォームから入る）
+    if not login(page, save_state=True, context=context, force=True):
         raise RuntimeError("ログインに失敗しました")
     page.wait_for_timeout(1000)
     dismiss_popup(page)
-    goto_receipt(page)
+
+    # レセプト遷移（SSOエラー時は回復して再試行）
+    max_sso_retries = 2
+    for sso_attempt in range(max_sso_retries):
+        try:
+            goto_receipt(page)
+            break  # 成功
+        except RuntimeError as e:
+            if "SSO_ERROR" in str(e) and sso_attempt < max_sso_retries - 1:
+                print("SSOエラーが検出されました。トップへ戻る→再ログイン→レセプトで回復します...")
+                # トップへ戻る
+                try:
+                    page.click("text=トップへ戻る", timeout=5000)
+                    page.wait_for_load_state("domcontentloaded", timeout=30000)
+                    page.wait_for_timeout(1000)
+                except Exception:
+                    pass
+                # 再ログイン（force=True）
+                if not login(page, save_state=True, context=context, force=True):
+                    raise RuntimeError("SSO回復: 再ログインに失敗しました")
+                page.wait_for_timeout(1000)
+                dismiss_popup(page)
+            else:
+                raise
+
     goto_yoriyori(page)
     goto_monthly_schedule(page)
     set_service_month(page, month_str)
