@@ -146,6 +146,11 @@ def expand_weekly_pattern(page, dialog_tracker: dict) -> str:
             print("  週間パターン未設定 → スキップ")
             return "skipped"
 
+        # ボタンがdisabledの場合はパターン未設定 → 即スキップ
+        if expand_btn.first.get_attribute("disabled"):
+            print("  週間パターン未設定（ボタン無効） → スキップ")
+            return "skipped"
+
         # ボタンをクリック（→ ネイティブconfirmダイアログが出る場合あり）
         expand_btn.first.click()
 

@@ -31,6 +31,8 @@ from lib.common import (
     ensure_session,
     save_artifacts,
     parse_month,
+    goto_monthly_schedule,
+    set_service_month,
 )
 from lib.diff_engine import load_correction_sheet, Correction, parse_time
 from lib.stop_signal import is_stop_requested, clear_stop
@@ -270,8 +272,29 @@ def _remove_floating_overlays(page):
         pass
 
 
+def _safe_click(page, locator, timeout=10000, description=""):
+    """要素をクリック（タイムアウト時はforce+noWaitAfter→JSクリックにフォールバック）"""
+    try:
+        locator.click(timeout=timeout)
+    except Exception:
+        # Step 2: force + no_wait_after でPlaywrightクリック（DOMイベント正常発火、JSF対応）
+        try:
+            if description:
+                print(f"    {description}: Playwrightクリックタイムアウト → force+noWaitAfterで再試行")
+            locator.click(force=True, no_wait_after=True, timeout=3000)
+            page.wait_for_timeout(1000)
+        except Exception:
+            # Step 3: 最終手段 - JSクリック（JSFサーバーサイド状態が不完全になるリスクあり）
+            if description:
+                print(f"    {description}: force+noWaitAfterも失敗 → JSクリック")
+            else:
+                print(f"    force+noWaitAfterも失敗 → JSクリック")
+            locator.evaluate("el => el.click()")
+            page.wait_for_timeout(500)
+
+
 def _click_with_scroll(page, link, timeout=10000):
-    """要素をスクロール表示してからクリック（フォールバック: force click）"""
+    """要素をスクロール表示してからクリック（フォールバック: force click → JS click）"""
     try:
         link.scroll_into_view_if_needed(timeout=3000)
         page.wait_for_timeout(300)
@@ -279,11 +302,27 @@ def _click_with_scroll(page, link, timeout=10000):
         return True
     except Exception:
         try:
-            # force clickでオーバーレイを無視
-            link.click(force=True, timeout=5000)
+            # Step 2: force + no_wait_after でPlaywrightクリック（DOMイベント正常発火）
+            link.click(force=True, no_wait_after=True, timeout=3000)
+            page.wait_for_timeout(2000)
             return True
-        except Exception as e2:
-            raise e2
+        except Exception:
+            pass
+        # Step 3: 最終手段 - JSで直接onclick実行
+        try:
+            onclick_attr = link.get_attribute("onclick")
+            if onclick_attr:
+                print(f"    Playwrightクリックタイムアウト → JSで直接onclick実行")
+                page.evaluate(f"() => {{ {onclick_attr} }}")
+                page.wait_for_timeout(3000)
+                return True
+            else:
+                # onclick属性なし → 要素をJSクリック
+                link.evaluate("el => el.click()")
+                page.wait_for_timeout(3000)
+                return True
+        except Exception as e3:
+            raise e3
 
 
 def click_schedule_entry(page, day: int, start_time: str) -> bool:
@@ -453,6 +492,10 @@ def edit_schedule_time(page, start_hour: int, start_min: int, end_hour: int, end
     セレクタ:
     - #inPopupStartHour, #inPopupStartMinute1, #inPopupStartMinute2
     - #inPopupEndHour, #inPopupEndMinute1, #inPopupEndMinute2
+
+    注意: select_option だけでは Kaipoke の onchange バリデーションが発火しない
+    場合があるため、JavaScript で値設定＋イベント発火を行う。
+    option value は "9" / "09" 両形式に対応（parseInt で数値比較）。
     """
     print(f"  時間変更: {start_hour:02d}:{start_min:02d} - {end_hour:02d}:{end_min:02d}")
 
@@ -463,20 +506,63 @@ def edit_schedule_time(page, start_hour: int, start_min: int, end_hour: int, end
         end_min_ones = end_min % 10
 
         selectors_and_values = [
-            ("#inPopupStartHour", str(start_hour)),
-            ("#inPopupStartMinute1", str(start_min_tens)),
-            ("#inPopupStartMinute2", str(start_min_ones)),
-            ("#inPopupEndHour", str(end_hour)),
-            ("#inPopupEndMinute1", str(end_min_tens)),
-            ("#inPopupEndMinute2", str(end_min_ones)),
+            ("#inPopupStartHour", start_hour),
+            ("#inPopupStartMinute1", start_min_tens),
+            ("#inPopupStartMinute2", start_min_ones),
+            ("#inPopupEndHour", end_hour),
+            ("#inPopupEndMinute1", end_min_tens),
+            ("#inPopupEndMinute2", end_min_ones),
         ]
 
         for selector, value in selectors_and_values:
             elem = page.locator(selector)
-            if elem.is_visible():
-                elem.select_option(value=value)
-                page.wait_for_timeout(200)
+            if elem.is_visible(timeout=2000):
+                # disabled チェック＆強制有効化
+                is_disabled = page.evaluate(f"document.querySelector('{selector}')?.disabled")
+                if is_disabled:
+                    print(f"    {selector} がdisabled → 強制有効化")
+                    page.evaluate(f"""() => {{
+                        const el = document.querySelector('{selector}');
+                        if (el) {{ el.disabled = false; el.removeAttribute('disabled'); }}
+                    }}""")
+                    page.wait_for_timeout(300)
 
+                # 数値→文字列変換: まず非ゼロ埋め、ダメならゼロ埋めを試行
+                try:
+                    elem.select_option(value=str(value), timeout=5000)
+                except Exception:
+                    try:
+                        elem.select_option(value=f"{value:02d}", timeout=5000)
+                    except Exception:
+                        # 最終手段: JSで直接値を設定
+                        print(f"    {selector}: select_option失敗 → JS直接設定")
+                        page.evaluate(f"""() => {{
+                            const el = document.querySelector('{selector}');
+                            if (el) {{
+                                el.disabled = false;
+                                el.removeAttribute('disabled');
+                                // 値をマッチング（数値比較）
+                                const target = {value};
+                                for (let i = 0; i < el.options.length; i++) {{
+                                    if (parseInt(el.options[i].value) === target) {{
+                                        el.selectedIndex = i;
+                                        el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                                        break;
+                                    }}
+                                }}
+                            }}
+                        }}""")
+                        page.wait_for_timeout(500)
+                        continue
+                # AJAX完了待機
+                try:
+                    page.wait_for_load_state("networkidle", timeout=3000)
+                except Exception:
+                    pass
+                page.wait_for_timeout(500)
+
+        # 最終バリデーション完了待ち
+        page.wait_for_timeout(1000)
         return True
 
     except Exception as e:
@@ -507,8 +593,14 @@ def _set_add_modal_date(page, day: int) -> bool:
                 day_links = cal_table.locator("td a").all()
                 for link in day_links:
                     if link.text_content().strip() == day_str:
-                        link.click()
-                        page.wait_for_timeout(500)
+                        _safe_click(page, link, timeout=5000, description="カレンダー日付クリック")
+                        # AJAX完了待機（日付変更でサーバーサイド検証が走る）
+                        try:
+                            page.wait_for_load_state("networkidle", timeout=5000)
+                        except Exception:
+                            pass
+                        page.wait_for_timeout(1000)
+                        _close_datepicker(page)
                         print(f"    インラインカレンダーから {day} 日を選択")
                         return True
                 print(f"    警告: インラインカレンダーに {day} 日が見つかりません")
@@ -520,6 +612,81 @@ def _set_add_modal_date(page, day: int) -> bool:
     except Exception as e:
         print(f"    新規追加日付設定エラー: {e}")
         return change_date(page, day)
+
+
+def _check_form_errors(page, step_label: str = ""):
+    """モーダル内のエラーメッセージを検出してログ出力 + スクリーンショット"""
+    try:
+        errors = page.evaluate("""() => {
+            const msgs = [];
+            // エラーメッセージ要素を検索（*のみの必須マークは除外）
+            const selectors = [
+                '.error', '.alert-danger', '.alert-error', '.text-danger',
+                '.validation-error', '.has-error', '[class*="error"]',
+                '.errorMessage', '#errorMessage', '.err_msg',
+                '.message_error',
+            ];
+            selectors.forEach(sel => {
+                document.querySelectorAll(sel).forEach(el => {
+                    const text = el.textContent.trim();
+                    // *のみや空文字は除外
+                    if (text && text.length > 2 && text !== '*' && !msgs.includes(text)) {
+                        msgs.push(sel + ': ' + text.substring(0, 200));
+                    }
+                });
+            });
+            // ピンク/赤背景の要素（実際のエラーバナー）
+            document.querySelectorAll('div, p, span, li, ul').forEach(el => {
+                const bg = window.getComputedStyle(el).backgroundColor;
+                if (bg) {
+                    const match = bg.match(/rgb\\((\\d+),\\s*(\\d+),\\s*(\\d+)/);
+                    if (match) {
+                        const r = parseInt(match[1]), g = parseInt(match[2]), b = parseInt(match[3]);
+                        // ピンク/赤系背景 (r > 200, g < 180)
+                        if (r > 200 && g < 180 && b < 180) {
+                            const text = el.textContent.trim();
+                            if (text && text.length > 3 && text.length < 500) {
+                                msgs.push('bg(' + bg + '): ' + text.substring(0, 200));
+                            }
+                        }
+                    }
+                }
+            });
+            return msgs;
+        }""")
+        if errors:
+            print(f"    【診断:{step_label}】エラー検出:")
+            for e in errors[:10]:
+                print(f"      {e}")
+        else:
+            print(f"    【診断:{step_label}】エラーなし")
+
+        # 毎回スクリーンショット保存（診断用）
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        safe_label = step_label.replace(":", "_").replace("/", "_")
+        page.screenshot(path=f"artifacts/diag_{safe_label}_{timestamp}.png")
+        print(f"    【診断】スクリーンショット: artifacts/diag_{safe_label}_{timestamp}.png")
+
+    except Exception as ex:
+        print(f"    【診断:{step_label}】エラーチェック失敗: {ex}")
+
+
+def _close_datepicker(page):
+    """開いているデートピッカーを確実に閉じる"""
+    try:
+        page.evaluate("""() => {
+            // ポップアップカレンダーを非表示
+            const popup = document.querySelector('#ui-datepicker-div');
+            if (popup) popup.style.display = 'none';
+            // jQuery UIのdatepicker API で閉じる
+            if (typeof $ !== 'undefined') {
+                $('.hasDatepicker').datepicker('hide');
+                $('.hasMultiDatepicker').datepicker('hide');
+            }
+        }""")
+        page.wait_for_timeout(300)
+    except Exception:
+        pass
 
 
 def change_date(page, new_day: int) -> bool:
@@ -547,8 +714,9 @@ def change_date(page, new_day: int) -> bool:
                     day_links = cal_table.locator("td a").all()
                     for link in day_links:
                         if link.text_content().strip() == day_str:
-                            link.click()
+                            _safe_click(page, link, timeout=5000, description="カレンダー日付クリック")
                             page.wait_for_timeout(500)
+                            _close_datepicker(page)
                             print(f"    インラインカレンダーから {new_day} 日を選択")
                             return True
                     print(f"    警告: インラインカレンダーに {new_day} 日が見つかりません")
@@ -574,8 +742,9 @@ def change_date(page, new_day: int) -> bool:
                         try:
                             cell_text = cell.text_content().strip()
                             if cell_text == day_str:
-                                cell.click()
+                                _safe_click(page, cell, timeout=5000, description="カレンダー日付クリック")
                                 page.wait_for_timeout(500)
+                                _close_datepicker(page)
                                 print(f"    日付を {new_day} に変更（デートピッカー）")
                                 return True
                         except Exception:
@@ -689,6 +858,70 @@ def edit_staff(page, staff1_name: str, staff2_name: str = "",
                 except Exception:
                     print("    警告: 職員情報入力ボタンが見つかりません")
 
+        # 職員情報入力ボタンクリック後のデバッグ＋リトライ
+        if for_new_entry:
+            try:
+                # DOM内の全selectを列挙
+                all_selects = page.evaluate("""() => {
+                    return Array.from(document.querySelectorAll('select')).map(s => ({
+                        id: s.id,
+                        name: s.name,
+                        visible: s.offsetParent !== null,
+                        optCount: s.options.length
+                    })).filter(s => s.visible);
+                }""")
+                print(f"    【診断】職員ボタン後の表示中select一覧:")
+                for s in all_selects:
+                    print(f"      id='{s['id']}' name='{s['name']}' options={s['optCount']}")
+
+                # chargeStaff1Id1 が見つからない場合のリトライ
+                has_staff = any(s['id'] == 'chargeStaff1Id1' for s in all_selects)
+                if not has_staff:
+                    print("    ※ chargeStaff1Id1 未表示 → JSで職員セクション強制表示を試行")
+                    # 方法1: JSでinput_staff_onをクリック
+                    page.evaluate("""() => {
+                        const btn = document.querySelector('#input_staff_on');
+                        if (btn) btn.click();
+                        // hidden inputもクリック
+                        const btnInput = document.querySelector('#btnInputStaff');
+                        if (btnInput) btnInput.click();
+                    }""")
+                    page.wait_for_timeout(2000)
+
+                    # 方法2: 職員セクションを直接表示
+                    page.evaluate("""() => {
+                        // 職員入力セクションのdisplay:noneを解除
+                        const staffSection = document.querySelector('#staffDetailArea, #staff_detail, .staffArea, #staffArea');
+                        if (staffSection) {
+                            staffSection.style.display = '';
+                            staffSection.style.visibility = 'visible';
+                        }
+                        // 全ての chargeStaff select を表示
+                        ['chargeStaff1Id1', 'chargeStaff2Id1', 'chargeStaff3Id1'].forEach(id => {
+                            const el = document.getElementById(id);
+                            if (el) {
+                                el.closest('tr,div,.form-group')?.style && (el.closest('tr,div,.form-group').style.display = '');
+                                el.disabled = false;
+                                el.removeAttribute('disabled');
+                            }
+                        });
+                    }""")
+                    page.wait_for_timeout(1000)
+
+                    # 再確認
+                    all_selects2 = page.evaluate("""() => {
+                        return Array.from(document.querySelectorAll('select')).map(s => ({
+                            id: s.id, visible: s.offsetParent !== null, optCount: s.options.length
+                        })).filter(s => s.visible && s.id.startsWith('chargeStaff'));
+                    }""")
+                    if all_selects2:
+                        print(f"    リトライ成功: 職員select表示確認 {[s['id'] for s in all_selects2]}")
+                    else:
+                        print("    リトライ後もchargeStaff1Id1未表示")
+
+            except Exception as diag_err:
+                print(f"    【診断】select列挙失敗: {diag_err}")
+
         # 職員1を設定
         if staff1_name:
             staff1_select = page.locator("select#chargeStaff1Id1")
@@ -752,30 +985,114 @@ def edit_staff(page, staff1_name: str, staff2_name: str = "",
 def click_register_button(page) -> bool:
     """
     「登録する」ボタンをクリック（input#btnRegisPop）
+
+    onclick="preventDoubleClick(); regisShiftAssign();" が
+    ネイティブ confirm() ダイアログを発火する場合があるため、
+    dialog イベントハンドラで自動応答する。
     """
     try:
+        # regisShiftAssign() がネイティブ confirm() を発火するため
+        # dialog イベントハンドラで自動応答
+        page.on("dialog", _accept_dialog)
+
         # Primary: PDF仕様のセレクタ
         register_button = page.locator("input#btnRegisPop")
         if register_button.is_visible(timeout=3000):
-            register_button.click()
-            page.wait_for_timeout(2000)
+            # 事前に全フォームフィールドのdisabledを解除（JS click経由で壊れた場合の保護）
+            page.evaluate("""() => {
+                ['#inPopupStartHour', '#inPopupStartMinute1', '#inPopupStartMinute2',
+                 '#inPopupEndHour', '#inPopupEndMinute1', '#inPopupEndMinute2',
+                 '#inPopupServicePlant', '#inPopupEstimate1', '#inPopupEstimate2', '#inPopupEstimate3',
+                 '#chargeStaff1Id1', '#chargeStaff2Id1'].forEach(sel => {
+                    const el = document.querySelector(sel);
+                    if (el && el.disabled) {
+                        el.disabled = false;
+                        el.removeAttribute('disabled');
+                    }
+                });
+            }""")
+
+            # ボタンが disabled の場合、フォームの change イベントを再発火
+            is_disabled = register_button.get_attribute("disabled")
+            if is_disabled:
+                print("    登録ボタンが無効です。changeイベントを再発火します...")
+                form_state = page.evaluate("""() => {
+                    const fields = {};
+                    ['#inPopupStartHour', '#inPopupStartMinute1', '#inPopupStartMinute2',
+                     '#inPopupEndHour', '#inPopupEndMinute1', '#inPopupEndMinute2',
+                     '#chargeStaff1Id1', '#chargeStaff2Id1'].forEach(sel => {
+                        const el = document.querySelector(sel);
+                        if (el) fields[sel] = el.value;
+                    });
+                    return fields;
+                }""")
+                print(f"    フォーム状態: {form_state}")
+                # 全フィールドの change イベントを再発火
+                page.evaluate("""() => {
+                    ['#inPopupStartHour', '#inPopupStartMinute1', '#inPopupStartMinute2',
+                     '#inPopupEndHour', '#inPopupEndMinute1', '#inPopupEndMinute2',
+                     '#chargeStaff1Id1', '#chargeStaff2Id1'].forEach(sel => {
+                        const el = document.querySelector(sel);
+                        if (el) {
+                            el.dispatchEvent(new Event('change', { bubbles: true }));
+                            if (typeof $ !== 'undefined' && $(el).trigger) $(el).trigger('change');
+                        }
+                    });
+                }""")
+                page.wait_for_timeout(3000)
+
+                # まだ disabled なら強制有効化を試みる
+                is_disabled = register_button.get_attribute("disabled")
+                if is_disabled:
+                    print("    警告: 登録ボタンを強制有効化します")
+                    page.evaluate("""() => {
+                        const btn = document.querySelector('#btnRegisPop');
+                        if (btn) { btn.disabled = false; btn.removeAttribute('disabled'); }
+                    }""")
+                    page.wait_for_timeout(500)
+
+            try:
+                register_button.click(timeout=10000)
+            except Exception as click_err:
+                # Step 2: force + no_wait_after（正常DOMイベント発火）
+                try:
+                    print(f"    登録ボタン: Playwrightタイムアウト → force+noWaitAfterで再試行")
+                    register_button.click(force=True, no_wait_after=True, timeout=3000)
+                except Exception:
+                    # Step 3: JSクリック
+                    print(f"    登録ボタン: force+noWaitAfterも失敗 → JSクリック")
+                    page.evaluate("document.querySelector('#btnRegisPop')?.click()")
+            page.wait_for_timeout(3000)
         else:
             # Fallback
             register_button = page.locator(
                 "button:has-text('登録する'), a:has-text('登録する'), input[value='登録する']"
             ).first
             if register_button.is_visible():
-                register_button.click()
-                page.wait_for_timeout(2000)
+                try:
+                    register_button.click(timeout=10000)
+                except Exception:
+                    page.evaluate("document.querySelector('#btnRegisPop')?.click()")
+                page.wait_for_timeout(3000)
             else:
                 print("    登録ボタンが見つかりません")
+                page.remove_listener("dialog", _accept_dialog)
                 return False
 
-        # 確認ダイアログ
+        page.remove_listener("dialog", _accept_dialog)
+
+        # 登録後にモーダルが閉じるまで待機
         try:
-            ok_btn = page.locator("button:has-text('OK'), button:has-text('はい')").first
-            if ok_btn.is_visible(timeout=2000):
-                ok_btn.click()
+            page.wait_for_load_state("networkidle", timeout=15000)
+        except Exception:
+            pass
+        page.wait_for_timeout(2000)
+
+        # モーダルが閉じたか確認
+        try:
+            if register_button.is_visible(timeout=2000):
+                print("    警告: 登録後もモーダルが開いたままです。閉じます...")
+                close_edit_dialog(page)
                 page.wait_for_timeout(1000)
         except Exception:
             pass
@@ -785,6 +1102,17 @@ def click_register_button(page) -> bool:
 
     except Exception as e:
         print(f"    登録エラー: {e}")
+        # 診断スクリーンショット
+        try:
+            timestamp = __import__('datetime').datetime.now().strftime("%Y%m%d_%H%M%S")
+            page.screenshot(path=f"artifacts/debug_register_error_{timestamp}.png")
+            print(f"    診断スクリーンショット保存")
+        except Exception:
+            pass
+        try:
+            page.remove_listener("dialog", _accept_dialog)
+        except Exception:
+            pass
         return False
 
 
@@ -800,6 +1128,7 @@ def close_edit_dialog(page) -> bool:
     カイポケの閉じるボタン(button.close.closeOn)は
     confirm('入力内容を登録せずに終了しますか？') を発火するため、
     dialog イベントハンドラでOKを自動応答する。
+    モーダルが閉じられない場合はEscapeキーやページリロードでリカバリする。
     """
     try:
         # confirmダイアログの自動応答を設定
@@ -816,15 +1145,42 @@ def close_edit_dialog(page) -> bool:
             btn = page.locator(selector).first
             try:
                 if btn.is_visible(timeout=1000):
-                    btn.click()
-                    page.wait_for_timeout(1000)
-                    page.remove_listener("dialog", _accept_dialog)
-                    return True
+                    try:
+                        btn.click(timeout=5000)
+                    except Exception:
+                        try:
+                            btn.click(force=True, no_wait_after=True, timeout=3000)
+                        except Exception:
+                            btn.evaluate("el => el.click()")
+                    page.wait_for_timeout(1500)
+                    # モーダルが実際に閉じたか確認
+                    modal_still_open = False
+                    try:
+                        reg_btn = page.locator("input#btnRegisPop")
+                        if reg_btn.is_visible(timeout=500):
+                            modal_still_open = True
+                    except Exception:
+                        pass
+                    if not modal_still_open:
+                        page.remove_listener("dialog", _accept_dialog)
+                        return True
             except Exception:
                 continue
 
+        # ボタンが見つからない場合、Escapeキーで閉じる
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(1000)
+
+        # それでもモーダルが残っている場合、JavaScriptで直接閉じる
+        try:
+            page.evaluate("document.querySelector('.modal, .popup, [role=dialog]')?.remove()")
+            page.evaluate("document.querySelector('.modal-backdrop')?.remove()")
+            page.wait_for_timeout(500)
+        except Exception:
+            pass
+
         page.remove_listener("dialog", _accept_dialog)
-        return False
+        return True
     except Exception:
         try:
             page.remove_listener("dialog", _accept_dialog)
@@ -851,31 +1207,72 @@ def delete_schedule_entry(page, day: int, start_time: str, dry_run: bool = False
         return True
 
     try:
+        # 削除ボタンのクリックでネイティブ confirm() が発火する場合に備える
+        page.on("dialog", _accept_dialog)
+
         # Primary: PDF仕様の削除ボタン
         delete_btn = page.locator("input#inPopupBtnDel")
         if delete_btn.is_visible(timeout=3000):
-            delete_btn.click()
-            page.wait_for_timeout(1000)
+            try:
+                delete_btn.click(timeout=10000)
+            except Exception:
+                # Step 2: force + no_wait_after
+                try:
+                    print("    削除ボタンクリックタイムアウト → force+noWaitAfterで再試行")
+                    delete_btn.click(force=True, no_wait_after=True, timeout=3000)
+                except Exception:
+                    # Step 3: JSクリック
+                    print("    削除ボタン: force+noWaitAfterも失敗 → JSクリック")
+                    page.evaluate("document.querySelector('#inPopupBtnDel')?.click()")
+            page.wait_for_timeout(2000)
         else:
             # Fallback
             delete_btn = page.locator(
                 "button:has-text('削除'), a:has-text('削除'), input[value*='削除']"
             ).first
             if delete_btn.is_visible():
-                delete_btn.click()
-                page.wait_for_timeout(1000)
+                try:
+                    delete_btn.click(timeout=10000)
+                except Exception:
+                    try:
+                        print("    削除ボタンクリックタイムアウト → force+noWaitAfterで再試行")
+                        delete_btn.click(force=True, no_wait_after=True, timeout=3000)
+                    except Exception:
+                        print("    削除ボタン: force+noWaitAfterも失敗 → JSクリック")
+                        page.evaluate("document.querySelector('#inPopupBtnDel')?.click()")
+                page.wait_for_timeout(2000)
             else:
                 print("    削除ボタンが見つかりません")
+                page.remove_listener("dialog", _accept_dialog)
                 close_edit_dialog(page)
                 return False
 
-        # 確認ダイアログ
+        # HTML確認ダイアログ（ネイティブ confirm でない場合のフォールバック）
         try:
             ok_btn = page.locator(
                 "button:has-text('OK'), button:has-text('はい'), button:has-text('削除する')"
             ).first
             if ok_btn.is_visible(timeout=2000):
-                ok_btn.click()
+                _safe_click(page, ok_btn, timeout=5000, description="削除確認OKボタン")
+                page.wait_for_timeout(1000)
+        except Exception:
+            pass
+
+        page.remove_listener("dialog", _accept_dialog)
+
+        # 削除後のAJAX完了待機
+        try:
+            page.wait_for_load_state("networkidle", timeout=10000)
+        except Exception:
+            pass
+        page.wait_for_timeout(1500)
+
+        # モーダルが閉じたか確認
+        try:
+            delete_btn_check = page.locator("input#inPopupBtnDel")
+            if delete_btn_check.is_visible(timeout=1000):
+                print("    警告: 削除後もモーダルが開いたままです。閉じます...")
+                close_edit_dialog(page)
                 page.wait_for_timeout(1000)
         except Exception:
             pass
@@ -885,12 +1282,76 @@ def delete_schedule_entry(page, day: int, start_time: str, dry_run: bool = False
 
     except Exception as e:
         print(f"    削除エラー: {e}")
+        try:
+            page.remove_listener("dialog", _accept_dialog)
+        except Exception:
+            pass
+        close_edit_dialog(page)
         return False
 
 
 # =============================================================================
 # 新規追加: 保険種別フォーム入力
 # =============================================================================
+
+def _recover_schedule_page(page, month_str: str = None) -> None:
+    """追加失敗後のリカバリ: モーダルを閉じてスケジュールページを復帰させる"""
+    print("  ※ 追加失敗後のリカバリ開始")
+
+    # Step 1: モーダルをJSで強制的に閉じる
+    try:
+        page.evaluate("""
+            (() => {
+                // モーダルとオーバーレイを全て除去
+                document.querySelectorAll('.modal-backdrop, .ui-widget-overlay').forEach(e => e.remove());
+                document.querySelectorAll('.modal, .ui-dialog, [role="dialog"]').forEach(e => {
+                    e.style.display = 'none';
+                    e.remove();
+                });
+                // body のスクロールロックを解除
+                document.body.style.overflow = '';
+                document.body.classList.remove('modal-open');
+            })()
+        """)
+        page.wait_for_timeout(1000)
+    except Exception as e:
+        print(f"    モーダル強制閉じ: {e}")
+
+    # Step 2: スケジュールページが表示されているか確認
+    try:
+        add_btn = page.locator("button[title='新規追加']").first
+        if add_btn.is_visible(timeout=3000):
+            print("  ※ リカバリ完了: スケジュールページ確認OK")
+            return
+    except Exception:
+        pass
+
+    # Step 3: エラーページの場合、正しいURLで再ナビゲーション
+    print("  ※ スケジュールページが見つかりません。再ナビゲーション...")
+    try:
+        page.goto(
+            "https://r.kaipoke.biz/bizhnc/monthlyShiftsList?isFromMenuBizhnc=true",
+            timeout=30000,
+        )
+        page.wait_for_load_state("networkidle", timeout=10000)
+        page.wait_for_timeout(2000)
+
+        # ナビゲーション後にスケジュールページが表示されたか検証
+        add_btn = page.locator("button[title='新規追加']").first
+        if not add_btn.is_visible(timeout=5000):
+            print("  ※ リカバリ失敗: スケジュールページが表示されません")
+            return
+
+        # 月を再設定
+        if month_str:
+            print(f"  ※ サービス提供月を再設定: {month_str}")
+            set_service_month(page, month_str)
+            page.wait_for_timeout(1000)
+
+        print("  ※ リカバリ完了: スケジュールページへ直接遷移")
+    except Exception as e:
+        print(f"  ※ リカバリ失敗: {e}")
+
 
 def click_new_add_button(page) -> bool:
     """
@@ -900,6 +1361,19 @@ def click_new_add_button(page) -> bool:
       <button type="button" class="btn btn-sms btn-sm"
               onclick="showHNC097807Add(...)" title="新規追加">新規追加</button>
     """
+    # ページの状態が安定するまで待機
+    try:
+        page.wait_for_load_state("networkidle", timeout=5000)
+    except Exception:
+        pass
+
+    # ページトップにスクロール（背景スクロール対策）
+    try:
+        page.evaluate("window.scrollTo(0, 0)")
+        page.wait_for_timeout(500)
+    except Exception:
+        pass
+
     add_buttons = [
         "button[title='新規追加']",
         "#btn_area button:has-text('新規追加')",
@@ -909,14 +1383,40 @@ def click_new_add_button(page) -> bool:
     for selector in add_buttons:
         btn = page.locator(selector).first
         try:
-            if btn.is_visible(timeout=2000):
-                btn.click()
+            if btn.is_visible(timeout=5000):
+                _safe_click(page, btn, timeout=5000, description="新規追加ボタン")
                 page.wait_for_timeout(2000)
                 return True
         except Exception:
             continue
+
+    # デバッグ: ボタンが見つからない場合の状態を記録
+    try:
+        current_url = page.url
+        print(f"    デバッグ: 現在のURL = {current_url}")
+        timestamp = __import__('datetime').datetime.now().strftime("%Y%m%d_%H%M%S")
+        page.screenshot(path=f"artifacts/debug_no_add_btn_{timestamp}.png")
+        print(f"    デバッグ: スクリーンショット保存")
+    except Exception:
+        pass
     print("    新規追加ボタンが見つかりません")
     return False
+
+
+def _select_and_wait(page, select_locator, label: str, field_name: str) -> bool:
+    """selectを選択してAJAX完了まで待機（Kaipoke JSF対応）"""
+    try:
+        select_locator.select_option(label=label)
+        try:
+            page.wait_for_load_state("networkidle", timeout=5000)
+        except Exception:
+            pass
+        page.wait_for_timeout(1000)
+        print(f"    {field_name}: {label}")
+        return True
+    except Exception as e:
+        print(f"    {field_name}設定エラー: {e}")
+        return False
 
 
 def fill_medical_insurance_fields(page) -> bool:
@@ -928,50 +1428,116 @@ def fill_medical_insurance_fields(page) -> bool:
     - サービス区分: select#inPopupEstimate1 → "精神科訪問看護"
     - 基本療養費: select#inPopupEstimate2 → "Ⅰ"
     - 職員資格: select#inPopupEstimate3 → "看護師等"
+
+    注意: 各フィールド変更はKaipokeのJSF AJAXをトリガーするため、
+    networkidle を待機してサーバーサイドのバリデーションを通す。
     """
     try:
         # 保険区分: 医療保険を選択
         medical_radio = page.locator("input#inPopupInsuranceDivision02")
         if medical_radio.is_visible(timeout=3000):
-            medical_radio.click()
-            page.wait_for_timeout(1000)
+            # まずPlaywrightクリックを試行
+            pw_click_ok = False
+            try:
+                medical_radio.click(timeout=5000)
+                pw_click_ok = True
+            except Exception:
+                # Step 2: force + no_wait_after（DOMイベント正常発火、JSF対応）
+                try:
+                    print("    医療保険ラジオ: Playwrightタイムアウト → force+noWaitAfterで再試行")
+                    medical_radio.click(force=True, no_wait_after=True, timeout=3000)
+                    pw_click_ok = True  # force clickは正常なDOMイベントを発火
+                except Exception:
+                    # Step 3: 最終手段 - JSクリック + changeDivision()
+                    print("    医療保険ラジオ: force+noWaitAfterも失敗 → JSクリック+changeDivision()")
+                    page.evaluate("""() => {
+                        const radio = document.querySelector('#inPopupInsuranceDivision02');
+                        if (radio) {
+                            radio.checked = true;
+                            radio.click();
+                        }
+                        // changeDivision()を明示的に呼び出し（AJAXチェーン確保）
+                        if (typeof changeDivision === 'function') {
+                            changeDivision();
+                        }
+                    }""")
+
+            # AJAX: フォーム構造が介護→医療に切り替わる
+            try:
+                page.wait_for_load_state("networkidle", timeout=8000)
+            except Exception:
+                pass
+            page.wait_for_timeout(2000)
+
+            # フィールドが有効化されたか確認（最大5秒待機）
+            if not pw_click_ok:
+                for retry_i in range(10):
+                    is_disabled = page.evaluate("document.querySelector('#inPopupStartHour')?.disabled")
+                    if not is_disabled:
+                        break
+                    page.wait_for_timeout(500)
+                else:
+                    # まだdisabled → changeDivision()を再度呼び出し
+                    print("    警告: フォームフィールドがdisabled → changeDivision()再実行")
+                    page.evaluate("""() => {
+                        if (typeof changeDivision === 'function') changeDivision();
+                    }""")
+                    try:
+                        page.wait_for_load_state("networkidle", timeout=8000)
+                    except Exception:
+                        pass
+                    page.wait_for_timeout(3000)
+
             print("    保険区分: 医療保険 を選択")
         else:
             print("    警告: radio#inPopupInsuranceDivision02 が見つかりません")
             return False
 
-        # サービス区分: 精神科訪問看護
+        # サービス区分: 精神科訪問看護（AJAX後にオプションが読み込まれる）
         estimate1 = page.locator("select#inPopupEstimate1")
-        if estimate1.is_visible(timeout=3000):
+        if estimate1.is_visible(timeout=5000):
+            # オプション読み込み待ち
+            for _ in range(10):
+                options = estimate1.locator("option").all()
+                if len(options) > 1:
+                    break
+                page.wait_for_timeout(500)
+
             options = estimate1.locator("option").all()
             for opt in options:
                 if "精神科訪問看護" in opt.text_content():
-                    estimate1.select_option(label=opt.text_content())
-                    page.wait_for_timeout(500)
-                    print(f"    サービス区分: {opt.text_content()}")
+                    _select_and_wait(page, estimate1, opt.text_content(), "サービス区分")
                     break
 
-        # 基本療養費: Ⅰ
+        # 基本療養費: Ⅰ（AJAX後に連動で読み込まれる）
         estimate2 = page.locator("select#inPopupEstimate2")
-        if estimate2.is_visible(timeout=3000):
+        if estimate2.is_visible(timeout=5000):
+            for _ in range(10):
+                options = estimate2.locator("option").all()
+                if len(options) > 1:
+                    break
+                page.wait_for_timeout(500)
+
             options = estimate2.locator("option").all()
             for opt in options:
                 text = opt.text_content()
                 if "Ⅰ" in text and "Ⅱ" not in text and "Ⅲ" not in text and "Ⅳ" not in text:
-                    estimate2.select_option(label=text)
-                    page.wait_for_timeout(500)
-                    print(f"    基本療養費: {text}")
+                    _select_and_wait(page, estimate2, text, "基本療養費")
                     break
 
-        # 職員資格: 看護師等
+        # 職員資格: 看護師等（AJAX後に連動で読み込まれる）
         estimate3 = page.locator("select#inPopupEstimate3")
-        if estimate3.is_visible(timeout=3000):
+        if estimate3.is_visible(timeout=5000):
+            for _ in range(10):
+                options = estimate3.locator("option").all()
+                if len(options) > 1:
+                    break
+                page.wait_for_timeout(500)
+
             options = estimate3.locator("option").all()
             for opt in options:
                 if "看護師等" in opt.text_content():
-                    estimate3.select_option(label=opt.text_content())
-                    page.wait_for_timeout(500)
-                    print(f"    職員資格: {opt.text_content()}")
+                    _select_and_wait(page, estimate3, opt.text_content(), "職員資格")
                     break
 
         return True
@@ -996,8 +1562,13 @@ def fill_nursing_insurance_fields(page, start_time: str, end_time: str) -> bool:
         # 保険区分: 介護保険（デフォルトのはずだが念のため）
         nursing_radio = page.locator("input#inPopupInsuranceDivision01")
         if nursing_radio.is_visible(timeout=3000):
-            nursing_radio.click()
-            page.wait_for_timeout(2000)  # AJAX読み込み待ち（長めに）
+            _safe_click(page, nursing_radio, timeout=5000, description="介護保険ラジオボタン")
+            # AJAX: フォーム構造が切り替わる可能性
+            try:
+                page.wait_for_load_state("networkidle", timeout=5000)
+            except Exception:
+                pass
+            page.wait_for_timeout(2000)
             print("    保険区分: 介護保険 を選択")
 
         # サービス種類: 訪問看護（AJAX後にオプションが読み込まれる）
@@ -1020,9 +1591,7 @@ def fill_nursing_insurance_fields(page, start_time: str, end_time: str) -> bool:
                 text = opt.text_content().strip()
                 # "訪問看護" にマッチ（"介護予防訪問看護" も可能だが通常は "訪問看護"）
                 if "訪問看護" in text and "予防" not in text:
-                    service_kind.select_option(label=text)
-                    page.wait_for_timeout(500)
-                    print(f"    サービス種類: {text}")
+                    _select_and_wait(page, service_kind, text, "サービス種類")
                     selected = True
                     break
             if not selected:
@@ -1030,9 +1599,7 @@ def fill_nursing_insurance_fields(page, start_time: str, end_time: str) -> bool:
                 for opt in options:
                     text = opt.text_content().strip()
                     if "訪問看護" in text:
-                        service_kind.select_option(label=text)
-                        page.wait_for_timeout(500)
-                        print(f"    サービス種類(fallback): {text}")
+                        _select_and_wait(page, service_kind, text, "サービス種類(fallback)")
                         selected = True
                         break
             if not selected:
@@ -1050,9 +1617,7 @@ def fill_nursing_insurance_fields(page, start_time: str, end_time: str) -> bool:
             options = estimate1.locator("option").all()
             for opt in options:
                 if "通常の算定" in opt.text_content():
-                    estimate1.select_option(label=opt.text_content())
-                    page.wait_for_timeout(1000)  # AJAX: Estimate4が連動で読み込まれる
-                    print(f"    サービス区分: {opt.text_content()}")
+                    _select_and_wait(page, estimate1, opt.text_content(), "サービス区分")
                     break
 
         # 算定時間: 開始・終了時間から計算
@@ -1069,9 +1634,7 @@ def fill_nursing_insurance_fields(page, start_time: str, end_time: str) -> bool:
             selected = False
             for opt in options:
                 if santei_time in opt.text_content():
-                    estimate4.select_option(label=opt.text_content())
-                    page.wait_for_timeout(1000)
-                    print(f"    算定時間: {opt.text_content().strip()}")
+                    _select_and_wait(page, estimate4, opt.text_content().strip(), "算定時間")
                     selected = True
                     break
             if not selected:
@@ -1088,7 +1651,7 @@ def fill_nursing_insurance_fields(page, start_time: str, end_time: str) -> bool:
         return False
 
 
-def add_schedule_entry(page, correction: Correction, dry_run: bool = False) -> bool:
+def add_schedule_entry(page, correction: Correction, dry_run: bool = False, _retry: int = 0) -> bool:
     """
     新しいスケジュールエントリを追加（保険種別による分岐あり）
 
@@ -1096,6 +1659,7 @@ def add_schedule_entry(page, correction: Correction, dry_run: bool = False) -> b
         page: Playwrightのページオブジェクト
         correction: 修正データ（business_type で分岐）
         dry_run: テスト実行
+        _retry: 内部リトライカウント（ポップアップ再試行用）
     """
     day = int(correction.date_to) if correction.date_to.isdigit() else 1
     print(f"  追加: {day}日 {correction.start_time_to}-{correction.end_time_to} "
@@ -1124,8 +1688,14 @@ def add_schedule_entry(page, correction: Correction, dry_run: bool = False) -> b
                 close_edit_dialog(page)
                 return False
 
+        # 診断: Step 2後のエラーメッセージ確認
+        _check_form_errors(page, "Step2:保険フィールド設定後")
+
         # Step 3: 日付を設定（新規追加用: インラインカレンダーを使用）
         _set_add_modal_date(page, day)
+
+        # 診断: Step 3後のエラーメッセージ確認
+        _check_form_errors(page, "Step3:日付設定後")
 
         # Step 4: 時間を設定
         start_parts = correction.start_time_to.split(":")
@@ -1137,6 +1707,67 @@ def add_schedule_entry(page, correction: Correction, dry_run: bool = False) -> b
                 int(end_parts[0]), int(end_parts[1])
             )
 
+        # 診断: Step 4後のエラーメッセージ確認
+        _check_form_errors(page, "Step4:時間設定後")
+
+        # Step 4.5: フォームバリデーション確認 & リトライ
+        # 職員情報入力ボタンが表示されるか確認（表示 = サーバーバリデーションOK）
+        staff_btn = page.locator("span#input_staff_on")
+        staff_btn_visible = False
+        try:
+            staff_btn_visible = staff_btn.is_visible(timeout=3000)
+        except Exception:
+            pass
+
+        if not staff_btn_visible:
+            print("    ※ 職員情報入力ボタンが未表示 → フォームリトライ")
+            # フォームをリフレッシュ: 一度介護保険に切替えてから医療保険に戻す
+            if correction.is_medical_insurance() or (not correction.is_nursing_insurance()):
+                try:
+                    # 介護保険に切替（JSで確実に切替）
+                    page.evaluate("""() => {
+                        const radio = document.querySelector('#inPopupInsuranceDivision01');
+                        if (radio) {
+                            radio.checked = true;
+                            radio.click();
+                            if (typeof changeDivision === 'function') changeDivision();
+                        }
+                    }""")
+                    try:
+                        page.wait_for_load_state("networkidle", timeout=5000)
+                    except Exception:
+                        pass
+                    page.wait_for_timeout(2000)
+
+                    # 医療保険に戻す
+                    if not fill_medical_insurance_fields(page):
+                        print("    リトライ: 医療保険フィールド再設定失敗")
+                        close_edit_dialog(page)
+                        return False
+
+                    # 日付を再設定
+                    _set_add_modal_date(page, day)
+
+                    # 時間を再設定
+                    if len(start_parts) >= 2 and len(end_parts) >= 2:
+                        edit_schedule_time(
+                            page,
+                            int(start_parts[0]), int(start_parts[1]),
+                            int(end_parts[0]), int(end_parts[1])
+                        )
+
+                    # 再確認
+                    try:
+                        staff_btn_visible = staff_btn.is_visible(timeout=3000)
+                    except Exception:
+                        pass
+                    if staff_btn_visible:
+                        print("    リトライ成功: 職員情報入力ボタン表示確認")
+                    else:
+                        print("    リトライ後も職員情報入力ボタン未表示")
+                except Exception as e:
+                    print(f"    リトライエラー: {e}")
+
         # Step 5: 職員を設定（新規追加なので for_new_entry=True）
         edit_staff(
             page,
@@ -1145,16 +1776,40 @@ def add_schedule_entry(page, correction: Correction, dry_run: bool = False) -> b
             for_new_entry=True
         )
 
+        # Step 5.5: chargeStaff1Id1チェック → 見つからなければポップアップ再試行
+        if correction.staff1_to and correction.staff1_to != "未割当":
+            staff1_visible = False
+            try:
+                staff1_visible = page.locator("select#chargeStaff1Id1").is_visible(timeout=1000)
+            except Exception:
+                pass
+            if not staff1_visible and _retry < 1:
+                print("  ※ 職員selectが未表示 → ポップアップを閉じて再試行（1回目）")
+                close_edit_dialog(page)
+                page.wait_for_timeout(2000)
+                return add_schedule_entry(page, correction, dry_run, _retry=_retry + 1)
+
         # Step 6: 登録
         if dry_run:
             print("  [dry-run] 登録をスキップ")
             close_edit_dialog(page)
             return True
         else:
-            return click_register_button(page)
+            success = click_register_button(page)
+            if not success:
+                # 登録失敗時のスクリーンショット
+                try:
+                    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                    page.screenshot(path=f"artifacts/debug_add_failed_{timestamp}.png")
+                    print(f"    診断スクリーンショット保存")
+                except Exception:
+                    pass
+                close_edit_dialog(page)
+            return success
 
     except Exception as e:
         print(f"    追加エラー: {e}")
+        close_edit_dialog(page)
         return False
 
 
@@ -1182,7 +1837,7 @@ def navigate_to_staff_tab(page) -> bool:
             staff_tab = page.locator(selector).first
             try:
                 if staff_tab.is_visible(timeout=2000):
-                    staff_tab.click()
+                    _safe_click(page, staff_tab, timeout=5000, description="職員別タブ")
                     page.wait_for_load_state("networkidle", timeout=10000)
                     page.wait_for_timeout(2000)
                     print("  職員別タブに遷移しました")
@@ -1214,7 +1869,7 @@ def navigate_to_user_tab(page) -> bool:
             user_tab = page.locator(selector).first
             try:
                 if user_tab.is_visible(timeout=2000):
-                    user_tab.click()
+                    _safe_click(page, user_tab, timeout=5000, description="利用者別タブ")
                     page.wait_for_load_state("networkidle", timeout=10000)
                     page.wait_for_timeout(2000)
                     print("  利用者別タブに遷移しました")
@@ -1322,9 +1977,9 @@ def click_calendar_day(page, day: int, popup_selector: str = "") -> bool:
                     # aタグやリンクが中にあればそちらをクリック
                     inner_link = cell.locator("a")
                     if inner_link.count() > 0:
-                        inner_link.first.click()
+                        _safe_click(page, inner_link.first, timeout=5000, description="カレンダー日付クリック")
                     else:
-                        cell.click()
+                        _safe_click(page, cell, timeout=5000, description="カレンダー日付クリック")
                     page.wait_for_timeout(500)
                     print(f"    カレンダーから {day}日 をクリック")
                     return True
@@ -1337,7 +1992,7 @@ def click_calendar_day(page, day: int, popup_selector: str = "") -> bool:
             try:
                 link_text = link.text_content().strip()
                 if link_text == day_str:
-                    link.click()
+                    _safe_click(page, link, timeout=5000, description="カレンダーリンク")
                     page.wait_for_timeout(500)
                     print(f"    カレンダーリンクから {day}日 をクリック")
                     return True
@@ -1395,12 +2050,12 @@ def add_event_entry(page, correction: Correction, dry_run: bool = False) -> bool
             if label_for:
                 radio = page.locator(f"input#{label_for}")
                 if radio.count() > 0:
-                    radio.click()
+                    _safe_click(page, radio, timeout=5000, description="ラジオボタン")
                     page.wait_for_timeout(1000)
                     print("    「新しく登録する」を選択（ラベルfor属性経由）")
                     selected_radio = True
             if not selected_radio:
-                new_register_label.click()
+                _safe_click(page, new_register_label, timeout=5000, description="ラベルクリック")
                 page.wait_for_timeout(1000)
                 print("    「新しく登録する」ラベルをクリック")
                 selected_radio = True
@@ -1417,7 +2072,7 @@ def add_event_entry(page, correction: Correction, dry_run: bool = False) -> bool
                         return label ? label.textContent.trim() : '';
                     }""")
                     if "新しく登録" in label_text:
-                        radio.click()
+                        _safe_click(page, radio, timeout=5000, description="ラジオボタン")
                         page.wait_for_timeout(1000)
                         print(f"    「新しく登録する」を選択（ラジオ[{i}]）")
                         selected_radio = True
@@ -1427,7 +2082,7 @@ def add_event_entry(page, correction: Correction, dry_run: bool = False) -> bool
 
             # フォールバック: 最後のラジオ（通常は「新しく登録する」）
             if not selected_radio and radios:
-                radios[-1].click()
+                _safe_click(page, radios[-1], timeout=5000, description="ラジオボタン")
                 page.wait_for_timeout(1000)
                 print(f"    最後のラジオボタンを選択（フォールバック）")
 
@@ -1480,14 +2135,14 @@ def add_event_entry(page, correction: Correction, dry_run: bool = False) -> bool
         if not add_btn.is_visible(timeout=3000):
             add_btn = page.locator("text=登録する").first
         if add_btn.is_visible():
-            add_btn.click()
+            _safe_click(page, add_btn, timeout=5000, description="イベント登録ボタン")
             page.wait_for_timeout(2000)
 
             # 確認ダイアログ
             try:
                 ok_btn = page.locator("button:has-text('OK'), button:has-text('はい')").first
                 if ok_btn.is_visible(timeout=2000):
-                    ok_btn.click()
+                    _safe_click(page, ok_btn, timeout=5000, description="OKボタン")
                     page.wait_for_timeout(1000)
             except Exception:
                 pass
@@ -1507,7 +2162,7 @@ def add_event_entry(page, correction: Correction, dry_run: bool = False) -> bool
 # 修正適用のルーティング
 # =============================================================================
 
-def apply_correction(page, correction: Correction, dry_run: bool = False) -> bool:
+def apply_correction(page, correction: Correction, dry_run: bool = False, month_str: str = None) -> bool:
     """
     1件の修正を適用（スケジュール系のみ。イベントは別フロー）
 
@@ -1536,51 +2191,41 @@ def apply_correction(page, correction: Correction, dry_run: bool = False) -> boo
     elif action == "date_change":
         print(f"\n=== 日付変更: {correction.user_name} "
               f"{correction.date_from}日 → {correction.date_to}日 [{biz_type}] ===")
+        # Kaipokeは日付変更時に登録ボタンが無効化されるため、削除→再追加で処理
+        print(f"  ※ 日付変更のため、削除→再追加で処理します")
         day = int(correction.date_from) if correction.date_from.isdigit() else 1
-        if not click_schedule_entry(page, day, correction.start_time_from):
-            print("  予定が見つかりません")
+        if not delete_schedule_entry(page, day, correction.start_time_from, dry_run):
             return False
-
-        new_day = int(correction.date_to) if correction.date_to.isdigit() else 1
-        change_date(page, new_day)
-
-        if correction.has_time_change():
-            start_parts = correction.start_time_to.split(":")
-            end_parts = correction.end_time_to.split(":")
-            if len(start_parts) >= 2 and len(end_parts) >= 2:
-                edit_schedule_time(
-                    page,
-                    int(start_parts[0]), int(start_parts[1]),
-                    int(end_parts[0]), int(end_parts[1])
-                )
-
-        if correction.has_staff_change():
-            edit_staff(page, correction.staff1_to, correction.staff2_to)
-
-        if dry_run:
-            print("  [dry-run] 登録をスキップ")
-            close_edit_dialog(page)
-            return True
-        else:
-            return click_register_button(page)
+        # 削除後のページ安定待機（カレンダー再描画完了まで）
+        page.wait_for_timeout(3000)
+        result = add_schedule_entry(page, correction, dry_run)
+        if not result:
+            _recover_schedule_page(page, month_str)
+        return result
 
     else:  # edit
         # 変更は医療保険・介護保険共通（上部フィールドはREAD-ONLY）
         print(f"\n=== 変更: {correction.user_name} {correction.date_from}日 [{biz_type}] ===")
+
+        # Kaipokeは時間変更時に登録ボタンが無効化されるため、
+        # 時間変更がある場合は削除→再追加で処理する
+        if correction.has_time_change():
+            print(f"  ※ 時間変更があるため、削除→再追加で処理します")
+            day = int(correction.date_from) if correction.date_from.isdigit() else 1
+            if not delete_schedule_entry(page, day, correction.start_time_from, dry_run):
+                return False
+            # 削除後のページ安定待機（カレンダー再描画完了まで）
+            page.wait_for_timeout(3000)
+            result = add_schedule_entry(page, correction, dry_run)
+            if not result:
+                _recover_schedule_page(page, month_str)
+            return result
+
+        # スタッフのみ変更の場合は通常の編集フロー
         day = int(correction.date_from) if correction.date_from.isdigit() else 1
         if not click_schedule_entry(page, day, correction.start_time_from):
             print("  予定が見つかりません")
             return False
-
-        if correction.has_time_change():
-            start_parts = correction.start_time_to.split(":")
-            end_parts = correction.end_time_to.split(":")
-            if len(start_parts) >= 2 and len(end_parts) >= 2:
-                edit_schedule_time(
-                    page,
-                    int(start_parts[0]), int(start_parts[1]),
-                    int(end_parts[0]), int(end_parts[1])
-                )
 
         if correction.has_staff_change():
             edit_staff(page, correction.staff1_to, correction.staff2_to)
@@ -1590,7 +2235,10 @@ def apply_correction(page, correction: Correction, dry_run: bool = False) -> boo
             close_edit_dialog(page)
             return True
         else:
-            return click_register_button(page)
+            success = click_register_button(page)
+            if not success:
+                close_edit_dialog(page)
+            return success
 
 
 # =============================================================================
@@ -1606,6 +2254,7 @@ def run_auto_apply(
     action_filter: str = None,
     business_type_filter: str = None,
     target_users: list = None,
+    progress_callback: callable = None,
 ) -> dict:
     """
     修正シートに基づいてスケジュールを自動適用
@@ -1680,6 +2329,25 @@ def run_auto_apply(
     import time as _time
     _start_time = _time.time()
 
+    # 進捗追跡用カウンタ
+    _processed_count = 0
+    _total_count = len(corrections)
+
+    def _report_progress(phase: str, current_name: str):
+        """進捗をコールバックに報告"""
+        nonlocal _processed_count
+        _processed_count += 1
+        if progress_callback:
+            progress_callback({
+                "processed": _processed_count,
+                "total": _total_count,
+                "phase": phase,
+                "current_name": current_name,
+                "success": result["success"],
+                "failed": result["failed"],
+                "skipped": result["skipped"],
+            })
+
     result = {
         "total": len(corrections),
         "schedule_total": len(schedule_corrections),
@@ -1691,12 +2359,36 @@ def run_auto_apply(
         "details": [],
     }
 
+    # 初期進捗を報告
+    if progress_callback:
+        progress_callback({
+            "processed": 0,
+            "total": _total_count,
+            "phase": "initializing",
+            "current_name": "",
+            "success": 0,
+            "failed": 0,
+            "skipped": 0,
+        })
+
     with sync_playwright() as p:
         browser, context, page = create_browser_context(p, headless=headless)
 
         try:
             # 共通セットアップ（ログイン→ナビゲーション→月設定→月検証）
+            if progress_callback:
+                progress_callback({
+                    "processed": 0, "total": _total_count,
+                    "phase": "setup", "current_name": "ログイン・ナビゲーション中",
+                    "success": 0, "failed": 0, "skipped": 0,
+                })
             setup_monthly_schedule_page(page, context, month)
+            if progress_callback:
+                progress_callback({
+                    "processed": 0, "total": _total_count,
+                    "phase": "setup_done", "current_name": "セットアップ完了",
+                    "success": 0, "failed": 0, "skipped": 0,
+                })
 
             # ========================================
             # Phase 1: スケジュール修正（利用者別タブ）
@@ -1733,6 +2425,7 @@ def run_auto_apply(
                                 "status": "skipped",
                                 "reason": "user_not_found",
                             })
+                            _report_progress("phase1", user_name)
                         continue
 
                     for correction in user_corrections:
@@ -1750,7 +2443,7 @@ def run_auto_apply(
                                         raise RuntimeError("セッション復旧に失敗")
                                     select_user(page, user_name)
 
-                                success = apply_correction(page, correction, dry_run)
+                                success = apply_correction(page, correction, dry_run, month_str=month)
                                 if success:
                                     result["success"] += 1
                                     result["details"].append({
@@ -1780,6 +2473,8 @@ def run_auto_apply(
                                     })
                                 break  # 成功 or 通常失敗 → リトライしない
                             except Exception as e:
+                                # 安全ネット: 例外発生時もモーダルを確実に閉じる
+                                close_edit_dialog(page)
                                 if attempt < max_retries:
                                     print(f"  エラー（リトライします）: {e}")
                                     continue
@@ -1794,6 +2489,7 @@ def run_auto_apply(
                                     "reason": str(e),
                                 })
 
+                        _report_progress("phase1", user_name)
                         page.wait_for_timeout(1000)
 
             # ========================================
@@ -1805,6 +2501,13 @@ def run_auto_apply(
                 print(f"{'='*50}")
 
                 # 職員別タブに遷移
+                if progress_callback:
+                    progress_callback({
+                        "processed": _processed_count, "total": _total_count,
+                        "phase": "phase2_nav", "current_name": "職員別タブへ遷移中",
+                        "success": result["success"], "failed": result["failed"],
+                        "skipped": result["skipped"],
+                    })
                 if not navigate_to_staff_tab(page):
                     print("  職員別タブへの遷移に失敗。イベント追加をスキップします。")
                     for c in event_corrections:
@@ -1817,6 +2520,7 @@ def run_auto_apply(
                             "status": "skipped",
                             "reason": "staff_tab_navigation_failed",
                         })
+                        _report_progress("phase2", c.staff1_to)
                 else:
                     # 職員ごとにグループ化
                     staff_groups = {}
@@ -1846,6 +2550,7 @@ def run_auto_apply(
                                     "status": "skipped",
                                     "reason": "staff_not_found",
                                 })
+                                _report_progress("phase2", staff_name)
                             continue
 
                         # 職員切替後のページ安定待機
@@ -1890,6 +2595,7 @@ def run_auto_apply(
                                     "reason": str(e),
                                 })
 
+                            _report_progress("phase2", staff_name)
                             page.wait_for_timeout(1000)
 
             # 実行時間・タイムスタンプを記録

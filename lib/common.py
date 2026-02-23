@@ -250,13 +250,13 @@ def _page_has_element(page: Page, selector: str, timeout: int = 5000) -> bool:
         return False
 
 
-def goto_receipt(page: Page, timeout: int = 60000) -> None:
+def goto_receipt(page: Page, timeout: int = 30000) -> None:
     """
     レセプト画面に遷移
 
     Args:
         page: Playwrightのページオブジェクト
-        timeout: タイムアウト（ミリ秒、デフォルト60秒）
+        timeout: タイムアウト（ミリ秒、デフォルト30秒）
     """
     # サイドバー内の「レセプト」リンクを特定するセレクタ（優先度順）
     receipt_selectors = [
@@ -281,35 +281,35 @@ def goto_receipt(page: Page, timeout: int = 60000) -> None:
         raise RuntimeError("レセプトリンクが見つかりません")
 
     try:
-        page.wait_for_load_state("networkidle", timeout=timeout)
+        page.wait_for_load_state("networkidle", timeout=15000)
     except Exception:
         print("  (networkidle待機がタイムアウト、domcontentloadedで続行)")
         page.wait_for_load_state("domcontentloaded", timeout=timeout)
-    page.wait_for_timeout(1000)
+    page.wait_for_timeout(500)
     print("レセプト画面を表示しました")
 
 
-def goto_yoriyori(page: Page, timeout: int = 60000) -> None:
+def goto_yoriyori(page: Page, timeout: int = 30000) -> None:
     """
     訪問看護/よりより（1260192047）画面に遷移
 
     Args:
         page: Playwrightのページオブジェクト
-        timeout: タイムアウト（ミリ秒、デフォルト60秒）
+        timeout: タイムアウト（ミリ秒、デフォルト30秒）
     """
     print("訪問看護のリンクをクリックしています...")
     page.click("text=訪問看護/1260192047")
     try:
-        page.wait_for_load_state("networkidle", timeout=timeout)
+        page.wait_for_load_state("networkidle", timeout=15000)
     except Exception:
         # networkidleがタイムアウトした場合はdomcontentloadedで代替
         print("  (networkidle待機がタイムアウト、domcontentloadedで続行)")
         page.wait_for_load_state("domcontentloaded", timeout=timeout)
-    page.wait_for_timeout(1000)
+    page.wait_for_timeout(500)
     print("訪問看護の詳細画面を表示しました")
 
 
-def goto_monthly_schedule(page: Page, timeout: int = 60000) -> None:
+def goto_monthly_schedule(page: Page, timeout: int = 30000) -> None:
     """
     月間スケジュール管理画面に遷移
 
@@ -317,7 +317,7 @@ def goto_monthly_schedule(page: Page, timeout: int = 60000) -> None:
 
     Args:
         page: Playwrightのページオブジェクト
-        timeout: タイムアウト（ミリ秒、デフォルト60秒）
+        timeout: タイムアウト（ミリ秒、デフォルト30秒）
     """
     print("月間スケジュール管理画面に遷移しています...")
 
@@ -349,11 +349,11 @@ def goto_monthly_schedule(page: Page, timeout: int = 60000) -> None:
             page.goto("https://r.kaipoke.biz/bizhnc/monthlyShiftsList?isFromMenuBizhnc=true", timeout=timeout)
 
     try:
-        page.wait_for_load_state("networkidle", timeout=timeout)
+        page.wait_for_load_state("networkidle", timeout=15000)
     except Exception:
         print("  (networkidle待機がタイムアウト、domcontentloadedで続行)")
         page.wait_for_load_state("domcontentloaded", timeout=timeout)
-    page.wait_for_timeout(1000)
+    page.wait_for_timeout(500)
 
     print("月間スケジュール管理画面を表示しました")
 

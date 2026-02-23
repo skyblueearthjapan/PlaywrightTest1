@@ -161,6 +161,25 @@ current_task = {
     "started_at": None,
 }
 
+# apply結果を保存（非同期完了後にGASが取得可能）
+apply_result_store = {
+    "result": None,
+    "completed_at": None,
+    "error": None,
+}
+
+# apply進捗を保存（実行中にGASがポーリングで取得）
+apply_progress = {
+    "processed": 0,
+    "total": 0,
+    "phase": "",
+    "current_name": "",
+    "success": 0,
+    "failed": 0,
+    "skipped": 0,
+    "updated_at": None,
+}
+
 
 @app.route('/api/status', methods=['GET'])
 def api_status():
@@ -376,8 +395,12 @@ def api_export():
 
 @app.route('/api/apply', methods=['POST'])
 def api_apply():
-    """差分適用 API（インラインcorrectionデータ対応）"""
-    global current_task
+    """差分適用 API（非同期実行 — Cloudflare 524タイムアウト対策）
+
+    即座にレスポンスを返し、バックグラウンドで適用処理を実行する。
+    GASは /api/apply/result でポーリングして結果を取得する。
+    """
+    global current_task, apply_result_store
 
     with job_state_lock:
         if current_task["running"]:
@@ -408,6 +431,9 @@ def api_apply():
         # インラインデータが提供された場合、ファイルに保存
         if correction_data:
             import json
+            # correction_data が配列の場合は dict でラップ
+            if isinstance(correction_data, list):
+                correction_data = {"corrections": correction_data}
             correction_sheet = "data/correction_sheet.json"
             Path("data").mkdir(parents=True, exist_ok=True)
             with open(correction_sheet, "w", encoding="utf-8") as f:
@@ -415,6 +441,8 @@ def api_apply():
             add_log("インラインcorrectionデータをファイルに保存")
 
         if not Path(correction_sheet).exists():
+            with job_state_lock:
+                current_task = {"running": False, "command": None, "started_at": None}
             return jsonify({
                 "success": False,
                 "error": f"修正シートが見つかりません: {correction_sheet}",
@@ -432,36 +460,130 @@ def api_apply():
             filter_info += f", limit={limit}"
         add_log(f"apply 開始 (month={month}, dry_run={dry_run}{filter_info})")
         print(f"\n=== API: apply 開始 (month={month}, dry_run={dry_run}{filter_info}) ===")
-        result = run_auto_apply(
-            correction_sheet=correction_sheet,
-            month=month,
-            headless=not headed,
-            dry_run=dry_run,
-            limit=limit,
-            action_filter=action_filter,
-            business_type_filter=business_type_filter,
-            target_users=target_users,
-        )
 
-        add_log(f"apply 完了: {result}")
+        # 結果ストア・進捗をリセット
+        apply_result_store = {"result": None, "completed_at": None, "error": None}
+        apply_progress = {
+            "processed": 0, "total": 0, "phase": "starting",
+            "current_name": "", "success": 0, "failed": 0, "skipped": 0,
+            "updated_at": datetime.now().isoformat(),
+        }
+
+        # バックグラウンドスレッドで実行
+        def run_apply_async():
+            global current_task, apply_result_store, apply_progress
+
+            # 進捗コールバック
+            def on_progress(progress_data):
+                with job_state_lock:
+                    apply_progress.update(progress_data)
+                    apply_progress["updated_at"] = datetime.now().isoformat()
+
+            try:
+                result = run_auto_apply(
+                    correction_sheet=correction_sheet,
+                    month=month,
+                    headless=not headed,
+                    dry_run=dry_run,
+                    limit=limit,
+                    action_filter=action_filter,
+                    business_type_filter=business_type_filter,
+                    target_users=target_users,
+                    progress_callback=on_progress,
+                )
+                add_log(f"apply 完了: success={result.get('success', 0)}, failed={result.get('failed', 0)}")
+                with job_state_lock:
+                    apply_result_store = {
+                        "result": result,
+                        "completed_at": datetime.now().isoformat(),
+                        "error": None,
+                    }
+            except Exception as e:
+                add_log(f"apply エラー: {e}")
+                print(f"エラー: {e}")
+                import traceback
+                traceback.print_exc()
+                with job_state_lock:
+                    apply_result_store = {
+                        "result": None,
+                        "completed_at": datetime.now().isoformat(),
+                        "error": str(e),
+                    }
+            finally:
+                with job_state_lock:
+                    current_task = {"running": False, "command": None, "started_at": None}
+
+        thread = threading.Thread(target=run_apply_async, daemon=True)
+        thread.start()
+
         return jsonify({
             "success": True,
-            "result": result,
+            "async": True,
+            "message": "差分適用を開始しました。/api/apply/result でポーリングしてください。",
         })
 
     except Exception as e:
-        add_log(f"apply エラー: {e}")
+        add_log(f"apply 開始エラー: {e}")
         print(f"エラー: {e}")
         import traceback
         traceback.print_exc()
+        with job_state_lock:
+            current_task = {"running": False, "command": None, "started_at": None}
         return jsonify({
             "success": False,
             "error": str(e),
         }), 500
 
-    finally:
+
+@app.route('/api/apply/result', methods=['GET'])
+def api_apply_result():
+    """差分適用の結果を取得（ポーリング用）
+
+    GASから定期的に呼び出し、適用が完了したかを確認する。
+    - running=true: まだ実行中
+    - running=false + result: 完了（結果あり）
+    - running=false + error: エラーで終了
+    """
+    with job_state_lock:
+        running = current_task.get("running", False) and current_task.get("command") == "apply"
+
+    if running:
         with job_state_lock:
-            current_task = {"running": False, "command": None, "started_at": None}
+            progress = dict(apply_progress)
+        return jsonify({
+            "success": True,
+            "status": "running",
+            "message": "適用処理を実行中です...",
+            "started_at": current_task.get("started_at"),
+            "progress": progress,
+        })
+
+    # 完了済み
+    with job_state_lock:
+        store = dict(apply_result_store)
+
+    if store.get("error"):
+        return jsonify({
+            "success": False,
+            "status": "error",
+            "error": store["error"],
+            "completed_at": store.get("completed_at"),
+        })
+
+    if store.get("result"):
+        return jsonify({
+            "success": True,
+            "status": "completed",
+            "result": store["result"],
+            "completed_at": store.get("completed_at"),
+        })
+
+    # まだ一度も実行されていない
+    return jsonify({
+        "success": False,
+        "status": "no_result",
+        "message": "適用結果がありません。先に /api/apply を呼び出してください。",
+    })
 
 
 @app.route('/api/config', methods=['GET', 'POST'])
@@ -770,8 +892,8 @@ def api_diff_validate():
         corrections = []
 
         if correction_data:
-            # インラインデータから読み込み
-            items = correction_data.get("corrections", [])
+            # インラインデータから読み込み（配列/dict両対応）
+            items = correction_data if isinstance(correction_data, list) else correction_data.get("corrections", [])
             for item in items:
                 corrections.append(Correction(**item))
         elif correction_sheet and Path(correction_sheet).exists():

@@ -712,7 +712,9 @@ def load_correction_sheet(file_path: str) -> list[Correction]:
         data = json.load(f)
 
     corrections = []
-    for item in data.get("corrections", []):
+    # data が配列の場合（GASからインライン送信時）と dict の場合に対応
+    items = data if isinstance(data, list) else data.get("corrections", [])
+    for item in items:
         corrections.append(Correction(**item))
 
     return corrections
