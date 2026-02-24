@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <base target="_top">
+  <style>
+    :root {
+      --color-green: #B7D38A;
+      --color-green-dark: #9BC06A;
+      --color-orange: #F6B26B;
+      --color-orange-light: #FACCAA;
+      --color-text: #333333;
+      --color-text-light: #666666;
+      --color-bg: #FAFAFA;
+      --color-white: #FFFFFF;
+      --color-error: #E88B8B;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      padding: 0;
+      font-family: 'Hiragino Sans', 'Meiryo', 'Segoe UI', sans-serif;
+      background: var(--color-bg);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      color: var(--color-text);
+    }
+
+    .header {
+      background: linear-gradient(135deg, var(--color-green) 0%, var(--color-green-dark) 100%);
+      color: var(--color-white);
+      padding: 14px 24px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+    }
+
+    .header h1 {
+      margin: 0;
+      font-size: 18px;
+      font-weight: 600;
+    }
+
+    .main {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 40px 20px;
+    }
+
+    .error-card {
+      background: var(--color-white);
+      border-radius: 12px;
+      padding: 40px;
+      max-width: 480px;
+      text-align: center;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.08);
+      border-top: 4px solid var(--color-error);
+    }
+
+    .error-icon {
+      font-size: 48px;
+      margin-bottom: 16px;
+    }
+
+    .error-title {
+      font-size: 20px;
+      font-weight: 600;
+      color: var(--color-error);
+      margin: 0 0 16px;
+    }
+
+    .error-message {
+      font-size: 14px;
+      color: var(--color-text-light);
+      line-height: 1.6;
+      margin: 0 0 24px;
+    }
+
+    .error-details {
+      background: var(--color-orange-light);
+      border-radius: 8px;
+      padding: 16px;
+      margin-bottom: 24px;
+      font-size: 13px;
+      text-align: left;
+    }
+
+    .error-details dt {
+      font-weight: 600;
+      color: var(--color-text);
+      margin-bottom: 4px;
+    }
+
+    .error-details dd {
+      margin: 0 0 12px 0;
+      color: var(--color-text-light);
+    }
+
+    .error-details dd:last-child {
+      margin-bottom: 0;
+    }
+
+    .back-btn {
+      display: inline-block;
+      padding: 12px 28px;
+      background: var(--color-green);
+      color: var(--color-white);
+      border: none;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      text-decoration: none;
+      transition: all 0.2s ease;
+    }
+
+    .back-btn:hover {
+      background: var(--color-green-dark);
+      transform: translateY(-1px);
+    }
+  </style>
+</head>
+<body>
+
+  <div class="header">
+    <h1>訪問看護 自動スケジューリング</h1>
+  </div>
+
+  <div class="main">
+    <div class="error-card">
+      <div class="error-icon">🔒</div>
+      <h2 class="error-title">アクセス権限がありません</h2>
+      <p class="error-message">
+        入力管理画面は管理者専用です。<br>
+        アクセス権限が必要な場合は、システム管理者にお問い合わせください。
+      </p>
+
+      <dl class="error-details" id="errorDetails">
+        <dt>あなたのアカウント:</dt>
+        <dd id="userEmail">確認中...</dd>
+        <dt>アクセスしようとした画面:</dt>
+        <dd>入力管理画面（管理者専用）</dd>
+      </dl>
+
+      <a class="back-btn" onclick="goToOutput()">出力画面へ戻る</a>
+    </div>
+  </div>
+
+  <script>
+    var baseUrl = '';
+
+    document.addEventListener('DOMContentLoaded', function() {
+      // ベースURL取得
+      google.script.run
+        .withSuccessHandler(function(url) { baseUrl = url; })
+        .getBaseUrl();
+
+      // ユーザー情報取得
+      google.script.run
+        .withSuccessHandler(function(email) {
+          document.getElementById('userEmail').textContent = email || '(取得できませんでした)';
+        })
+        .withFailureHandler(function() {
+          document.getElementById('userEmail').textContent = '(取得できませんでした)';
+        })
+        .getCurrentUserEmail();
+    });
+
+    function goToOutput() {
+      // 現在のURLからベースURLを構築してナビゲート
+      var currentUrl = window.location.href;
+      var targetUrl = currentUrl.split('?')[0] + '?page=output';
+      // GASはiframe内で動くため、window.topを使用
+      try {
+        window.top.location.href = targetUrl;
+      } catch (e) {
+        window.location.href = targetUrl;
+      }
+    }
+  </script>
+
+</body>
+</html>

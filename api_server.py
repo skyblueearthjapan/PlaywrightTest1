@@ -180,6 +180,13 @@ apply_progress = {
     "updated_at": None,
 }
 
+# export結果を保存（非同期完了後にGASが取得可能）
+export_result_store = {
+    "result": None,
+    "completed_at": None,
+    "error": None,
+}
+
 
 @app.route('/api/status', methods=['GET'])
 def api_status():
@@ -300,58 +307,41 @@ def api_export():
         auto_drive_upload = data.get("auto_drive_upload", False)
         week_start = data.get("week_start")  # "2026-04-06" or "20260406"
         week_end = data.get("week_end")       # "2026-04-12" or "20260412"
+        async_mode = data.get("async", False)
 
         clear_stop()  # 非常停止フラグをクリア
-        add_log(f"export 開始 (month={month})")
-        print(f"\n=== API: export 開始 (month={month}) ===")
+        add_log(f"export 開始 (month={month}, async={async_mode})")
+        print(f"\n=== API: export 開始 (month={month}, async={async_mode}) ===")
 
         headless = data.get("headless", False)
-        result = run_export(
-            month=month,
-            out_path=out_path,
-            headless=headless,
-        )
 
-        # CSV内容をレスポンスに含める
-        csv_path = Path(result.get("file_path", ""))
-        if csv_path.exists():
-            csv_content = None
-            for enc in ["cp932", "utf-8-sig", "utf-8"]:
-                try:
-                    csv_content = csv_path.read_text(encoding=enc)
-                    break
-                except UnicodeDecodeError:
-                    continue
-            if csv_content:
-                result["csv_content"] = csv_content
-                result["row_count"] = csv_content.count("\n")
-                result["file_size_bytes"] = csv_path.stat().st_size
+        def do_export():
+            """export の実処理（同期・非同期共通）"""
+            result = run_export(
+                month=month,
+                out_path=out_path,
+                headless=headless,
+            )
 
-        # export_timestamp を追加
-        result["export_timestamp"] = datetime.now().isoformat()
+            # CSV内容をレスポンスに含める
+            csv_path = Path(result.get("file_path", ""))
+            if csv_path.exists():
+                csv_content = None
+                for enc in ["cp932", "utf-8-sig", "utf-8"]:
+                    try:
+                        csv_content = csv_path.read_text(encoding=enc)
+                        break
+                    except UnicodeDecodeError:
+                        continue
+                if csv_content:
+                    result["csv_content"] = csv_content
+                    result["row_count"] = csv_content.count("\n")
+                    result["file_size_bytes"] = csv_path.stat().st_size
 
-        # drive_file 情報を追加（GAS側でDriveアップロードする際に使用）
-        try:
-            config = load_drive_config()
-            folder_id = config.get("folder_id")
-            if folder_id:
-                month_str = month.replace("-", "")
-                drive_filename = config.get("current_csv_name", "kaipoke_export_{month}.csv")
-                drive_filename = drive_filename.replace("{month}", month_str)
-                result["drive_file"] = {
-                    "filename": drive_filename,
-                    "folder_id": folder_id,
-                }
-                # week_start/week_end が指定された場合、検証用ファイル名も追加
-                if week_start and week_end:
-                    ws = week_start.replace("-", "")
-                    we = week_end.replace("-", "")
-                    result["drive_file"]["verification_filename"] = f"kaipoke_current_{ws}_{we}_post_apply.csv"
-        except Exception:
-            pass
+            # export_timestamp を追加
+            result["export_timestamp"] = datetime.now().isoformat()
 
-        # Google Driveに自動アップロード（Shared Drive使用時のみ有効）
-        if auto_drive_upload and result.get("success"):
+            # drive_file 情報を追加（GAS側でDriveアップロードする際に使用）
             try:
                 config = load_drive_config()
                 folder_id = config.get("folder_id")
@@ -359,21 +349,86 @@ def api_export():
                     month_str = month.replace("-", "")
                     drive_filename = config.get("current_csv_name", "kaipoke_export_{month}.csv")
                     drive_filename = drive_filename.replace("{month}", month_str)
-                    file_id = upload_to_drive(
-                        str(csv_path), folder_id, filename=drive_filename
-                    )
-                    if file_id:
-                        result["drive_file_id"] = file_id
-                        result["drive_filename"] = drive_filename
-                        add_log(f"Driveアップロード完了: {drive_filename}")
-                    else:
-                        add_log("Driveアップロードに失敗（サービスアカウント未設定の可能性）")
-                else:
-                    add_log("Drive folder_idが未設定です")
-            except Exception as e:
-                add_log(f"Driveアップロードエラー: {e}")
-                result["drive_error"] = str(e)
+                    result["drive_file"] = {
+                        "filename": drive_filename,
+                        "folder_id": folder_id,
+                    }
+                    # week_start/week_end が指定された場合、検証用ファイル名も追加
+                    if week_start and week_end:
+                        ws = week_start.replace("-", "")
+                        we = week_end.replace("-", "")
+                        result["drive_file"]["verification_filename"] = f"kaipoke_current_{ws}_{we}_post_apply.csv"
+            except Exception:
+                pass
 
+            # Google Driveに自動アップロード（Shared Drive使用時のみ有効）
+            if auto_drive_upload and result.get("success"):
+                try:
+                    config = load_drive_config()
+                    folder_id = config.get("folder_id")
+                    if folder_id:
+                        month_str = month.replace("-", "")
+                        drive_filename = config.get("current_csv_name", "kaipoke_export_{month}.csv")
+                        drive_filename = drive_filename.replace("{month}", month_str)
+                        file_id = upload_to_drive(
+                            str(csv_path), folder_id, filename=drive_filename
+                        )
+                        if file_id:
+                            result["drive_file_id"] = file_id
+                            result["drive_filename"] = drive_filename
+                            add_log(f"Driveアップロード完了: {drive_filename}")
+                        else:
+                            add_log("Driveアップロードに失敗（サービスアカウント未設定の可能性）")
+                    else:
+                        add_log("Drive folder_idが未設定です")
+                except Exception as e:
+                    add_log(f"Driveアップロードエラー: {e}")
+                    result["drive_error"] = str(e)
+
+            return result
+
+        # --- 非同期モード ---
+        if async_mode:
+            global export_result_store
+            export_result_store = {"result": None, "completed_at": None, "error": None}
+
+            def run_export_async():
+                global current_task, export_result_store
+                try:
+                    result = do_export()
+                    add_log(f"export 完了 (async): success={result.get('success')}")
+                    with job_state_lock:
+                        export_result_store = {
+                            "result": result,
+                            "completed_at": datetime.now().isoformat(),
+                            "error": None,
+                        }
+                except Exception as e:
+                    add_log(f"export エラー (async): {e}")
+                    print(f"エラー: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    with job_state_lock:
+                        export_result_store = {
+                            "result": None,
+                            "completed_at": datetime.now().isoformat(),
+                            "error": str(e),
+                        }
+                finally:
+                    with job_state_lock:
+                        current_task = {"running": False, "command": None, "started_at": None}
+
+            thread = threading.Thread(target=run_export_async, daemon=True)
+            thread.start()
+
+            return jsonify({
+                "success": True,
+                "async": True,
+                "message": "CSV出力を開始しました。/api/export/result でポーリングしてください。",
+            })
+
+        # --- 同期モード（従来互換） ---
+        result = do_export()
         add_log(f"export 完了: success={result.get('success')}")
         return jsonify({
             "success": True,
@@ -389,8 +444,54 @@ def api_export():
         }), 500
 
     finally:
-        with job_state_lock:
-            current_task = {"running": False, "command": None, "started_at": None}
+        if not data.get("async", False):
+            with job_state_lock:
+                current_task = {"running": False, "command": None, "started_at": None}
+
+
+@app.route('/api/export/result', methods=['GET'])
+def api_export_result():
+    """CSV出力の結果を取得（非同期モードのポーリング用）
+
+    GASから定期的に呼び出し、エクスポートが完了したかを確認する。
+    """
+    with job_state_lock:
+        running = current_task.get("running", False) and current_task.get("command") == "export"
+
+    if running:
+        return jsonify({
+            "success": True,
+            "status": "running",
+            "message": "CSV出力を実行中です...",
+            "started_at": current_task.get("started_at"),
+        })
+
+    # 完了済み
+    with job_state_lock:
+        store = dict(export_result_store)
+
+    if store.get("error"):
+        return jsonify({
+            "success": False,
+            "status": "error",
+            "error": store["error"],
+            "completed_at": store.get("completed_at"),
+        })
+
+    if store.get("result"):
+        return jsonify({
+            "success": True,
+            "status": "completed",
+            "result": store["result"],
+            "completed_at": store.get("completed_at"),
+        })
+
+    # まだ一度も実行されていない
+    return jsonify({
+        "success": False,
+        "status": "no_result",
+        "message": "エクスポート結果がありません。先に /api/export を呼び出してください。",
+    })
 
 
 @app.route('/api/apply', methods=['POST'])

@@ -1,0 +1,3241 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <base target="_top">
+  <style>
+    :root {
+      --color-green: #B7D38A;
+      --color-green-dark: #9BC06A;
+      --color-green-light: #D4E8B8;
+      --color-orange: #F6B26B;
+      --color-orange-dark: #E89D4A;
+      --color-orange-light: #FACCAA;
+      --color-yellow: #F9E0A6;
+      --color-yellow-light: #FDF5E6;
+      --color-blue: #7DA7D9;
+      --color-blue-dark: #5A8BC4;
+      --color-blue-light: #B8D4F0;
+      --color-text: #333333;
+      --color-text-light: #666666;
+      --color-border: #E0E0E0;
+      --color-bg: #FAFAFA;
+      --color-white: #FFFFFF;
+      --color-success: #B7D38A;
+      --color-error: #E88B8B;
+      --color-disabled: #CCCCCC;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 0;
+      font-family: 'Hiragino Sans', 'Meiryo', 'Segoe UI', sans-serif;
+      background: var(--color-bg);
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      color: var(--color-text);
+    }
+    .header {
+      background: linear-gradient(135deg, var(--color-green) 0%, var(--color-green-dark) 100%);
+      color: var(--color-white);
+      padding: 14px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+    }
+    .header h1 { margin: 0; font-size: 18px; font-weight: 600; }
+    .header-left { display: flex; align-items: center; gap: 12px; }
+    .header-badge { font-size: 11px; background: var(--color-orange); padding: 4px 10px; border-radius: 12px; font-weight: 500; }
+    .header-status { font-size: 12px; background: rgba(255,255,255,0.2); padding: 4px 12px; border-radius: 12px; }
+    .main-container { flex: 1; display: flex; overflow: hidden; }
+    .left-panel { flex: 1; padding: 16px; overflow: auto; background: var(--color-white); display: flex; flex-direction: column; }
+    .status-bar {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 12px; padding: 10px 14px;
+      background: var(--color-yellow-light); border-radius: 8px; border: 1px solid var(--color-yellow); font-size: 13px;
+    }
+    .status-text { color: var(--color-text-light); }
+    .status-text.loading { color: var(--color-blue-dark); }
+    .status-text.error { color: var(--color-error); }
+    .status-text.success { color: var(--color-green-dark); }
+    .refresh-btn {
+      padding: 6px 14px; background: var(--color-green); color: var(--color-white);
+      border: none; border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: 500;
+    }
+    .refresh-btn:hover { background: var(--color-green-dark); }
+    .refresh-btn:disabled { background: var(--color-disabled); cursor: not-allowed; }
+    #mainContent { flex: 1; overflow: hidden; display: flex; flex-direction: column; }
+    #normalTableArea, #specialWeekArea { flex: 1; display: flex; flex-direction: column; }
+    .table-container {
+      flex: 1;
+      overflow: scroll; /* 縦横スクロールバーを常に表示 */
+      border: 1px solid var(--color-green-light);
+      border-radius: 8px;
+    }
+    /* スクロールバーのスタイル（常時表示） */
+    .table-container::-webkit-scrollbar {
+      width: 12px;
+      height: 12px;
+      -webkit-appearance: scrollbar; /* 常に表示 */
+    }
+    .table-container::-webkit-scrollbar-track {
+      background: #f1f1f1;
+      border-radius: 6px;
+    }
+    .table-container::-webkit-scrollbar-thumb {
+      background: var(--color-green);
+      border-radius: 6px;
+    }
+    .table-container::-webkit-scrollbar-thumb:hover {
+      background: var(--color-green-dark);
+    }
+    .data-table { border-collapse: collapse; width: max-content; min-width: 100%; font-size: 12px; }
+    .data-table th {
+      position: sticky; top: 0; background: var(--color-blue); color: var(--color-white);
+      padding: 10px 12px; text-align: left; font-weight: 600;
+      border: 1px solid var(--color-blue-dark); white-space: nowrap; z-index: 10;
+    }
+    .data-table td {
+      border: 1px solid var(--color-border); padding: 8px 12px;
+      background: var(--color-white); white-space: nowrap; cursor: pointer;
+    }
+    .data-table tbody tr:nth-child(even) td { background: #FDFDFB; }
+    .data-table tbody tr:hover td { background: var(--color-blue-light); }
+    /* Row Handle */
+    .row-handle {
+      width: 30px; text-align: center; cursor: grab; color: var(--color-disabled);
+      user-select: none; font-size: 14px;
+    }
+    .row-handle:hover { color: var(--color-text); }
+    /* 行選択状態 */
+    .data-table tbody tr.row-selected td { background: var(--color-orange-light) !important; border-color: var(--color-orange); }
+    .data-table tbody tr.row-selected .row-handle { color: var(--color-orange-dark); font-weight: bold; }
+    /* セル選択状態 */
+    .data-table td.cell-focused { outline: 2px solid var(--color-blue); outline-offset: -2px; }
+    /* 編集中セル */
+    .data-table td.dirty { background: var(--color-yellow) !important; }
+    .data-table td.is-new { background: var(--color-green-light) !important; }
+    .data-table td.editing { padding: 0; }
+    .data-table td.editing input,
+    .data-table td.editing select {
+      width: 100%; padding: 8px 10px; border: 2px solid var(--color-blue);
+      font-size: 12px; font-family: inherit; outline: none;
+    }
+    /* 右パネル */
+    .right-panel {
+      width: 240px; border-left: 1px solid var(--color-border);
+      background: var(--color-white); padding: 16px;
+      display: flex; flex-direction: column; overflow-y: auto;
+    }
+    .panel-title {
+      font-size: 14px; font-weight: 600; margin-bottom: 16px; padding-bottom: 10px;
+      border-bottom: 3px solid var(--color-green);
+      display: flex; align-items: center; justify-content: space-between;
+    }
+    .dirty-badge { font-size: 10px; background: var(--color-orange); color: var(--color-white); padding: 2px 6px; border-radius: 4px; display: none; }
+    .dirty-badge.show { display: inline-block; }
+    .operation-group { margin-bottom: 20px; }
+    .operation-group-title { font-size: 11px; color: var(--color-text-light); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 10px; }
+    .operation-btn {
+      width: 100%; padding: 10px 14px; margin-bottom: 8px;
+      border: 1px solid var(--color-border); border-radius: 6px;
+      background: var(--color-white); color: var(--color-text);
+      font-size: 12px; text-align: left; cursor: pointer;
+      display: flex; align-items: center; gap: 8px; transition: all 0.15s ease;
+    }
+    .operation-btn:hover:not(:disabled) { background: var(--color-green-light); border-color: var(--color-green); }
+    .operation-btn:disabled { background: var(--color-bg); color: var(--color-disabled); cursor: not-allowed; }
+    .operation-btn .icon { font-size: 14px; }
+    .operation-btn.primary { background: var(--color-green); color: var(--color-white); border-color: var(--color-green-dark); }
+    .operation-btn.primary:hover:not(:disabled) { background: var(--color-green-dark); }
+    .operation-btn.danger:hover:not(:disabled) { background: var(--color-error); color: var(--color-white); border-color: var(--color-error); }
+    .info-section { margin-top: auto; padding-top: 16px; border-top: 1px solid var(--color-border); }
+    .info-item { font-size: 11px; color: var(--color-text-light); margin-bottom: 6px; display: flex; justify-content: space-between; }
+    .info-item .label { color: var(--color-text); }
+    /* トースト */
+    .toast-container { position: fixed; top: 80px; right: 20px; z-index: 1000; display: flex; flex-direction: column; gap: 8px; }
+    .toast { padding: 12px 20px; border-radius: 8px; font-size: 13px; box-shadow: 0 4px 12px rgba(0,0,0,0.15); animation: slideIn 0.3s ease; max-width: 320px; }
+    .toast.success { background: var(--color-green); color: var(--color-white); }
+    .toast.error { background: var(--color-error); color: var(--color-white); }
+    .toast.info { background: var(--color-blue); color: var(--color-white); }
+    @keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+    /* 下部タブバー */
+    .bottom-bar { display: flex; justify-content: space-between; align-items: center; padding: 10px 16px; border-top: 1px solid var(--color-green-light); background: var(--color-white); }
+    .tabs-left { display: flex; gap: 8px; }
+    .tab-btn { border: 1px solid var(--color-green-light); background: var(--color-white); padding: 8px 14px; border-radius: 999px; cursor: pointer; font-size: 12px; font-weight: 500; color: var(--color-text); transition: all 0.2s ease; }
+    .tab-btn:hover { background: var(--color-green-light); }
+    .tab-btn.active { background: var(--color-green); border-color: var(--color-green); color: var(--color-white); }
+    .tabs-right { display: flex; gap: 8px; }
+    .nav-link { padding: 8px 16px; font-size: 12px; font-weight: 500; border: 1px solid var(--color-green); background: var(--color-green-light); border-radius: 8px; color: var(--color-text); cursor: pointer; text-decoration: none; transition: all 0.2s ease; }
+    .nav-link:hover { background: var(--color-green); color: var(--color-white); }
+    /* 曜日チェックボックス */
+    .weekday-editor { display: flex; gap: 4px; flex-wrap: wrap; padding: 4px; }
+    .weekday-editor label { display: flex; align-items: center; gap: 2px; font-size: 11px; cursor: pointer; padding: 2px 4px; border-radius: 4px; }
+    .weekday-editor label:hover { background: var(--color-blue-light); }
+    .weekday-editor input { width: 14px; height: 14px; }
+    /* スタッフ複数選択 */
+    .staff-multi-select { display: flex; flex-direction: column; gap: 2px; padding: 4px; max-height: 200px; overflow-y: auto; background: #fff; border: 1px solid #ccc; border-radius: 4px; min-width: 180px; }
+    .staff-multi-select label { display: flex; align-items: center; gap: 4px; font-size: 11px; cursor: pointer; padding: 2px 4px; border-radius: 4px; white-space: nowrap; }
+    .staff-multi-select label:hover { background: var(--color-blue-light); }
+    .staff-multi-select input { width: 14px; height: 14px; }
+    /* 未使用列のスタイル */
+    .unused-column { background: #f5f5f0 !important; color: #888; }
+    .unused-mark { color: #e67e22; font-weight: bold; font-size: 10px; vertical-align: super; cursor: help; }
+    /* ============================================================
+       チャットウィザード
+       ============================================================ */
+    .wizard-panel {
+      background: var(--color-white);
+      border-bottom: 2px solid var(--color-green);
+      padding: 0;
+      display: none;
+    }
+    .wizard-panel.active { display: block; }
+    .wizard-header {
+      background: linear-gradient(135deg, var(--color-blue-light) 0%, var(--color-blue) 100%);
+      color: var(--color-white);
+      padding: 10px 16px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .wizard-header h3 { margin: 0; font-size: 14px; }
+    .wizard-close { background: none; border: none; color: white; font-size: 18px; cursor: pointer; padding: 4px 8px; }
+    .wizard-close:hover { background: rgba(255,255,255,0.2); border-radius: 4px; }
+    .wizard-body { display: flex; height: 280px; }
+    .wizard-chat { flex: 1; padding: 12px; overflow-y: auto; background: #f8f9fa; }
+    .wizard-input-area { width: 320px; border-left: 1px solid var(--color-border); padding: 12px; display: flex; flex-direction: column; }
+    /* チャットメッセージ */
+    .chat-message { margin-bottom: 12px; display: flex; flex-direction: column; }
+    .chat-message.bot { align-items: flex-start; }
+    .chat-message.user { align-items: flex-end; }
+    .chat-bubble {
+      max-width: 80%;
+      padding: 10px 14px;
+      border-radius: 12px;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+    .chat-message.bot .chat-bubble {
+      background: var(--color-white);
+      border: 1px solid var(--color-border);
+      border-bottom-left-radius: 4px;
+    }
+    .chat-message.user .chat-bubble {
+      background: var(--color-blue);
+      color: white;
+      border-bottom-right-radius: 4px;
+    }
+    .chat-label { font-size: 10px; color: #999; margin-bottom: 4px; }
+    /* 入力エリア */
+    .wizard-question { font-size: 13px; font-weight: 600; margin-bottom: 8px; color: var(--color-text); }
+    .wizard-hint { font-size: 11px; color: #888; margin-bottom: 8px; }
+    .wizard-input-container { flex: 1; overflow-y: auto; }
+    .wizard-input-container input[type="text"],
+    .wizard-input-container input[type="number"],
+    .wizard-input-container input[type="date"],
+    .wizard-input-container input[type="time"],
+    .wizard-input-container textarea,
+    .wizard-input-container select {
+      width: 100%;
+      padding: 10px;
+      border: 1px solid var(--color-border);
+      border-radius: 6px;
+      font-size: 13px;
+      margin-bottom: 8px;
+    }
+    .wizard-input-container textarea { height: 60px; resize: vertical; }
+    .wizard-input-container input:focus,
+    .wizard-input-container textarea:focus,
+    .wizard-input-container select:focus { outline: none; border-color: var(--color-blue); }
+    .wizard-checkboxes { display: flex; flex-wrap: wrap; gap: 6px; }
+    .wizard-checkboxes label {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      font-size: 12px;
+      padding: 4px 8px;
+      background: #f0f0f0;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    .wizard-checkboxes label:hover { background: var(--color-blue-light); }
+    .wizard-checkboxes input { width: 14px; height: 14px; }
+    .wizard-error { color: var(--color-error); font-size: 11px; margin-top: 4px; }
+    /* ウィザードボタン */
+    .wizard-buttons { display: flex; gap: 8px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--color-border); }
+    .wizard-btn {
+      flex: 1;
+      padding: 10px;
+      border: none;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .wizard-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .wizard-btn.secondary { background: #e0e0e0; color: var(--color-text); }
+    .wizard-btn.secondary:hover:not(:disabled) { background: #d0d0d0; }
+    .wizard-btn.primary { background: var(--color-blue); color: white; }
+    .wizard-btn.primary:hover:not(:disabled) { background: var(--color-blue-dark); }
+    .wizard-btn.success { background: var(--color-green); color: white; }
+    .wizard-btn.success:hover:not(:disabled) { background: var(--color-green-dark); }
+    /* プレビュー */
+    .wizard-preview { background: #fff; border: 1px solid var(--color-border); border-radius: 6px; padding: 8px; margin-bottom: 8px; max-height: 150px; overflow-y: auto; }
+    .wizard-preview table { width: 100%; font-size: 11px; border-collapse: collapse; }
+    .wizard-preview th, .wizard-preview td { padding: 4px 6px; text-align: left; border-bottom: 1px solid #eee; }
+    .wizard-preview th { background: #f5f5f5; font-weight: 600; }
+    /* 開始ボタン */
+    .wizard-start-btn {
+      background: var(--color-blue);
+      color: white;
+      border: none;
+      padding: 8px 16px;
+      border-radius: 6px;
+      font-size: 12px;
+      cursor: pointer;
+      margin-right: 8px;
+    }
+    .wizard-start-btn:hover { background: var(--color-blue-dark); }
+    /* 進捗バー */
+    .wizard-progress { height: 4px; background: #e0e0e0; margin-bottom: 8px; border-radius: 2px; }
+    .wizard-progress-bar { height: 100%; background: var(--color-green); border-radius: 2px; transition: width 0.3s; }
+    /* 同行割付ウィザード */
+    .mentor-wizard-body { display: flex; padding: 16px; gap: 16px; }
+    .mentor-wizard-left { width: 260px; display: flex; flex-direction: column; gap: 12px; }
+    .mentor-wizard-right { flex: 1; overflow-x: auto; }
+    .mentor-wizard-section { display: flex; flex-direction: column; gap: 6px; }
+    .mentor-wizard-label { font-size: 12px; font-weight: 600; color: var(--color-text); }
+    .mentor-week-nav { display: flex; align-items: center; gap: 8px; }
+    .mentor-week-nav button { padding: 6px 10px; border: 1px solid var(--color-border); background: var(--color-white); border-radius: 4px; cursor: pointer; }
+    .mentor-week-nav button:hover { background: var(--color-orange-light); }
+    .mentor-week-nav span { flex: 1; text-align: center; font-size: 13px; font-weight: 500; }
+    .mentor-quick-btns { display: flex; flex-wrap: wrap; gap: 6px; }
+    .mentor-quick-btns button { padding: 6px 10px; font-size: 11px; border: 1px solid var(--color-border); background: var(--color-white); border-radius: 4px; cursor: pointer; }
+    .mentor-quick-btns button:hover { background: var(--color-blue-light); }
+    .mentor-grid-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    .mentor-grid-table th { background: var(--color-orange); color: var(--color-white); padding: 8px 10px; text-align: left; white-space: nowrap; }
+    .mentor-grid-table td { border: 1px solid var(--color-border); padding: 6px 8px; background: var(--color-white); }
+    .mentor-grid-table select { width: 100%; padding: 6px; border: 1px solid var(--color-border); border-radius: 4px; font-size: 12px; }
+    .mentor-grid-table .status-ok { color: var(--color-green-dark); font-size: 11px; }
+    .mentor-grid-table .status-warn { color: var(--color-orange-dark); font-size: 11px; }
+    .mentor-grid-table .status-empty { color: var(--color-disabled); font-size: 11px; }
+    .mentor-wizard-footer { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--color-border); background: #f9f9f9; }
+
+    /* 特別訪問週間ウィザード */
+    .special-week-body { display: flex; padding: 16px; gap: 16px; }
+    .special-week-left { width: 280px; display: flex; flex-direction: column; gap: 12px; }
+    .special-week-right { flex: 1; overflow-x: auto; }
+    .special-week-section { display: flex; flex-direction: column; gap: 6px; }
+    .special-week-label { font-size: 12px; font-weight: 600; color: var(--color-text); }
+    .special-week-nav { display: flex; align-items: center; gap: 8px; }
+    .special-week-nav button { padding: 6px 10px; border: 1px solid var(--color-border); background: var(--color-white); border-radius: 4px; cursor: pointer; }
+    .special-week-nav button:hover { background: var(--color-purple-light, #f3e5f5); }
+    .special-week-nav span { flex: 1; text-align: center; font-size: 13px; font-weight: 500; }
+    .special-week-grid { width: 100%; border-collapse: collapse; font-size: 12px; }
+    .special-week-grid th { background: var(--color-purple, #7b1fa2); color: var(--color-white); padding: 8px 10px; text-align: center; white-space: nowrap; }
+    .special-week-grid td { border: 1px solid var(--color-border); padding: 6px 8px; background: var(--color-white); vertical-align: top; }
+    .special-week-grid td.row-header { background: #fafafa; font-weight: 500; white-space: nowrap; }
+    .special-week-grid .cell-muted { color: #999; font-size: 11px; background: #f5f5f5; }
+    .special-week-grid .cell-change { color: var(--color-orange-dark); font-size: 11px; background: #fff8e1; }
+    .special-week-grid .cell-special { font-weight: 500; }
+    .special-week-grid input[type="time"] { width: 90px; padding: 4px; border: 1px solid var(--color-border); border-radius: 4px; font-size: 11px; }
+    .special-week-grid select { width: 100%; padding: 4px; border: 1px solid var(--color-border); border-radius: 4px; font-size: 11px; }
+    .special-week-footer { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--color-border); background: #f9f9f9; }
+    .special-week-mode { display: flex; gap: 12px; }
+    .special-week-mode label { display: flex; align-items: center; gap: 4px; font-size: 12px; cursor: pointer; }
+    .special-week-mode input[type="radio"] { margin: 0; }
+    .special-week-hint { font-size: 11px; color: #666; margin-top: 4px; }
+    .special-week-conflict { margin-top: 8px; padding: 8px; background: #fff8e1; border: 1px solid #ffe082; border-radius: 4px; }
+    .special-week-conflict-title { font-size: 12px; font-weight: 600; color: var(--color-orange-dark); margin-bottom: 4px; }
+    .special-week-conflict select { width: 100%; margin-top: 4px; }
+    #wizardTraineeSelect { width: 100%; padding: 8px; border: 1px solid var(--color-border); border-radius: 4px; font-size: 12px; }
+    @media (max-width: 900px) { .right-panel { display: none; } }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div class="header-left">
+      <h1>訪問看護 自動スケジューリング</h1>
+      <span class="header-badge">管理者専用</span>
+    </div>
+    <span class="header-status">入力管理画面</span>
+  </div>
+
+  <!-- チャットウィザード -->
+  <div class="wizard-panel" id="wizardPanel">
+    <div class="wizard-header">
+      <h3 id="wizardTitle">新規登録ウィザード</h3>
+      <button class="wizard-close" onclick="closeWizard()">×</button>
+    </div>
+    <div class="wizard-body">
+      <div class="wizard-chat" id="wizardChat">
+        <!-- チャットメッセージがここに表示される -->
+      </div>
+      <div class="wizard-input-area">
+        <div class="wizard-progress">
+          <div class="wizard-progress-bar" id="wizardProgressBar" style="width: 0%"></div>
+        </div>
+        <div class="wizard-question" id="wizardQuestion">登録タイプを選択</div>
+        <div class="wizard-hint" id="wizardHint"></div>
+        <div class="wizard-input-container" id="wizardInputContainer">
+          <!-- 入力UIがここに表示される -->
+        </div>
+        <div class="wizard-error" id="wizardError"></div>
+        <div class="wizard-buttons">
+          <button class="wizard-btn secondary" id="wizardBackBtn" onclick="wizardBack()" disabled>戻る</button>
+          <button class="wizard-btn secondary" id="wizardSkipBtn" onclick="wizardSkip()" style="display:none;">スキップ</button>
+          <button class="wizard-btn primary" id="wizardNextBtn" onclick="wizardNext()">次へ</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 同行割付ウィザード -->
+  <div class="wizard-panel" id="mentorWizardPanel">
+    <div class="wizard-header" style="background: linear-gradient(135deg, var(--color-orange-light) 0%, var(--color-orange) 100%);">
+      <h3>同行割付ウィザード</h3>
+      <button class="wizard-close" onclick="closeMentorWizard()">×</button>
+    </div>
+    <div class="mentor-wizard-body">
+      <div class="mentor-wizard-left">
+        <div class="mentor-wizard-section">
+          <label class="mentor-wizard-label">対象週</label>
+          <div class="mentor-week-nav">
+            <button type="button" onclick="mentorWeekPrev()">◀</button>
+            <span id="mentorWeekDisplay">2026/01/05 〜 2026/01/11</span>
+            <button type="button" onclick="mentorWeekNext()">▶</button>
+          </div>
+        </div>
+        <div class="mentor-wizard-section">
+          <label class="mentor-wizard-label">新人（trainee）を選択</label>
+          <select id="wizardTraineeSelect" onchange="onTraineeChange()">
+            <option value="">-- 新人を選択 --</option>
+          </select>
+        </div>
+        <div class="mentor-wizard-section">
+          <label class="mentor-wizard-label">便利ボタン</label>
+          <div class="mentor-quick-btns">
+            <button type="button" onclick="applyAllDaysSameMentor()">全日同じメンター</button>
+            <button type="button" onclick="applyWeekdayMentor()">平日同じ</button>
+            <button type="button" onclick="clearMentorGrid()">全クリア</button>
+          </div>
+        </div>
+        <div id="mentorWizardError" class="wizard-error"></div>
+      </div>
+      <div class="mentor-wizard-right">
+        <table class="mentor-grid-table">
+          <thead>
+            <tr>
+              <th>曜日</th>
+              <th>日付</th>
+              <th>メンター</th>
+              <th>時間帯</th>
+              <th>状態</th>
+            </tr>
+          </thead>
+          <tbody id="mentorGridBody">
+            <!-- JS で生成 -->
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <div class="mentor-wizard-footer">
+      <button class="wizard-btn secondary" onclick="closeMentorWizard()">キャンセル</button>
+      <button class="wizard-btn success" id="btnSaveMentorWizard" onclick="saveMentorWizard()">保存</button>
+    </div>
+  </div>
+
+  <!-- 特別訪問週間ウィザード -->
+  <div class="wizard-panel" id="specialWeekWizardPanel">
+    <div class="wizard-header" style="background: linear-gradient(135deg, #ce93d8 0%, #7b1fa2 100%);">
+      <h3>特別訪問週間ウィザード</h3>
+      <button class="wizard-close" onclick="closeSpecialWeekWizard()">×</button>
+    </div>
+    <div class="special-week-body">
+      <div class="special-week-left">
+        <div class="special-week-section">
+          <label class="special-week-label">対象週</label>
+          <div class="special-week-nav">
+            <button type="button" onclick="specialWeekPrev()">◀</button>
+            <span id="specialWeekDisplay">2026/01/05 〜 2026/01/11</span>
+            <button type="button" onclick="specialWeekNext()">▶</button>
+          </div>
+        </div>
+        <div class="special-week-section">
+          <label class="special-week-label">患者を選択</label>
+          <select id="specialWeekPatientSelect" onchange="onSpecialWeekPatientChange()">
+            <option value="">-- 患者を選択 --</option>
+          </select>
+        </div>
+        <div class="special-week-section">
+          <label class="special-week-label">モード</label>
+          <div class="special-week-mode">
+            <label><input type="radio" name="specialWeekMode" value="追加" checked onchange="onSpecialWeekModeChange()"> 追加</label>
+            <label><input type="radio" name="specialWeekMode" value="置換" onchange="onSpecialWeekModeChange()"> 置換</label>
+          </div>
+          <div class="special-week-hint" id="specialWeekModeHint">通常スケジュールに加えて特別訪問を追加</div>
+        </div>
+        <div class="special-week-section">
+          <label class="special-week-label">理由（任意）</label>
+          <input type="text" id="specialWeekReason" style="width:100%; padding:6px; border:1px solid var(--color-border); border-radius:4px; font-size:12px;" placeholder="例：退院直後の集中ケア">
+        </div>
+        <div class="special-week-conflict" id="specialWeekConflictArea" style="display:none;">
+          <div class="special-week-conflict-title">個別変更リクエストとの競合</div>
+          <select id="specialWeekConflictPolicy">
+            <option value="keep_individual">個別変更を残す</option>
+            <option value="overwrite_individual">個別変更を上書き</option>
+            <option value="add_to_individual">個別変更に追加</option>
+          </select>
+        </div>
+        <div id="specialWeekWizardError" class="wizard-error"></div>
+      </div>
+      <div class="special-week-right">
+        <table class="special-week-grid">
+          <thead>
+            <tr>
+              <th style="width:60px;">行</th>
+              <th id="swTh0">月</th>
+              <th id="swTh1">火</th>
+              <th id="swTh2">水</th>
+              <th id="swTh3">木</th>
+              <th id="swTh4">金</th>
+              <th id="swTh5">土</th>
+              <th id="swTh6">日</th>
+            </tr>
+          </thead>
+          <tbody id="specialWeekGridBody">
+            <!-- JS で生成 -->
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <div class="special-week-footer">
+      <button class="wizard-btn secondary" onclick="closeSpecialWeekWizard()">キャンセル</button>
+      <button class="wizard-btn success" id="btnSaveSpecialWeek" onclick="saveSpecialWeekWizard()">保存</button>
+    </div>
+  </div>
+
+  <div class="main-container">
+    <div class="left-panel">
+      <div class="status-bar">
+        <span class="status-text" id="statusText">読み込み中...</span>
+        <button class="refresh-btn" id="refreshBtn" onclick="reloadCurrentSheet()">更新</button>
+      </div>
+      <div id="mainContent">
+        <div id="normalTableArea">
+          <div class="table-container">
+            <table class="data-table" id="dataTable">
+              <thead><tr><th>読み込み中...</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+        <div id="specialWeekArea" style="display:none;"></div>
+      </div>
+    </div>
+
+    <div class="right-panel">
+      <div class="panel-title">操作メニュー<span class="dirty-badge" id="dirtyBadge">未保存</span></div>
+      <div class="operation-group">
+        <div class="operation-group-title">新規登録</div>
+        <button class="operation-btn primary" onclick="openWizard()"><span class="icon">💬</span>ウィザードで登録</button>
+        <button class="operation-btn" onclick="openMentorWizard()"><span class="icon">👥</span>同行割付ウィザード</button>
+        <button class="operation-btn" onclick="openSpecialWeekWizard()"><span class="icon">📅</span>特別訪問週間</button>
+      </div>
+      <div class="operation-group">
+        <div class="operation-group-title">行操作</div>
+        <button class="operation-btn" id="btnAddRow" onclick="onAddRow()"><span class="icon">+</span>空行を追加（選択行の下）</button>
+        <button class="operation-btn danger" id="btnDeleteRows" onclick="onDeleteSelected()" disabled><span class="icon">-</span>選択行を削除</button>
+        <button class="operation-btn" id="btnCopyRows" onclick="onCopySelected()" disabled><span class="icon">C</span>行をコピー</button>
+      </div>
+      <div class="operation-group">
+        <div class="operation-group-title">編集操作</div>
+        <button class="operation-btn" id="btnUndo" onclick="onDiscardChanges()" disabled><span class="icon">U</span>変更を元に戻す</button>
+      </div>
+      <div class="operation-group">
+        <div class="operation-group-title">保存</div>
+        <button class="operation-btn primary" id="btnSave" onclick="onSaveChanges()" disabled><span class="icon">S</span>変更を保存</button>
+      </div>
+      <div class="operation-group" id="geoGroup" style="display:none;">
+        <div class="operation-group-title">位置情報</div>
+        <button class="operation-btn" id="btnUpdateGeo" onclick="onUpdateGeo()" disabled><span class="icon">📍</span>位置情報を更新</button>
+      </div>
+      <div class="info-section">
+        <div class="info-item"><span class="label">表示中:</span><span id="infoSheetName">-</span></div>
+        <div class="info-item"><span class="label">行数:</span><span id="infoRowCount">-</span></div>
+        <div class="info-item"><span class="label">列数:</span><span id="infoColCount">-</span></div>
+        <div class="info-item"><span class="label">選択中:</span><span id="infoSelectedCount">0 行</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="bottom-bar">
+    <div class="tabs-left">
+      <button class="tab-btn active" data-sheet="患者マスタ" onclick="showSheet('患者マスタ', this)">患者マスタ</button>
+      <button class="tab-btn" data-sheet="スタッフマスタ" onclick="showSheet('スタッフマスタ', this)">スタッフマスタ</button>
+      <button class="tab-btn" data-sheet="個別変更リクエスト" onclick="showSheet('個別変更リクエスト', this)">患者個別変更</button>
+      <button class="tab-btn" data-sheet="スタッフ個別変更リクエスト" onclick="showSheet('スタッフ個別変更リクエスト', this)">スタッフ個別変更</button>
+      <button class="tab-btn" data-sheet="イベントリクエスト" onclick="showSheet('イベントリクエスト', this)">イベント</button>
+      <button class="tab-btn" data-sheet="スタッフ同行割付" onclick="showSheet('スタッフ同行割付', this)">同行割付</button>
+      <button class="tab-btn" data-sheet="特別訪問週間" onclick="showSpecialWeekSheet(this)">特別訪問週間</button>
+    </div>
+    <div class="tabs-right"><a class="nav-link" onclick="goToOutput()">出力画面へ →</a></div>
+  </div>
+
+  <div class="toast-container" id="toastContainer"></div>
+
+  <script>
+    // ============================================================
+    // 状態管理
+    // ============================================================
+    var baseUrl = '';
+    var currentSheetName = '患者マスタ';
+    var tableData = { header: [], rows: [] };
+    var originalData = { header: [], rows: [] };
+    var rowMeta = []; // { sheetRowIndex, isSelected, isDirty, isNew }
+    var dirtyCells = {}; // 'rowIdx-colIdx': newValue
+    var isDirty = false;
+    var editingCell = null;
+    var focusedCell = null; // { rowIdx, colIdx }
+    var dictionaries = { patients: {}, staff: {} };
+    var staffOptions = []; // { id, name, label }
+    var patientOptions = []; // { id, name, label }
+
+    // 特別訪問週間シート用状態
+    var isSpecialWeekMode = false;
+    var specialWeekSheetState = {
+      weekMonday: null,
+      headers: [],
+      details: [],
+      selectedHeaderId: null,
+      focusedTable: 'header' // 'header' or 'detail'
+    };
+
+    // 列タイプ定義
+    var WEEKDAYS_EN = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+    var WEEKDAYS_JP = ['日','月','火','水','木','金','土'];
+    // 英語→日本語変換マップ
+    var EN_TO_JP_MAP = { 'Sun':'日', 'Mon':'月', 'Tue':'火', 'Wed':'水', 'Thu':'木', 'Fri':'金', 'Sat':'土' };
+    var JP_TO_EN_MAP = { '日':'Sun', '月':'Mon', '火':'Tue', '水':'Wed', '木':'Thu', '金':'Fri', '土':'Sat' };
+    var TIME_OPTIONS = generateTimeOptions(8, 20, 5); // 08:00〜20:00, 5分刻み
+
+    function generateTimeOptions(startHour, endHour, stepMin) {
+      var opts = [];
+      for (var h = startHour; h <= endHour; h++) {
+        for (var m = 0; m < 60; m += stepMin) {
+          if (h === endHour && m > 0) break;
+          opts.push(String(h).padStart(2,'0') + ':' + String(m).padStart(2,'0'));
+        }
+      }
+      return opts;
+    }
+
+    // ============================================================
+    // 未使用列の判定（スケジューリングに影響しない列）
+    // ============================================================
+    function isUnusedColumn(headerName) {
+      var h = headerName || '';
+      if (h === 'エリア' && currentSheetName === '患者マスタ') {
+        return '現在スケジューリング計算に未使用';
+      }
+      if (h === '得意エリア' && currentSheetName === 'スタッフマスタ') {
+        return '現在スケジューリング計算に未使用';
+      }
+      if (h === 'スキル' && currentSheetName === 'スタッフマスタ') {
+        return '現在スケジューリング計算に未使用';
+      }
+      return null;
+    }
+
+    // ============================================================
+    // 列タイプ判定
+    // ============================================================
+    function getEditorType(headerName) {
+      var h = (headerName || '').toLowerCase();
+      var hOrig = headerName || '';
+      // ID列は対応するシートでのみ自動採番（読み取り専用）
+      if (h === 'patient_id' && currentSheetName === '患者マスタ') return 'auto_id';
+      if (h === 'staff_id' && currentSheetName === 'スタッフマスタ') return 'auto_id';
+      if (h === 'change_id' && currentSheetName === '個別変更リクエスト') return 'auto_id';
+      if (h === 'staff_change_id' && currentSheetName === 'スタッフ個別変更リクエスト') return 'auto_id';
+      if (h === 'event_id' && currentSheetName === 'イベントリクエスト') return 'auto_id';
+      // スタッフ同行割付のstaff_idはスタッフ選択
+      if (h === 'trainee_staff_id' && currentSheetName === 'スタッフ同行割付') return 'staff_single_select';
+      if (h === 'mentor_staff_id' && currentSheetName === 'スタッフ同行割付') return 'staff_single_select';
+      // 個別変更リクエストのpatient_idは患者選択
+      if (h === 'patient_id' && currentSheetName === '個別変更リクエスト') return 'patient_select';
+      // スタッフ個別変更リクエストのstaff_idはスタッフ選択
+      if (h === 'staff_id' && currentSheetName === 'スタッフ個別変更リクエスト') return 'staff_single_select';
+      // イベントリクエストのstaff_id/patient_idは選択
+      if (h === 'staff_id' && currentSheetName === 'イベントリクエスト') return 'staff_single_select';
+      if (h === 'patient_id' && currentSheetName === 'イベントリクエスト') return 'patient_select';
+      // 患者名・スタッフ名は自由入力
+      if (hOrig === '患者名' || hOrig === 'スタッフ名') return 'text';
+      // 指定スタッフID・NGスタッフIDはスタッフ選択（複数）
+      if (hOrig === '指定スタッフID' || hOrig === 'NGスタッフID') return 'staff_multi_select';
+      if (hOrig === '性別') return 'sex_select';
+      if (hOrig === 'エリア' || hOrig === '得意エリア') return 'area_select';
+      if (h.includes('緯度') || h.includes('経度')) return 'geo_readonly';
+      // 日付フィールド（開始日・終了日を含む）
+      if (h.includes('日付') || hOrig === '開始日' || hOrig === '終了日') return 'date_picker';
+      // 時刻フィールド（開始・終了だけでは日付と区別できないので時刻を含むもののみ）
+      if (h.includes('時刻') || h.includes('時間帯（開始）') || h.includes('時間帯（終）') || h.includes('シフト')) return 'time_select';
+      if (h.includes('曜日') && (h.includes('複数') || h.includes('希望') || h.includes('勤務'))) return 'weekday_multi';
+      // 曜日NGは日本語単一選択
+      if (hOrig === '曜日NG' || h.includes('曜日ng')) return 'weekday_ng_jp';
+      if (h.includes('優先度') || h === '曜日優先度') return 'priority_select';
+      if (h.includes('時間タイプ')) return 'time_type_select';
+      if (h.includes('性別制限')) return 'sex_limit_select';
+      if (h.includes('必要スタッフ') || h.includes('訪問回数') || h.includes('最大訪問') || h.includes('サービス時間')) return 'number';
+      if (h.includes('指定タイプ') || h.includes('継続希望')) return 'staff_type_select';
+      if (h.includes('操作')) return 'operation_select';
+      if (h.includes('スキル')) return 'skill_select';
+      if (hOrig === '制限タイプ') return 'restriction_type_select';
+      // イベントリクエスト用
+      if (hOrig === 'イベント種別') return 'event_type_select';
+      if (hOrig === '時間帯' && currentSheetName === 'スタッフ同行割付') return 'time_band_select';
+      if (hOrig === '時間指定方法') return 'time_mode_select';
+      if (hOrig === '患者影響') return 'patient_affect_select';
+      if (hOrig === '所要時間(分)') return 'number';
+      if (hOrig === '固定枠' || hOrig === '患者紐づき' || hOrig === '事前事務所戻り' || hOrig === '事後事務所戻り') return 'boolean_select';
+      // 訪問頻度・訪問週（患者マスタ用）
+      if (hOrig === '訪問頻度') return 'visit_frequency_select';
+      if (hOrig === '訪問週') return 'visit_weeks_checkbox';
+      // 個別変更リクエスト用（時間タイプ）
+      if (hOrig === '時間タイプ') return 'new_time_type_select';
+      return 'text';
+    }
+
+    // ============================================================
+    // 初期化
+    // ============================================================
+    document.addEventListener('DOMContentLoaded', function() {
+      google.script.run.withSuccessHandler(function(url) { baseUrl = url; }).getBaseUrl();
+      google.script.run.withSuccessHandler(function(result) {
+        if (result.success) {
+          dictionaries = result.data;
+          // 辞書から患者選択肢を生成
+          patientOptions = [];
+          for (var pid in dictionaries.patients) {
+            patientOptions.push({
+              id: pid,
+              name: dictionaries.patients[pid],
+              label: pid + ' ' + dictionaries.patients[pid]
+            });
+          }
+          patientOptions.sort(function(a, b) { return a.id.localeCompare(b.id); });
+        }
+      }).input_getDictionaries();
+      // スタッフ選択肢を読み込み
+      google.script.run.withSuccessHandler(function(options) {
+        staffOptions = options || [];
+      }).input_getStaffOptions();
+
+      var lastSheet = localStorage.getItem('unifiedInput_lastSheet');
+      if (lastSheet) {
+        currentSheetName = lastSheet;
+        document.querySelectorAll('.tabs-left .tab-btn').forEach(function(tab) {
+          tab.classList.toggle('active', tab.getAttribute('data-sheet') === currentSheetName);
+        });
+      }
+      // 特別訪問週間の場合は専用ロードを呼ぶ
+      if (currentSheetName === '特別訪問週間') {
+        isSpecialWeekMode = true;
+        document.getElementById('normalTableArea').style.display = 'none';
+        document.getElementById('specialWeekArea').style.display = 'block';
+        if (!specialWeekSheetState.weekMonday) {
+          specialWeekSheetState.weekMonday = getMonday(new Date());
+        }
+        setupSpecialWeekStatusBar();
+        document.getElementById('geoGroup').style.display = 'none';
+        loadSpecialWeekSheetData();
+      } else {
+        loadSheet(currentSheetName);
+      }
+    });
+
+    window.addEventListener('beforeunload', function(e) {
+      if (isDirty) { e.preventDefault(); e.returnValue = ''; }
+    });
+
+    // ============================================================
+    // シート表示
+    // ============================================================
+    function showSheet(sheetName, btn) {
+      if (isDirty && !confirm('未保存の変更があります。破棄してよろしいですか？')) return;
+      // 特別訪問週間モードを解除
+      isSpecialWeekMode = false;
+      document.querySelectorAll('.tabs-left .tab-btn').forEach(function(b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      currentSheetName = sheetName;
+      localStorage.setItem('unifiedInput_lastSheet', sheetName);
+      resetState();
+      restoreNormalStatusBar();
+      // エリア切り替え（固定DOM）
+      document.getElementById('normalTableArea').style.display = 'block';
+      document.getElementById('specialWeekArea').style.display = 'none';
+      loadSheet(sheetName);
+    }
+
+    // ============================================================
+    // 特別訪問週間シート表示（2テーブル方式）
+    // ============================================================
+    function showSpecialWeekSheet(btn) {
+      if (isDirty && !confirm('未保存の変更があります。破棄してよろしいですか？')) return;
+
+      // タブ切り替え
+      document.querySelectorAll('.tabs-left .tab-btn').forEach(function(b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      currentSheetName = '特別訪問週間';
+      isSpecialWeekMode = true;
+      localStorage.setItem('unifiedInput_lastSheet', '特別訪問週間');
+      resetState();
+
+      // エリア切り替え（固定DOM - 通常テーブルを隠し、特別訪問週間エリアを表示）
+      document.getElementById('normalTableArea').style.display = 'none';
+      document.getElementById('specialWeekArea').style.display = 'block';
+
+      // 週初期化
+      if (!specialWeekSheetState.weekMonday) {
+        specialWeekSheetState.weekMonday = getMonday(new Date());
+      }
+
+      // ステータスバーを週切替UIに変更
+      setupSpecialWeekStatusBar();
+
+      // 位置情報ボタン非表示
+      document.getElementById('geoGroup').style.display = 'none';
+
+      // データ読み込み
+      loadSpecialWeekSheetData();
+    }
+
+    function setupSpecialWeekStatusBar() {
+      var statusBar = document.querySelector('.status-bar');
+      var sun = new Date(specialWeekSheetState.weekMonday);
+      sun.setDate(sun.getDate() + 6);
+      var startStr = formatDateJP(specialWeekSheetState.weekMonday);
+      var endStr = formatDateJP(sun);
+
+      statusBar.innerHTML = '<div style="display:flex;align-items:center;gap:12px;width:100%;">' +
+        '<span class="status-text" id="statusText">特別訪問週間</span>' +
+        '<div style="display:flex;align-items:center;gap:6px;margin-left:auto;">' +
+          '<span style="font-size:12px;">対象週:</span>' +
+          '<button onclick="specialWeekSheetPrev()" style="padding:2px 8px;cursor:pointer;">◀</button>' +
+          '<span id="specialWeekSheetDisplay" style="font-weight:bold;">' + startStr + ' 〜 ' + endStr + '</span>' +
+          '<button onclick="specialWeekSheetNext()" style="padding:4px 8px;cursor:pointer;">▶</button>' +
+          '<button class="refresh-btn" id="refreshBtn" onclick="loadSpecialWeekSheetData()">更新</button>' +
+        '</div>' +
+      '</div>';
+    }
+
+    function restoreNormalStatusBar() {
+      var statusBar = document.querySelector('.status-bar');
+      statusBar.innerHTML = '<span class="status-text" id="statusText">読み込み中...</span>' +
+        '<button class="refresh-btn" id="refreshBtn" onclick="reloadCurrentSheet()">更新</button>';
+    }
+
+    function specialWeekSheetPrev() {
+      specialWeekSheetState.weekMonday.setDate(specialWeekSheetState.weekMonday.getDate() - 7);
+      updateSpecialWeekSheetDisplay();
+      loadSpecialWeekSheetData();
+    }
+
+    function specialWeekSheetNext() {
+      specialWeekSheetState.weekMonday.setDate(specialWeekSheetState.weekMonday.getDate() + 7);
+      updateSpecialWeekSheetDisplay();
+      loadSpecialWeekSheetData();
+    }
+
+    function updateSpecialWeekSheetDisplay() {
+      var sun = new Date(specialWeekSheetState.weekMonday);
+      sun.setDate(sun.getDate() + 6);
+      var startStr = formatDateJP(specialWeekSheetState.weekMonday);
+      var endStr = formatDateJP(sun);
+      var el = document.getElementById('specialWeekSheetDisplay');
+      if (el) el.textContent = startStr + ' 〜 ' + endStr;
+    }
+
+    function loadSpecialWeekSheetData() {
+      var weekStartStr = formatDateJP(specialWeekSheetState.weekMonday);
+      setStatus('loading', '特別訪問週間を読み込み中...');
+
+      google.script.run
+        .withSuccessHandler(function(result) {
+          if (!result || result.error) {
+            setStatus('error', result ? result.error : 'データ取得エラー');
+            return;
+          }
+          specialWeekSheetState.headers = result.specialEntries || [];
+          // 明細をフラット化
+          var allDetails = [];
+          (result.specialEntries || []).forEach(function(e) {
+            (e.details || []).forEach(function(d) {
+              allDetails.push({
+                special_id: e.special_id,
+                patient_id: e.patient_id,
+                patient_name: e.patient_name,
+                mode: e.mode,
+                dateStr: d.dateStr,
+                rowLabel: d.rowLabel,
+                timeType: d.timeType,
+                start: d.start,
+                end: d.end,
+                earliest: d.earliest,
+                latest: d.latest,
+                svcMin: d.svcMin,
+                needStaff: d.needStaff || 1,
+                note: d.note,
+                changeHandle: d.changeHandle || 'そのまま残す'
+              });
+            });
+          });
+          specialWeekSheetState.details = allDetails;
+          renderSpecialWeekSheetTables();
+          setStatus('success', '特別訪問週間（' + specialWeekSheetState.headers.length + '件）');
+          updateInfo('特別訪問週間', specialWeekSheetState.headers.length, '-');
+        })
+        .withFailureHandler(function(e) {
+          setStatus('error', 'エラー: ' + (e.message || String(e)));
+        })
+        .input_getSpecialWeekWizardData(weekStartStr, null);
+    }
+
+    function renderSpecialWeekSheetTables() {
+      // 固定DOMの #specialWeekArea に描画（mainContent.innerHTML差し替えをやめる）
+      var specialWeekArea = document.getElementById('specialWeekArea');
+      var entries = specialWeekSheetState.headers;
+      var details = specialWeekSheetState.details;
+      var selectedId = specialWeekSheetState.selectedHeaderId;
+
+      // フィルタされた明細
+      var filteredDetails = selectedId
+        ? details.filter(function(d) { return d.special_id === selectedId; })
+        : details;
+
+      var html = '<div style="display:flex;flex-direction:column;gap:16px;padding:8px;">';
+
+      // ヘッダテーブル
+      html += '<div style="background:white;border-radius:4px;border:1px solid #ddd;">';
+      html += '<div style="padding:8px 12px;background:#7b1fa2;color:white;font-weight:bold;font-size:13px;">ヘッダ一覧（患者×週単位）' +
+        '<span style="font-weight:normal;margin-left:8px;font-size:11px;">クリックで明細をフィルタ</span></div>';
+      html += '<div class="table-container">';
+      html += '<table class="data-table" id="swHeaderTable"><thead><tr>';
+      html += '<th style="width:30px;"></th><th>ID</th><th>患者ID</th><th>患者名</th><th>モード</th><th>個別変更扱い</th><th>理由</th>';
+      html += '</tr></thead><tbody>';
+      if (entries.length === 0) {
+        html += '<tr><td colspan="7" style="text-align:center;padding:20px;color:#888;">この週の特別訪問週間データはありません</td></tr>';
+      } else {
+        entries.forEach(function(e, idx) {
+          var isSelected = e.special_id === selectedId;
+          html += '<tr data-id="' + e.special_id + '" onclick="selectSpecialWeekHeader(\'' + e.special_id + '\')" ' +
+            'style="cursor:pointer;' + (isSelected ? 'background:#e8f5e9;' : '') + '">';
+          html += '<td style="text-align:center;"><input type="radio" name="swHeaderSelect" ' + (isSelected ? 'checked' : '') + '></td>';
+          html += '<td style="font-family:monospace;font-size:10px;">' + escapeHtml(e.special_id || '') + '</td>';
+          html += '<td>' + escapeHtml(e.patient_id || '') + '</td>';
+          html += '<td>' + escapeHtml(e.patient_name || '') + '</td>';
+          html += '<td>' + (e.mode === '置換' ? '<span style="color:#c00;">置換</span>' : '追加') + '</td>';
+          html += '<td>' + escapeHtml(e.changeHandle || '残す') + '</td>';
+          html += '<td>' + escapeHtml(e.reason || '') + '</td>';
+          html += '</tr>';
+        });
+      }
+      html += '</tbody></table></div></div>';
+
+      // 明細テーブル
+      html += '<div style="background:white;border-radius:4px;border:1px solid #ddd;">';
+      html += '<div style="padding:8px 12px;background:#1976d2;color:white;font-weight:bold;font-size:13px;">明細一覧（日付×時間）' +
+        (selectedId ? '<span style="font-weight:normal;margin-left:8px;font-size:11px;">フィルタ中: ' + selectedId + '</span>' : '') +
+        '<button onclick="clearSpecialWeekHeaderFilter()" style="margin-left:12px;padding:2px 8px;font-size:10px;cursor:pointer;">全表示</button></div>';
+      html += '<div class="table-container">';
+      html += '<table class="data-table" id="swDetailTable"><thead><tr>';
+      html += '<th>ヘッダID</th><th>患者名</th><th>日付</th><th>行ラベル</th><th>時間タイプ</th><th>開始</th><th>終了</th><th>希望最早</th><th>希望最遅</th><th>サービス時間</th><th>スタッフ数</th><th>備考</th><th>個別変更扱い</th>';
+      html += '</tr></thead><tbody>';
+      if (filteredDetails.length === 0) {
+        html += '<tr><td colspan="13" style="text-align:center;padding:20px;color:#888;">明細データがありません</td></tr>';
+      } else {
+        filteredDetails.forEach(function(d) {
+          html += '<tr>';
+          html += '<td style="font-family:monospace;font-size:10px;">' + escapeHtml(d.special_id || '') + '</td>';
+          html += '<td>' + escapeHtml(d.patient_name || '') + '</td>';
+          html += '<td>' + escapeHtml(d.dateStr || '') + '</td>';
+          html += '<td>' + escapeHtml(d.rowLabel || '') + '</td>';
+          html += '<td>' + escapeHtml(d.timeType || '') + '</td>';
+          html += '<td>' + escapeHtml(d.start || '') + '</td>';
+          html += '<td>' + escapeHtml(d.end || '') + '</td>';
+          html += '<td>' + escapeHtml(d.earliest || '') + '</td>';
+          html += '<td>' + escapeHtml(d.latest || '') + '</td>';
+          html += '<td>' + (d.svcMin || '') + '</td>';
+          html += '<td>' + (d.needStaff || 1) + '</td>';
+          html += '<td>' + escapeHtml(d.note || '') + '</td>';
+          html += '<td>' + escapeHtml(d.changeHandle || 'そのまま残す') + '</td>';
+          html += '</tr>';
+        });
+      }
+      html += '</tbody></table></div></div>';
+
+      html += '</div>';
+      specialWeekArea.innerHTML = html;
+    }
+
+    function selectSpecialWeekHeader(specialId) {
+      specialWeekSheetState.selectedHeaderId = specialId;
+      renderSpecialWeekSheetTables();
+    }
+
+    function clearSpecialWeekHeaderFilter() {
+      specialWeekSheetState.selectedHeaderId = null;
+      renderSpecialWeekSheetTables();
+    }
+
+    function resetState() {
+      rowMeta = [];
+      dirtyCells = {};
+      isDirty = false;
+      editingCell = null;
+      focusedCell = null;
+      updateButtonStates();
+    }
+
+    function loadSheet(sheetName) {
+      setStatus('loading', sheetName + ' を読み込み中...');
+      document.getElementById('refreshBtn').disabled = true;
+      // 位置情報ボタンの表示制御
+      var showGeo = (sheetName === '患者マスタ' || sheetName === 'スタッフマスタ');
+      document.getElementById('geoGroup').style.display = showGeo ? 'block' : 'none';
+
+      google.script.run
+        .withSuccessHandler(function(data) {
+          tableData = data;
+          originalData = JSON.parse(JSON.stringify(data));
+          // rowMeta初期化
+          rowMeta = data.rows.map(function(_, i) {
+            return { sheetRowIndex: i + 2, isSelected: false, isDirty: false, isNew: false };
+          });
+          renderTable(data);
+          document.getElementById('refreshBtn').disabled = false;
+        })
+        .withFailureHandler(function(e) {
+          setStatus('error', 'エラー: ' + e.message);
+          document.getElementById('refreshBtn').disabled = false;
+          showToast('error', e.message);
+        })
+        .getSheetTableData(sheetName, 1000);
+    }
+
+    function reloadCurrentSheet() {
+      if (isDirty && !confirm('未保存の変更があります。破棄して再読み込みしますか？')) return;
+      resetState();
+      loadSheet(currentSheetName);
+    }
+
+    // ============================================================
+    // テーブル描画
+    // ============================================================
+    function renderTable(data) {
+      if (data.error) { setStatus('error', data.error); return; }
+      if (!data.header || data.header.length === 0) {
+        setStatus('error', 'データがありません');
+        document.getElementById('dataTable').innerHTML = '<thead><tr><th>データがありません</th></tr></thead><tbody></tbody>';
+        updateInfo('-', 0, 0);
+        return;
+      }
+      setStatus('success', getDisplaySheetName(data.sheetName || currentSheetName) + '（' + data.rowCount + '行）');
+      updateInfo(data.sheetName || currentSheetName, data.rowCount, data.header.length);
+
+      var headerHtml = '<tr><th class="row-handle"></th><th>#</th>' + data.header.map(function(h) {
+        var unusedNote = isUnusedColumn(h);
+        if (unusedNote) {
+          return '<th class="unused-column" title="' + escapeHtml(unusedNote) + '">' + escapeHtml(String(h)) + ' <span class="unused-mark">*</span></th>';
+        }
+        return '<th>' + escapeHtml(String(h)) + '</th>';
+      }).join('') + '</tr>';
+
+      var rowsHtml = data.rows.map(function(row, rowIdx) {
+        var meta = rowMeta[rowIdx] || {};
+        var rowClass = [];
+        if (meta.isSelected) rowClass.push('row-selected');
+        var cells = '<td class="row-handle" data-row="' + rowIdx + '">⠿</td>';
+        cells += '<td>' + (rowIdx + 1) + '</td>';
+        cells += row.map(function(cell, colIdx) {
+          var cellKey = rowIdx + '-' + colIdx;
+          var cellClass = [];
+          if (dirtyCells.hasOwnProperty(cellKey)) cellClass.push('dirty');
+          if (meta.isNew) cellClass.push('is-new');
+          if (focusedCell && focusedCell.rowIdx === rowIdx && focusedCell.colIdx === colIdx) cellClass.push('cell-focused');
+          var cellValue = dirtyCells.hasOwnProperty(cellKey) ? dirtyCells[cellKey] : cell;
+          return '<td class="' + cellClass.join(' ') + '" data-row="' + rowIdx + '" data-col="' + colIdx + '">' + escapeHtml(formatCellDisplay(cellValue, data.header[colIdx])) + '</td>';
+        }).join('');
+        return '<tr class="' + rowClass.join(' ') + '" data-row="' + rowIdx + '">' + cells + '</tr>';
+      }).join('');
+
+      document.getElementById('dataTable').innerHTML = '<thead>' + headerHtml + '</thead><tbody>' + rowsHtml + '</tbody>';
+      attachTableEvents();
+
+    }
+
+    function formatCellDisplay(value, headerName) {
+      if (value === null || value === undefined) return '';
+      var editorType = getEditorType(headerName);
+      if (editorType === 'weekday_multi' && value) {
+        // Mon,Tue → 月,火
+        return String(value).split(',').map(function(d) {
+          var idx = WEEKDAYS_EN.indexOf(d.trim());
+          return idx >= 0 ? WEEKDAYS_JP[idx] : d;
+        }).join(',');
+      }
+      if (editorType === 'weekday_ng_jp' && value) {
+        // Sun → 日 (英語→日本語変換)
+        var v = String(value).trim();
+        return EN_TO_JP_MAP[v] || v;
+      }
+      if (editorType === 'staff_multi_select' && value) {
+        // S001,S002 → S001 田中,S002 鈴木
+        return String(value).split(',').map(function(id) {
+          id = id.trim();
+          var staff = staffOptions.find(function(s) { return s.id === id; });
+          return staff ? staff.label : id;
+        }).join(', ');
+      }
+      if (editorType === 'staff_single_select' && value) {
+        // S001 → S001 田中
+        var staff = staffOptions.find(function(s) { return s.id === String(value).trim(); });
+        return staff ? staff.label : value;
+      }
+      if (editorType === 'patient_select' && value) {
+        // P001 → P001 山田太郎
+        var patient = patientOptions.find(function(p) { return p.id === String(value).trim(); });
+        return patient ? patient.label : value;
+      }
+      if (editorType === 'time_select' && value) {
+        // HH:MM:SS → HH:MM
+        return String(value).substring(0, 5);
+      }
+      if (editorType === 'date_picker' && value) {
+        // Date object or date string → yyyy/MM/dd
+        try {
+          var d;
+          if (value instanceof Date) {
+            d = value;
+          } else if (typeof value === 'string' && value.match(/^\d{4}-\d{2}-\d{2}/)) {
+            d = new Date(value);
+          } else if (typeof value === 'string' && value.match(/^\d{4}\/\d{1,2}\/\d{1,2}/)) {
+            return value; // already formatted
+          } else {
+            d = new Date(value);
+          }
+          if (!isNaN(d.getTime())) {
+            return d.getFullYear() + '/' + String(d.getMonth() + 1).padStart(2, '0') + '/' + String(d.getDate()).padStart(2, '0');
+          }
+        } catch (e) {}
+        return String(value);
+      }
+      return String(value);
+    }
+
+    function attachTableEvents() {
+      var tbody = document.querySelector('#dataTable tbody');
+      if (!tbody) return;
+
+      tbody.addEventListener('click', function(e) {
+        var td = e.target.closest('td');
+        var tr = e.target.closest('tr');
+        if (!tr || !td) return;
+        var rowIdx = parseInt(tr.getAttribute('data-row'));
+        if (isNaN(rowIdx)) return;
+
+        // Row Handleクリック → 行選択
+        if (td.classList.contains('row-handle')) {
+          toggleRowSelection(rowIdx, e.ctrlKey || e.metaKey, e.shiftKey);
+          return;
+        }
+
+        // セルクリック → セルフォーカス
+        if (td.hasAttribute('data-col')) {
+          var colIdx = parseInt(td.getAttribute('data-col'));
+          setFocusedCell(rowIdx, colIdx);
+          if (e.detail === 2) { // ダブルクリック
+            startCellEdit(rowIdx, colIdx);
+          }
+        }
+      });
+    }
+
+    // ============================================================
+    // 行選択
+    // ============================================================
+    function toggleRowSelection(rowIdx, ctrlKey, shiftKey) {
+      if (ctrlKey) {
+        rowMeta[rowIdx].isSelected = !rowMeta[rowIdx].isSelected;
+      } else if (shiftKey && getSelectedRows().length > 0) {
+        var lastSel = getSelectedRows().pop();
+        var start = Math.min(lastSel, rowIdx);
+        var end = Math.max(lastSel, rowIdx);
+        for (var i = start; i <= end; i++) {
+          rowMeta[i].isSelected = true;
+        }
+      } else {
+        rowMeta.forEach(function(m, i) { m.isSelected = (i === rowIdx); });
+      }
+      updateRowSelectionUI();
+      updateButtonStates();
+    }
+
+    function getSelectedRows() {
+      var selected = [];
+      rowMeta.forEach(function(m, i) { if (m.isSelected) selected.push(i); });
+      return selected;
+    }
+
+    function updateRowSelectionUI() {
+      document.querySelectorAll('#dataTable tbody tr').forEach(function(tr) {
+        var rowIdx = parseInt(tr.getAttribute('data-row'));
+        if (!isNaN(rowIdx) && rowMeta[rowIdx]) {
+          tr.classList.toggle('row-selected', rowMeta[rowIdx].isSelected);
+        }
+      });
+      document.getElementById('infoSelectedCount').textContent = getSelectedRows().length + ' 行';
+    }
+
+    // ============================================================
+    // セルフォーカス
+    // ============================================================
+    function setFocusedCell(rowIdx, colIdx) {
+      focusedCell = { rowIdx: rowIdx, colIdx: colIdx };
+      document.querySelectorAll('#dataTable td.cell-focused').forEach(function(td) { td.classList.remove('cell-focused'); });
+      var td = document.querySelector('td[data-row="' + rowIdx + '"][data-col="' + colIdx + '"]');
+      if (td) td.classList.add('cell-focused');
+    }
+
+    // ============================================================
+    // セル編集
+    // ============================================================
+    function startCellEdit(rowIdx, colIdx) {
+      if (editingCell) finishCellEdit();
+      var td = document.querySelector('td[data-row="' + rowIdx + '"][data-col="' + colIdx + '"]');
+      if (!td) return;
+
+      var headerName = tableData.header[colIdx];
+      var editorType = getEditorType(headerName);
+      var cellKey = rowIdx + '-' + colIdx;
+      var currentValue = dirtyCells.hasOwnProperty(cellKey) ? dirtyCells[cellKey] : tableData.rows[rowIdx][colIdx];
+
+      // 読み取り専用
+      if (editorType === 'readonly_text' || editorType === 'geo_readonly' || editorType === 'auto_id') {
+        showToast('info', 'この列は自動入力されます');
+        return;
+      }
+
+      // 未使用列の注記表示
+      var unusedNote = isUnusedColumn(headerName);
+      if (unusedNote) {
+        showToast('info', '※ ' + headerName + ': ' + unusedNote);
+      }
+
+      td.classList.add('editing');
+      editingCell = { rowIdx: rowIdx, colIdx: colIdx, headerName: headerName };
+
+      var editorHtml = createEditorHtml(editorType, currentValue, headerName);
+      td.innerHTML = editorHtml;
+
+      var input = td.querySelector('input, select');
+      if (input) {
+        input.focus();
+        if (input.tagName === 'INPUT') input.select();
+        input.addEventListener('blur', finishCellEdit);
+        input.addEventListener('keydown', function(e) {
+          if (e.key === 'Enter') finishCellEdit();
+          else if (e.key === 'Escape') cancelCellEdit();
+        });
+      }
+    }
+
+    function createEditorHtml(editorType, value, headerName) {
+      switch (editorType) {
+        case 'sex_select':
+          return createSelect(['男性', '女性'], value);
+        case 'area_select':
+          return createSelect(['', 'A1', 'A2', 'A3', 'B1', 'B2', 'B3'], value);
+        case 'priority_select':
+          return createSelect(['高', '中', '低'], value);
+        case 'time_type_select':
+          return createSelect(['時間帯', '午前', '午後', '終日', '固定'], value);
+        case 'sex_limit_select':
+          return createSelect(['', '男性のみ', '女性のみ'], value);
+        case 'staff_type_select':
+          return createSelect(['同じ人希望', 'ローテーション優先', 'どちらでも'], value);
+        case 'operation_select':
+          return createSelect(['キャンセル', '時間変更', '追加'], value);
+        case 'skill_select':
+          return createSelect(['', 'ベテラン', '中堅', '新人'], value);
+        case 'restriction_type_select':
+          return createSelect(['休み', '午前休', '午後休', '遅刻', '早退', '時間指定'], value);
+        case 'event_type_select':
+          return createSelect(['病院同行', '新規面会/契約', '会議/打合せ', '役所/手続き', '後見人/弁護士同席', '事務作業（外出）', 'その他'], value);
+        case 'time_mode_select':
+          return createSelect(['時間指定', '午前', '午後', '終日'], value);
+        case 'time_band_select':
+          return createSelect(['終日', '午前', '午後'], value);
+        case 'patient_affect_select':
+          return createSelect(['', '訪問不可', '時間固定', '情報のみ'], value);
+        case 'boolean_select':
+          return createSelect(['', 'TRUE', 'FALSE'], value);
+        case 'time_select':
+          var timeVal = value ? String(value).substring(0, 5) : '';
+          return createSelect(TIME_OPTIONS, timeVal);
+        case 'date_picker':
+          var dateVal = value ? formatDateForInput(value) : '';
+          return '<input type="date" value="' + dateVal + '" />';
+        case 'weekday_multi':
+          return createWeekdayEditor(value);
+        case 'weekday_ng_jp':
+          // 曜日NG: 日本語表示・保存（既存の英語値は変換して表示）
+          var jpValue = EN_TO_JP_MAP[String(value).trim()] || value || '';
+          return createSelect(['', '月', '火', '水', '木', '金', '土', '日'], jpValue);
+        case 'staff_multi_select':
+          return createStaffMultiSelect(value);
+        case 'staff_single_select':
+          return createStaffSingleSelect(value);
+        case 'patient_select':
+          return createPatientSelect(value);
+        case 'number':
+          return '<input type="number" value="' + (value || '') + '" />';
+        case 'visit_frequency_select':
+          return createSelect(['毎週', '選択制'], value || '毎週');
+        case 'visit_weeks_checkbox':
+          return createVisitWeeksEditor(value);
+        case 'new_time_type_select':
+          return createSelect(['', '時間帯', '固定', '午前', '午後', '終日'], value || '');
+        default:
+          return '<input type="text" value="' + escapeHtml(value || '') + '" />';
+      }
+    }
+
+    function createSelect(options, selectedValue) {
+      var html = '<select>';
+      options.forEach(function(opt) {
+        var selected = (String(opt) === String(selectedValue)) ? ' selected' : '';
+        html += '<option value="' + escapeHtml(opt) + '"' + selected + '>' + escapeHtml(opt) + '</option>';
+      });
+      html += '</select>';
+      return html;
+    }
+
+    function createWeekdayEditor(value) {
+      var selected = (value || '').split(',').map(function(s) { return s.trim(); });
+      var html = '<div class="weekday-editor">';
+      WEEKDAYS_EN.forEach(function(en, i) {
+        var checked = selected.indexOf(en) >= 0 ? ' checked' : '';
+        html += '<label><input type="checkbox" value="' + en + '"' + checked + '>' + WEEKDAYS_JP[i] + '</label>';
+      });
+      html += '</div>';
+      return html;
+    }
+
+    // 訪問週チェックボックスエディタ（1週目〜5週目）
+    function createVisitWeeksEditor(value) {
+      var selected = (value || '').split(',').map(function(s) { return s.trim(); }).filter(function(s) { return s; });
+      var weeks = ['1', '2', '3', '4', '5'];
+      var html = '<div class="visit-weeks-editor" style="display:flex; gap:8px; align-items:center;">';
+      weeks.forEach(function(w) {
+        var checked = selected.indexOf(w) >= 0 ? ' checked' : '';
+        html += '<label style="display:flex; align-items:center; gap:2px; cursor:pointer;">';
+        html += '<input type="checkbox" value="' + w + '"' + checked + ' style="cursor:pointer;">';
+        html += '<span>' + w + '週目</span></label>';
+      });
+      html += '</div>';
+      return html;
+    }
+
+    function createStaffMultiSelect(value) {
+      var selected = (value || '').split(',').map(function(s) { return s.trim(); }).filter(function(s) { return s; });
+      var html = '<div class="staff-multi-select">';
+      if (staffOptions.length === 0) {
+        html += '<span style="color:#999;">スタッフデータなし</span>';
+      } else {
+        // 「選択なし（クリア）」ボタンを追加
+        html += '<div style="margin-bottom:4px;"><button type="button" onclick="this.parentElement.parentElement.querySelectorAll(\'input[type=checkbox]\').forEach(function(cb){cb.checked=false;});" style="font-size:11px; padding:2px 6px; cursor:pointer;">選択なし（クリア）</button></div>';
+        staffOptions.forEach(function(staff) {
+          var checked = selected.indexOf(staff.id) >= 0 ? ' checked' : '';
+          html += '<label><input type="checkbox" value="' + escapeHtml(staff.id) + '"' + checked + '>' + escapeHtml(staff.label) + '</label>';
+        });
+      }
+      html += '</div>';
+      return html;
+    }
+
+    function createStaffSingleSelect(value) {
+      var currentVal = String(value || '').trim();
+      var html = '<select>';
+      html += '<option value="">-- 選択 --</option>';
+      staffOptions.forEach(function(staff) {
+        var selected = (staff.id === currentVal) ? ' selected' : '';
+        html += '<option value="' + escapeHtml(staff.id) + '"' + selected + '>' + escapeHtml(staff.label) + '</option>';
+      });
+      html += '</select>';
+      return html;
+    }
+
+    function createPatientSelect(value) {
+      var currentVal = String(value || '').trim();
+      var html = '<select>';
+      html += '<option value="">-- 選択 --</option>';
+      patientOptions.forEach(function(patient) {
+        var selected = (patient.id === currentVal) ? ' selected' : '';
+        html += '<option value="' + escapeHtml(patient.id) + '"' + selected + '>' + escapeHtml(patient.label) + '</option>';
+      });
+      html += '</select>';
+      return html;
+    }
+
+    function formatDateForInput(value) {
+      if (!value) return '';
+      try {
+        var d = new Date(value);
+        return d.toISOString().split('T')[0];
+      } catch (e) {
+        return '';
+      }
+    }
+
+    function finishCellEdit() {
+      if (!editingCell) return;
+      var td = document.querySelector('td[data-row="' + editingCell.rowIdx + '"][data-col="' + editingCell.colIdx + '"]');
+      if (!td) { editingCell = null; return; }
+
+      var newValue = getEditorValue(td);
+      var cellKey = editingCell.rowIdx + '-' + editingCell.colIdx;
+      var originalValue = originalData.rows[editingCell.rowIdx] ? originalData.rows[editingCell.rowIdx][editingCell.colIdx] : '';
+
+      // 値の正規化
+      var editorType = getEditorType(editingCell.headerName);
+      if (editorType === 'time_select' && newValue) {
+        newValue = newValue + ':00'; // HH:MM → HH:MM:SS
+      }
+
+      // 変更チェック
+      if (String(newValue) === String(originalValue)) {
+        delete dirtyCells[cellKey];
+      } else {
+        dirtyCells[cellKey] = newValue;
+        rowMeta[editingCell.rowIdx].isDirty = true;
+      }
+
+      // 内部データ更新
+      tableData.rows[editingCell.rowIdx][editingCell.colIdx] = newValue;
+
+      // ID→名前の自動補完
+      autoCompleteNameFromId(editingCell.rowIdx, editingCell.colIdx, newValue);
+
+      // 時間タイプ連動の自動時間設定
+      autoSetTimeFromType(editingCell.rowIdx, editingCell.colIdx, newValue);
+
+      // 日付→曜日の自動更新
+      autoUpdateWeekdayFromDate(editingCell.rowIdx, editingCell.colIdx, newValue);
+
+      td.classList.remove('editing');
+      td.innerHTML = escapeHtml(formatCellDisplay(newValue, editingCell.headerName));
+      if (dirtyCells.hasOwnProperty(cellKey)) td.classList.add('dirty');
+      else td.classList.remove('dirty');
+
+      editingCell = null;
+      updateDirtyState();
+    }
+
+    function getEditorValue(td) {
+      var input = td.querySelector('input[type="text"], input[type="number"], input[type="date"], select');
+      if (input) return input.value;
+
+      // 曜日チェックボックス
+      var weekdayCheckboxes = td.querySelectorAll('.weekday-editor input[type="checkbox"]');
+      if (weekdayCheckboxes.length > 0) {
+        var vals = [];
+        weekdayCheckboxes.forEach(function(cb) { if (cb.checked) vals.push(cb.value); });
+        return vals.join(',');
+      }
+
+      // スタッフ複数選択チェックボックス
+      var staffCheckboxes = td.querySelectorAll('.staff-multi-select input[type="checkbox"]');
+      if (staffCheckboxes.length > 0) {
+        var vals = [];
+        staffCheckboxes.forEach(function(cb) { if (cb.checked) vals.push(cb.value); });
+        return vals.join(',');
+      }
+
+      // 訪問週チェックボックス
+      var visitWeeksCheckboxes = td.querySelectorAll('.visit-weeks-editor input[type="checkbox"]');
+      if (visitWeeksCheckboxes.length > 0) {
+        var vals = [];
+        visitWeeksCheckboxes.forEach(function(cb) { if (cb.checked) vals.push(cb.value); });
+        return vals.join(',');
+      }
+      return '';
+    }
+
+    function cancelCellEdit() {
+      if (!editingCell) return;
+      var td = document.querySelector('td[data-row="' + editingCell.rowIdx + '"][data-col="' + editingCell.colIdx + '"]');
+      var cellKey = editingCell.rowIdx + '-' + editingCell.colIdx;
+      var value = dirtyCells.hasOwnProperty(cellKey) ? dirtyCells[cellKey] : tableData.rows[editingCell.rowIdx][editingCell.colIdx];
+      td.classList.remove('editing');
+      td.innerHTML = escapeHtml(formatCellDisplay(value, editingCell.headerName));
+      editingCell = null;
+    }
+
+    // ============================================================
+    // 自動補完
+    // ============================================================
+    function autoCompleteNameFromId(rowIdx, colIdx, idValue) {
+      var header = tableData.header[colIdx];
+      var nameColIdx = -1;
+      var nameValue = '';
+
+      if (header === 'patient_id') {
+        nameColIdx = tableData.header.indexOf('患者名');
+        nameValue = dictionaries.patients[idValue] || '';
+      } else if (header === 'staff_id') {
+        nameColIdx = tableData.header.indexOf('スタッフ名');
+        nameValue = dictionaries.staff[idValue] || '';
+      }
+
+      if (nameColIdx >= 0 && nameValue) {
+        var nameCellKey = rowIdx + '-' + nameColIdx;
+        dirtyCells[nameCellKey] = nameValue;
+        tableData.rows[rowIdx][nameColIdx] = nameValue;
+        // UIも更新
+        var nameTd = document.querySelector('td[data-row="' + rowIdx + '"][data-col="' + nameColIdx + '"]');
+        if (nameTd) {
+          nameTd.textContent = nameValue;
+          nameTd.classList.add('dirty');
+        }
+      }
+    }
+
+    // ============================================================
+    // 時間タイプ連動の自動時間設定
+    // ============================================================
+    function autoSetTimeFromType(rowIdx, colIdx, newValue) {
+      var header = tableData.header[colIdx];
+
+      // 列インデックスを取得
+      var timeTypeColIdx = tableData.header.indexOf('時間タイプ');
+      var startColIdx = tableData.header.indexOf('希望時間帯（開始）');
+      var endColIdx = tableData.header.indexOf('希望時間帯（終了）');
+      var svcColIdx = tableData.header.indexOf('サービス時間');
+
+      // 患者マスタ以外では動作しない
+      if (currentSheetName !== '患者マスタ') return;
+      if (startColIdx < 0 || endColIdx < 0) return;
+
+      // 時間タイプが変更された場合
+      if (header === '時間タイプ') {
+        var timeType = newValue;
+        var startValue = '', endValue = '';
+
+        if (timeType === '午前') {
+          startValue = '09:00:00';
+          endValue = '12:00:00';
+        } else if (timeType === '午後') {
+          startValue = '13:00:00';
+          endValue = '17:00:00';
+        } else if (timeType === '終日') {
+          startValue = '09:00:00';
+          endValue = '18:00:00';
+        }
+
+        // 時間帯/固定の場合はクリアしない（ユーザーが自由に設定）
+        if (startValue && endValue) {
+          setCellValue(rowIdx, startColIdx, startValue);
+          setCellValue(rowIdx, endColIdx, endValue);
+        }
+      }
+
+      // サービス時間が変更された場合（固定タイプ時）
+      if (header === 'サービス時間' && timeTypeColIdx >= 0) {
+        var timeType = tableData.rows[rowIdx][timeTypeColIdx];
+        if (timeType === '固定') {
+          var svcMin = parseInt(newValue, 10) || 0;
+          if (svcMin > 0) {
+            var startVal = tableData.rows[rowIdx][startColIdx];
+            var endVal = tableData.rows[rowIdx][endColIdx];
+
+            if (startVal && !endVal) {
+              // 開始あり、終了なし → 終了を計算
+              var endTime = addMinutesToTime(startVal, svcMin);
+              if (endTime) setCellValue(rowIdx, endColIdx, endTime);
+            } else if (!startVal && endVal) {
+              // 開始なし、終了あり → 開始を計算
+              var startTime = addMinutesToTime(endVal, -svcMin);
+              if (startTime) setCellValue(rowIdx, startColIdx, startTime);
+            }
+          }
+        }
+      }
+
+      // 開始時刻が変更された場合（固定タイプ時）
+      if ((header === '希望時間帯（開始）' || header.includes('開始')) && timeTypeColIdx >= 0 && svcColIdx >= 0) {
+        var timeType = tableData.rows[rowIdx][timeTypeColIdx];
+        if (timeType === '固定') {
+          var svcMin = parseInt(tableData.rows[rowIdx][svcColIdx], 10) || 0;
+          if (svcMin > 0 && newValue) {
+            var endTime = addMinutesToTime(newValue, svcMin);
+            if (endTime) setCellValue(rowIdx, endColIdx, endTime);
+          }
+        }
+      }
+
+      // 終了時刻が変更された場合（固定タイプ時）
+      if ((header === '希望時間帯（終了）' || header.includes('終了')) && timeTypeColIdx >= 0 && svcColIdx >= 0) {
+        var timeType = tableData.rows[rowIdx][timeTypeColIdx];
+        if (timeType === '固定') {
+          var svcMin = parseInt(tableData.rows[rowIdx][svcColIdx], 10) || 0;
+          if (svcMin > 0 && newValue) {
+            var startTime = addMinutesToTime(newValue, -svcMin);
+            if (startTime) setCellValue(rowIdx, startColIdx, startTime);
+          }
+        }
+      }
+    }
+
+    // ============================================================
+    // 日付→曜日の自動更新
+    // ============================================================
+    function autoUpdateWeekdayFromDate(rowIdx, colIdx, newValue) {
+      var header = tableData.header[colIdx];
+
+      // 「日付」カラムの変更でなければ終了
+      if (header !== '日付') return;
+
+      // 「曜日」カラムのインデックスを取得
+      var youbiColIdx = tableData.header.indexOf('曜日');
+      if (youbiColIdx < 0) return;
+
+      // 日付が空なら曜日もクリア
+      if (!newValue) {
+        setCellValue(rowIdx, youbiColIdx, '');
+        return;
+      }
+
+      // 日付から曜日を計算
+      try {
+        var dateObj = new Date(newValue);
+        if (!isNaN(dateObj.getTime())) {
+          var youbi = WEEKDAYS_JP[dateObj.getDay()];
+          setCellValue(rowIdx, youbiColIdx, youbi);
+        }
+      } catch (e) {
+        console.error('曜日自動更新エラー:', e);
+      }
+    }
+
+    // 時間に分を加算/減算
+    function addMinutesToTime(timeStr, minutes) {
+      if (!timeStr) return null;
+      var parts = String(timeStr).split(':');
+      var h = parseInt(parts[0], 10) || 0;
+      var m = parseInt(parts[1], 10) || 0;
+      var totalMin = h * 60 + m + minutes;
+      if (totalMin < 0) totalMin = 0;
+      if (totalMin >= 24 * 60) totalMin = 24 * 60 - 1;
+      var newH = Math.floor(totalMin / 60);
+      var newM = totalMin % 60;
+      return String(newH).padStart(2, '0') + ':' + String(newM).padStart(2, '0') + ':00';
+    }
+
+    // セルに値を設定（UI更新含む）
+    function setCellValue(rowIdx, colIdx, value) {
+      var cellKey = rowIdx + '-' + colIdx;
+      var originalValue = originalData.rows[rowIdx] ? originalData.rows[rowIdx][colIdx] : '';
+
+      if (String(value) === String(originalValue)) {
+        delete dirtyCells[cellKey];
+      } else {
+        dirtyCells[cellKey] = value;
+        rowMeta[rowIdx].isDirty = true;
+      }
+
+      tableData.rows[rowIdx][colIdx] = value;
+
+      // UI更新
+      var td = document.querySelector('td[data-row="' + rowIdx + '"][data-col="' + colIdx + '"]');
+      if (td) {
+        var headerName = tableData.header[colIdx];
+        td.innerHTML = escapeHtml(formatCellDisplay(value, headerName));
+        if (dirtyCells.hasOwnProperty(cellKey)) td.classList.add('dirty');
+        else td.classList.remove('dirty');
+      }
+    }
+
+    // ============================================================
+    // 状態管理
+    // ============================================================
+    function updateDirtyState() {
+      isDirty = Object.keys(dirtyCells).length > 0 || rowMeta.some(function(m) { return m.isNew; });
+      document.getElementById('dirtyBadge').classList.toggle('show', isDirty);
+      updateButtonStates();
+    }
+
+    function updateButtonStates() {
+      var hasSelection = getSelectedRows().length > 0;
+      var hasDirty = isDirty;
+      document.getElementById('btnDeleteRows').disabled = !hasSelection;
+      document.getElementById('btnCopyRows').disabled = !hasSelection;
+      document.getElementById('btnUndo').disabled = !hasDirty;
+      document.getElementById('btnSave').disabled = !hasDirty;
+      document.getElementById('btnUpdateGeo').disabled = !hasSelection;
+    }
+
+    // ============================================================
+    // 操作ボタン
+    // ============================================================
+    function onAddRow() {
+      var selectedRows = getSelectedRows();
+      var baseRowIndex = null;
+      if (selectedRows.length > 0) {
+        var lastSelected = Math.max.apply(null, selectedRows);
+        baseRowIndex = rowMeta[lastSelected].sheetRowIndex;
+      }
+
+      setStatus('loading', '行を追加中...');
+      google.script.run
+        .withSuccessHandler(function(result) {
+          if (result.success) {
+            showToast('success', result.message);
+            reloadCurrentSheet();
+          } else {
+            showToast('error', result.message || '追加に失敗しました');
+          }
+        })
+        .withFailureHandler(function(e) {
+          showToast('error', e.message);
+          setStatus('error', 'エラー: ' + e.message);
+        })
+        .input_insertRowBelow(currentSheetName, baseRowIndex);
+    }
+
+    function onDeleteSelected() {
+      var selectedRows = getSelectedRows();
+      if (selectedRows.length === 0) { showToast('info', '行を選択してください'); return; }
+      if (!confirm(selectedRows.length + ' 行を削除しますか？この操作は元に戻せません。')) return;
+
+      setStatus('loading', '削除中...');
+      var sheetRowNumbers = selectedRows.map(function(rowIdx) { return rowMeta[rowIdx].sheetRowIndex; });
+
+      google.script.run
+        .withSuccessHandler(function(result) {
+          if (result.success) {
+            showToast('success', result.message);
+            resetState();
+            loadSheet(currentSheetName);
+          } else {
+            showToast('error', result.message || '削除に失敗しました');
+          }
+        })
+        .withFailureHandler(function(e) {
+          showToast('error', e.message);
+          setStatus('error', 'エラー: ' + e.message);
+        })
+        .input_deleteRows(currentSheetName, sheetRowNumbers);
+    }
+
+    function onCopySelected() {
+      var selectedRows = getSelectedRows();
+      if (selectedRows.length === 0) { showToast('info', '行を選択してください'); return; }
+
+      setStatus('loading', 'コピー中...');
+      var sheetRowNumbers = selectedRows.map(function(rowIdx) { return rowMeta[rowIdx].sheetRowIndex; });
+
+      google.script.run
+        .withSuccessHandler(function(result) {
+          if (result.success) {
+            showToast('success', result.message);
+            resetState();
+            loadSheet(currentSheetName);
+          } else {
+            showToast('error', result.message || 'コピーに失敗しました');
+          }
+        })
+        .withFailureHandler(function(e) {
+          showToast('error', e.message);
+          setStatus('error', 'エラー: ' + e.message);
+        })
+        .input_copyRows(currentSheetName, sheetRowNumbers);
+    }
+
+    function onDiscardChanges() {
+      if (!confirm('未保存の変更をすべて破棄しますか？')) return;
+      dirtyCells = {};
+      tableData = JSON.parse(JSON.stringify(originalData));
+      rowMeta.forEach(function(m) { m.isDirty = false; m.isNew = false; });
+      renderTable(tableData);
+      updateDirtyState();
+      showToast('info', '変更を破棄しました');
+    }
+
+    function onSaveChanges() {
+      var dirtyKeys = Object.keys(dirtyCells);
+      if (dirtyKeys.length === 0) { showToast('info', '保存する変更がありません'); return; }
+
+      setStatus('loading', '保存中...');
+      var updates = dirtyKeys.map(function(key) {
+        var parts = key.split('-');
+        var rowIdx = parseInt(parts[0]);
+        var colIdx = parseInt(parts[1]);
+        return {
+          row: rowMeta[rowIdx].sheetRowIndex,
+          col: colIdx + 1,
+          value: dirtyCells[key]
+        };
+      });
+
+      google.script.run
+        .withSuccessHandler(function(result) {
+          if (result.success) {
+            showToast('success', result.message);
+            originalData = JSON.parse(JSON.stringify(tableData));
+            dirtyCells = {};
+            rowMeta.forEach(function(m) { m.isDirty = false; m.isNew = false; });
+            updateDirtyState();
+            renderTable(tableData);
+            setStatus('success', '保存しました');
+          } else {
+            showToast('error', result.message || '保存に失敗しました');
+          }
+        })
+        .withFailureHandler(function(e) {
+          showToast('error', e.message);
+          setStatus('error', 'エラー: ' + e.message);
+        })
+        .input_updateCells(currentSheetName, updates);
+    }
+
+    function onUpdateGeo() {
+      var selectedRows = getSelectedRows();
+      if (selectedRows.length === 0) { showToast('info', '行を選択してください'); return; }
+
+      setStatus('loading', '位置情報を更新中...');
+      var sheetRowNumbers = selectedRows.map(function(rowIdx) { return rowMeta[rowIdx].sheetRowIndex; });
+
+      google.script.run
+        .withSuccessHandler(function(result) {
+          if (result.success) {
+            showToast('success', result.message);
+            if (result.errors && result.errors.length > 0) {
+              result.errors.forEach(function(err) { showToast('error', err); });
+            }
+            reloadCurrentSheet();
+          } else {
+            showToast('error', result.message || '更新に失敗しました');
+          }
+        })
+        .withFailureHandler(function(e) {
+          showToast('error', e.message);
+          setStatus('error', 'エラー: ' + e.message);
+        })
+        .input_updateGeo(currentSheetName, sheetRowNumbers);
+    }
+
+    // ============================================================
+    // 画面遷移
+    // ============================================================
+    function goToOutput() {
+      if (isDirty && !confirm('未保存の変更があります。破棄して移動しますか？')) return;
+      var targetUrl = baseUrl ? baseUrl + '?page=output' : window.location.href.split('?')[0] + '?page=output';
+      try { window.top.location.href = targetUrl; } catch (e) { window.location.href = targetUrl; }
+    }
+
+    // ============================================================
+    // ユーティリティ
+    // ============================================================
+    function showToast(type, message) {
+      var container = document.getElementById('toastContainer');
+      var toast = document.createElement('div');
+      toast.className = 'toast ' + type;
+      toast.textContent = message;
+      container.appendChild(toast);
+      setTimeout(function() {
+        toast.style.opacity = '0';
+        setTimeout(function() { container.removeChild(toast); }, 300);
+      }, 3000);
+    }
+
+    function setStatus(type, msg) {
+      var el = document.getElementById('statusText');
+      el.className = 'status-text ' + type;
+      el.textContent = msg;
+    }
+
+    function updateInfo(sheetName, rowCount, colCount) {
+      document.getElementById('infoSheetName').textContent = getDisplaySheetName(sheetName);
+      document.getElementById('infoRowCount').textContent = rowCount;
+      document.getElementById('infoColCount').textContent = colCount;
+    }
+
+    // シート名から表示名への変換
+    function getDisplaySheetName(sheetName) {
+      var displayNames = {
+        '個別変更リクエスト': '患者個別変更リクエスト',
+        'スタッフ個別変更リクエスト': 'スタッフ個別変更リクエスト'
+      };
+      return displayNames[sheetName] || sheetName;
+    }
+
+    function escapeHtml(text) {
+      var div = document.createElement('div');
+      div.textContent = text || '';
+      return div.innerHTML;
+    }
+
+    // ============================================================
+    // チャットウィザード
+    // ============================================================
+
+    // フォームスキーマ定義
+    var FORM_SCHEMA = {
+      '患者マスタ': [
+        { key: 'patient_id', header: 'patient_id', label: '患者IDを発行します', type: 'autoId', prefix: 'P', required: true },
+        { key: 'name', header: '患者名', label: '患者さんの「氏名」は？', type: 'text', required: true },
+        { key: 'sex', header: '性別', label: '性別は？', type: 'select', options: ['', '男性', '女性'] },
+        { key: 'address', header: '住所', label: '住所は？', type: 'textarea', required: true },
+        { key: 'area', header: 'エリア', label: 'エリアは？', type: 'select', options: ['', 'A1', 'A2', 'A3', 'B1', 'B2', 'B3'], hint: '※現在スケジューリング計算に未使用' },
+        { key: 'weeklyCount', header: '週訪問回数', label: '週の訪問回数は？', type: 'number', required: true, min: 1 },
+        { key: 'visitFrequency', header: '訪問頻度', label: '訪問頻度は？', type: 'select', options: ['毎週', '選択制'], defaultValue: '毎週', hint: '毎週：全週訪問、選択制：特定週のみ訪問' },
+        { key: 'visitWeeks', header: '訪問週', label: '訪問する週は？（複数選択可）', type: 'visitWeeksSelect', conditionalOn: { key: 'visitFrequency', value: '選択制' }, hint: '訪問する週にチェック（例：1,3週目=隔週）' },
+        { key: 'preferDays', header: '希望曜日（複数可）', label: '希望する曜日は？（複数選択）', type: 'multiSelect', options: ['月','火','水','木','金','土','日'], required: true },
+        { key: 'ngDays', header: '曜日NG', label: 'NGの曜日は？', type: 'select', options: ['', '月', '火', '水', '木', '金', '土', '日'] },
+        { key: 'serviceMin', header: 'サービス時間', label: 'サービス時間（分）は？', type: 'number', required: true, min: 5 },
+        { key: 'timeType', header: '時間タイプ', label: '時間タイプは？', type: 'select', options: ['時間帯', '午前', '午後', '終日', '固定'] },
+        { key: 'fixedTarget', header: null, label: '開始・終了どちらを固定しますか？', type: 'select', options: ['開始', '終了'], conditionalOn: { key: 'timeType', value: '固定' } },
+        { key: 'timeStart', header: '希望時間帯（開始）', label: '希望時間（開始）は？', type: 'time', required: true },
+        { key: 'timeEnd', header: '希望時間帯（終了）', label: '希望時間（終了）は？', type: 'time', required: true },
+        { key: 'sexLimit', header: '性別制限', label: '性別制限がありますか？', type: 'select', options: ['', '男性のみ', '女性のみ'] },
+        { key: 'needStaff', header: '必要スタッフ数', label: '必要スタッフ数は？', type: 'number', defaultValue: 1, min: 1 },
+        { key: 'fixedStaff', header: '指定スタッフID', label: '指定スタッフは？（複数可）', type: 'staffMultiSelect' },
+        { key: 'staffType', header: '指定タイプ', label: '指定タイプは？', type: 'select', options: ['', '必須', '優先'] },
+        { key: 'ngStaff', header: 'NGスタッフID', label: 'NGスタッフは？（複数可）', type: 'staffMultiSelect' },
+        { key: 'contPref', header: '継続希望', label: '継続希望は？', type: 'select', options: ['どちらでも', '同じ人希望', 'ローテーション優先'] },
+        { key: 'insuranceType', header: '保険区分', label: '保険区分は？', type: 'select', options: ['医療保険', '介護保険'], defaultValue: '医療保険' },
+        { key: 'note', header: '備考', label: '備考（任意）', type: 'textarea' }
+      ],
+      'スタッフマスタ': [
+        { key: 'staff_id', header: 'staff_id', label: 'スタッフIDを発行します', type: 'autoId', prefix: 'S', required: true },
+        { key: 'staffName', header: 'スタッフ名', label: 'スタッフ名は？', type: 'text', required: true },
+        { key: 'sex', header: '性別', label: '性別は？', type: 'select', options: ['', '男性', '女性'] },
+        { key: 'baseAddress', header: '拠点住所', label: '拠点住所は？', type: 'textarea' },
+        { key: 'shiftStart', header: 'シフト開始', label: 'シフト開始時刻は？', type: 'time', required: true },
+        { key: 'shiftEnd', header: 'シフト終了', label: 'シフト終了時刻は？', type: 'time', required: true },
+        { key: 'workDays', header: '勤務曜日', label: '勤務可能な曜日は？（複数選択）', type: 'multiSelect', options: ['月','火','水','木','金','土','日'], required: true },
+        { key: 'areas', header: '得意エリア', label: '得意エリアは？', type: 'text', hint: '※現在スケジューリング計算に未使用' },
+        { key: 'maxPerDay', header: '最大訪問件数/日', label: '1日の最大訪問件数は？', type: 'number', required: true, min: 1 },
+        { key: 'allocPref', header: '割当量', label: '割当量の調整は？', type: 'select', options: ['均等', '多め', '少なめ'], hint: '均等：標準、多め：優先的に割当、少なめ：控えめに割当' },
+        { key: 'skill', header: 'スキル', label: 'スキルは？', type: 'select', options: ['', 'ベテラン', '中堅', '新人'], hint: '※現在スケジューリング計算に未使用' },
+        { key: 'note', header: '備考', label: '備考（任意）', type: 'textarea' }
+      ],
+      '個別変更リクエスト': [
+        { key: 'change_id', header: 'change_id', label: '変更IDを発行します', type: 'autoId', prefix: 'C', required: true },
+        { key: 'patient_id', header: 'patient_id', label: '対象の患者は？', type: 'patientSelect', required: true },
+        { key: 'date', header: '日付', label: '変更日（訪問日）は？', type: 'date', required: true },
+        { key: 'operation', header: '操作', label: '操作内容は？', type: 'select', options: ['時間変更', 'キャンセル', '追加'], required: true },
+        { key: 'newTimeType', header: '時間タイプ', label: '時間の指定方法は？', type: 'select', options: ['', '時間帯', '固定', '午前', '午後', '終日'], conditionalOn: { key: 'operation', value: ['時間変更', '追加'] }, hint: '空欄＝患者マスタの設定を使用' },
+        { key: 'start', header: '開始時刻(固定)', label: '新しい開始時刻は？', type: 'time', hint: 'キャンセル時は空欄可、時間帯の場合は希望最早' },
+        { key: 'end', header: '終了時刻(固定)', label: '新しい終了時刻は？', type: 'time', hint: 'キャンセル時は空欄可、時間帯の場合は希望最遅' },
+        { key: 'newEarliest', header: '希望最早', label: '希望最早時刻は？', type: 'time', conditionalOn: { key: 'newTimeType', value: '時間帯' }, hint: 'この時間以降に訪問開始' },
+        { key: 'newLatest', header: '希望最遅', label: '希望最遅時刻は？', type: 'time', conditionalOn: { key: 'newTimeType', value: '時間帯' }, hint: 'この時間までに訪問終了' },
+        { key: 'note', header: '備考', label: '備考（任意）', type: 'textarea' }
+      ],
+      'スタッフ個別変更': [
+        { key: 'staff_change_id', header: 'staff_change_id', label: 'スタッフ変更IDを発行します', type: 'autoId', prefix: 'SC', required: true },
+        { key: 'staff_id', header: 'staff_id', label: '対象のスタッフは？', type: 'staffSelect', required: true },
+        { key: 'date', header: '日付', label: '変更日は？', type: 'date', required: true },
+        { key: 'restrictionType', header: '制限タイプ', label: '制限タイプは？', type: 'select', options: ['休み', '午前休', '午後休', '遅刻', '早退', '時間指定'], required: true },
+        { key: 'startTime', header: '開始時刻', label: '開始時刻は？', type: 'time', conditionalOn: { key: 'restrictionType', value: ['遅刻', '時間指定'] }, hint: '遅刻: 出勤予定時刻 / 時間指定: 不可開始時刻' },
+        { key: 'endTime', header: '終了時刻', label: '終了時刻は？', type: 'time', conditionalOn: { key: 'restrictionType', value: ['早退', '時間指定'] }, hint: '早退: 退勤予定時刻 / 時間指定: 不可終了時刻' },
+        { key: 'reason', header: '理由', label: '理由は？', type: 'textarea' },
+        { key: 'note', header: '備考', label: '備考（任意）', type: 'textarea' }
+      ],
+      'イベントリクエスト': [
+        { key: 'event_id', header: 'event_id', label: 'イベントIDを発行します', type: 'autoId', prefix: 'EV', required: true },
+        { key: 'date', header: '日付', label: 'イベントの日付は？', type: 'date', required: true },
+        { key: 'staff_id', header: 'staff_id', label: '担当スタッフは？', type: 'staffSelect', required: true },
+        { key: 'eventType', header: 'イベント種別', label: 'イベント種別は？', type: 'select', options: ['病院同行', '新規面会/契約', '会議/打合せ', '役所/手続き', '後見人/弁護士同席', '事務作業（外出）', 'その他'], required: true },
+        { key: 'title', header: 'タイトル', label: 'タイトル（簡単な名称）は？', type: 'text', required: true },
+        { key: 'address', header: '住所', label: '開催場所の住所は？', type: 'text', required: true, hint: '位置情報は後から「位置情報を更新」で取得できます' },
+        { key: 'timeMode', header: '時間指定方法', label: '時間の指定方法は？', type: 'select', options: ['時間指定', '午前', '午後', '終日'], required: true },
+        { key: 'startTime', header: '開始時刻', label: '開始時刻は？', type: 'time', conditionalOn: { key: 'timeMode', value: '時間指定' }, required: true },
+        { key: 'endTime', header: '終了時刻', label: '終了時刻は？', type: 'time', conditionalOn: { key: 'timeMode', value: '時間指定' }, required: true },
+        { key: 'durationMin', header: '所要時間(分)', label: '所要時間は何分？', type: 'number', conditionalOn: { key: 'timeMode', value: ['午前', '午後', '終日'] }, hint: '午前/午後/終日の場合に必要', required: true },
+        { key: 'fixedSlot', header: '固定枠', label: 'この枠は固定ですか？（動かせない）', type: 'toggle', required: true },
+        { key: 'patientLinked', header: '患者紐づき', label: '患者と紐づくイベントですか？', type: 'toggle', required: true },
+        { key: 'patient_id', header: 'patient_id', label: '対象患者は？', type: 'patientSelect', conditionalOn: { key: 'patientLinked', value: true } },
+        { key: 'patientAffect', header: '患者影響', label: '患者側への影響は？', type: 'select', options: ['訪問不可', '時間固定', '情報のみ'], conditionalOn: { key: 'patientLinked', value: true }, hint: '訪問不可:その時間はNG / 時間固定:イベントに合わせる / 情報のみ:患者側制約なし' },
+        { key: 'returnBefore', header: '事前事務所戻り', label: '事務所に戻ってから向かう？', type: 'toggle' },
+        { key: 'returnAfter', header: '事後事務所戻り', label: '終了後に事務所へ戻る？', type: 'toggle' },
+        { key: 'reason', header: '理由', label: '理由やメモ（任意）', type: 'textarea' },
+        { key: 'notes', header: '備考', label: '備考（任意）', type: 'textarea' }
+      ]
+    };
+
+    // ウィザード状態
+    var wizardState = {
+      active: false,
+      formType: null,
+      schema: [],
+      currentStep: -1,  // -1 = フォーム選択, 0~ = 質問
+      answers: {},
+      chatHistory: []
+    };
+
+    // データを再読み込み（ウィザード用）
+    function reloadWizardData(callback) {
+      var loadCount = 0;
+      var totalLoads = 2;
+
+      function checkComplete() {
+        loadCount++;
+        if (loadCount >= totalLoads && callback) callback();
+      }
+
+      // 患者データを読み込み
+      google.script.run
+        .withSuccessHandler(function(result) {
+          if (result && result.success && result.data) {
+            dictionaries = result.data;
+            patientOptions = [];
+            for (var pid in dictionaries.patients) {
+              patientOptions.push({
+                id: pid,
+                name: dictionaries.patients[pid],
+                label: pid + ' ' + dictionaries.patients[pid]
+              });
+            }
+            patientOptions.sort(function(a, b) { return a.id.localeCompare(b.id); });
+          }
+          checkComplete();
+        })
+        .withFailureHandler(function(e) {
+          console.error('Failed to load dictionaries:', e);
+          checkComplete();
+        })
+        .input_getDictionaries();
+
+      // スタッフデータを読み込み
+      google.script.run
+        .withSuccessHandler(function(options) {
+          staffOptions = options || [];
+          checkComplete();
+        })
+        .withFailureHandler(function(e) {
+          console.error('Failed to load staff options:', e);
+          checkComplete();
+        })
+        .input_getStaffOptions();
+    }
+
+    // ウィザードを開く
+    function openWizard() {
+      wizardState = {
+        active: true,
+        formType: null,
+        schema: [],
+        currentStep: -1,
+        answers: {},
+        chatHistory: []
+      };
+      document.getElementById('wizardPanel').classList.add('active');
+      document.getElementById('wizardTitle').textContent = '新規登録ウィザード';
+
+      // データが空の場合は再読み込み
+      if (patientOptions.length === 0 || staffOptions.length === 0) {
+        document.getElementById('wizardInputContainer').innerHTML = '<div style="text-align:center; color:#666;">データを読み込み中...</div>';
+        reloadWizardData(function() {
+          renderWizardStep();
+        });
+      } else {
+        renderWizardStep();
+      }
+    }
+
+    // ウィザードを閉じる
+    function closeWizard() {
+      if (wizardState.currentStep > 0 && !confirm('入力内容を破棄してウィザードを閉じますか？')) return;
+      wizardState.active = false;
+      document.getElementById('wizardPanel').classList.remove('active');
+    }
+
+    // 現在のステップを描画
+    function renderWizardStep() {
+      var chatEl = document.getElementById('wizardChat');
+      var questionEl = document.getElementById('wizardQuestion');
+      var hintEl = document.getElementById('wizardHint');
+      var inputEl = document.getElementById('wizardInputContainer');
+      var errorEl = document.getElementById('wizardError');
+      var backBtn = document.getElementById('wizardBackBtn');
+      var skipBtn = document.getElementById('wizardSkipBtn');
+      var nextBtn = document.getElementById('wizardNextBtn');
+      var progressBar = document.getElementById('wizardProgressBar');
+
+      errorEl.textContent = '';
+
+      // フォーム選択ステップ
+      if (wizardState.currentStep === -1) {
+        questionEl.textContent = 'どの登録をしますか？';
+        hintEl.textContent = '';
+        inputEl.innerHTML = '<select id="wizardFormSelect">' +
+          '<option value="">-- 選択してください --</option>' +
+          '<option value="患者マスタ">患者マスタ</option>' +
+          '<option value="スタッフマスタ">スタッフマスタ</option>' +
+          '<option value="個別変更リクエスト">患者個別変更</option>' +
+          '<option value="スタッフ個別変更">スタッフ個別変更</option>' +
+          '<option value="イベントリクエスト">イベントリクエスト</option>' +
+          '</select>';
+        backBtn.disabled = true;
+        skipBtn.style.display = 'none';
+        nextBtn.textContent = '開始';
+        progressBar.style.width = '0%';
+        chatEl.innerHTML = '<div class="chat-message bot"><div class="chat-label">システム</div><div class="chat-bubble">こんにちは！新規登録を対話形式でお手伝いします。どのデータを登録しますか？</div></div>';
+        return;
+      }
+
+      var schema = wizardState.schema;
+      var step = schema[wizardState.currentStep];
+      var progress = ((wizardState.currentStep + 1) / schema.length) * 100;
+      progressBar.style.width = progress + '%';
+
+      // 確認ステップ（最後）
+      if (wizardState.currentStep >= schema.length) {
+        questionEl.textContent = '入力内容の確認';
+        hintEl.textContent = '内容を確認して「登録」ボタンを押してください';
+        inputEl.innerHTML = renderPreview();
+        backBtn.disabled = false;
+        skipBtn.style.display = 'none';
+        nextBtn.textContent = '登録';
+        nextBtn.className = 'wizard-btn success';
+        progressBar.style.width = '100%';
+        return;
+      }
+
+      // 通常の質問ステップ
+      questionEl.textContent = step.label;
+      hintEl.textContent = step.hint || '';
+      inputEl.innerHTML = renderWizardInput(step);
+      backBtn.disabled = wizardState.currentStep === 0;
+      skipBtn.style.display = step.required ? 'none' : 'inline-block';
+      nextBtn.textContent = '次へ';
+      nextBtn.className = 'wizard-btn primary';
+
+      // 入力フィールドにフォーカス
+      var firstInput = inputEl.querySelector('input, select, textarea');
+      if (firstInput) firstInput.focus();
+
+      // チャット履歴を表示
+      renderChatHistory();
+    }
+
+    // 入力UIを生成
+    function renderWizardInput(step) {
+      var currentVal = wizardState.answers[step.key] || step.defaultValue || '';
+
+      switch (step.type) {
+        case 'autoId':
+          return '<div style="padding:10px; background:#f0f0f0; border-radius:6px; text-align:center; color:#666;">自動発行（' + step.prefix + '連番）</div>';
+        case 'text':
+          return '<input type="text" id="wizardInput" value="' + escapeHtml(currentVal) + '" placeholder="入力してください" />';
+        case 'textarea':
+          return '<textarea id="wizardInput" placeholder="入力してください">' + escapeHtml(currentVal) + '</textarea>';
+        case 'number':
+          return '<input type="number" id="wizardInput" value="' + escapeHtml(currentVal) + '" ' + (step.min !== undefined ? 'min="' + step.min + '"' : '') + ' placeholder="数値を入力" />';
+        case 'date':
+          return '<input type="date" id="wizardInput" value="' + escapeHtml(currentVal) + '" />';
+        case 'time':
+          var timeVal = currentVal ? String(currentVal).substring(0, 5) : '';
+          return '<select id="wizardInput"><option value="">-- 選択 --</option>' + TIME_OPTIONS.map(function(t) {
+            return '<option value="' + t + '"' + (t === timeVal ? ' selected' : '') + '>' + t + '</option>';
+          }).join('') + '</select>';
+        case 'select':
+          return '<select id="wizardInput">' + step.options.map(function(opt) {
+            return '<option value="' + escapeHtml(opt) + '"' + (opt === currentVal ? ' selected' : '') + '>' + (opt || '-- 選択 --') + '</option>';
+          }).join('') + '</select>';
+        case 'multiSelect':
+          var selected = currentVal ? currentVal.split(',') : [];
+          return '<div class="wizard-checkboxes">' + step.options.map(function(opt) {
+            var checked = selected.indexOf(opt) >= 0 ? ' checked' : '';
+            return '<label><input type="checkbox" value="' + escapeHtml(opt) + '"' + checked + '>' + escapeHtml(opt) + '</label>';
+          }).join('') + '</div>';
+        case 'staffMultiSelect':
+          var selectedStaff = currentVal ? currentVal.split(',') : [];
+          if (staffOptions.length === 0) return '<div style="color:#999;">スタッフデータがありません</div>';
+          return '<div class="wizard-checkboxes" style="max-height:120px; overflow-y:auto;">' +
+            '<div style="margin-bottom:4px;"><button type="button" onclick="this.parentElement.parentElement.querySelectorAll(\'input[type=checkbox]\').forEach(function(cb){cb.checked=false;});" style="font-size:11px; padding:2px 6px; cursor:pointer;">選択なし（クリア）</button></div>' +
+            staffOptions.map(function(s) {
+              var checked = selectedStaff.indexOf(s.id) >= 0 ? ' checked' : '';
+              return '<label><input type="checkbox" value="' + escapeHtml(s.id) + '"' + checked + '>' + escapeHtml(s.label) + '</label>';
+            }).join('') + '</div>';
+        case 'visitWeeksSelect':
+          var selectedWeeks = currentVal ? currentVal.split(',') : [];
+          var weeks = ['1', '2', '3', '4', '5'];
+          return '<div class="wizard-checkboxes" style="display:flex; gap:12px; flex-wrap:wrap;">' +
+            weeks.map(function(w) {
+              var checked = selectedWeeks.indexOf(w) >= 0 ? ' checked' : '';
+              return '<label style="display:flex; align-items:center; gap:4px; cursor:pointer; padding:6px 10px; border:1px solid #ddd; border-radius:6px; background:#fff;">' +
+                '<input type="checkbox" value="' + w + '"' + checked + ' style="width:18px; height:18px; cursor:pointer;">' +
+                '<span style="font-size:14px;">' + w + '週目</span></label>';
+            }).join('') + '</div>';
+        case 'patientSelect':
+          if (patientOptions.length === 0) return '<div style="color:#999;">患者データがありません</div>';
+          return '<select id="wizardInput"><option value="">-- 選択 --</option>' + patientOptions.map(function(p) {
+            return '<option value="' + escapeHtml(p.id) + '"' + (p.id === currentVal ? ' selected' : '') + '>' + escapeHtml(p.label) + '</option>';
+          }).join('') + '</select>';
+        case 'staffSelect':
+          if (staffOptions.length === 0) return '<div style="color:#999;">スタッフデータがありません</div>';
+          return '<select id="wizardInput"><option value="">-- 選択 --</option>' + staffOptions.map(function(s) {
+            return '<option value="' + escapeHtml(s.id) + '"' + (s.id === currentVal ? ' selected' : '') + '>' + escapeHtml(s.label) + '</option>';
+          }).join('') + '</select>';
+        case 'toggle':
+          var isTrue = currentVal === true || currentVal === 'TRUE' || currentVal === 'true';
+          return '<select id="wizardInput">' +
+            '<option value="FALSE"' + (!isTrue ? ' selected' : '') + '>いいえ</option>' +
+            '<option value="TRUE"' + (isTrue ? ' selected' : '') + '>はい</option>' +
+            '</select>';
+        default:
+          return '<input type="text" id="wizardInput" value="' + escapeHtml(currentVal) + '" />';
+      }
+    }
+
+    // 入力値を取得
+    function getWizardInputValue() {
+      var input = document.getElementById('wizardInput');
+      if (input) return input.value;
+
+      // チェックボックス（複数選択）
+      var checkboxes = document.querySelectorAll('#wizardInputContainer input[type="checkbox"]');
+      if (checkboxes.length > 0) {
+        var vals = [];
+        checkboxes.forEach(function(cb) { if (cb.checked) vals.push(cb.value); });
+        return vals.join(',');
+      }
+      return '';
+    }
+
+    // バリデーション
+    function validateWizardInput(step, value) {
+      if (step.type === 'autoId') return null; // 自動なのでOK
+      if (step.required && (!value || value.trim() === '')) return '必須項目です';
+      if (step.type === 'number' && value) {
+        var num = parseFloat(value);
+        if (isNaN(num)) return '数値を入力してください';
+        if (step.min !== undefined && num < step.min) return step.min + '以上を入力してください';
+      }
+      if (step.type === 'multiSelect' && step.required && (!value || value.trim() === '')) return '1つ以上選択してください';
+      return null;
+    }
+
+    // 時間計算ヘルパー関数
+    function addMinutesToTimeStr(timeStr, minutes) {
+      var parts = timeStr.split(':');
+      var h = parseInt(parts[0], 10);
+      var m = parseInt(parts[1], 10);
+      var totalMin = h * 60 + m + minutes;
+      var newH = Math.floor(totalMin / 60) % 24;
+      var newM = totalMin % 60;
+      return String(newH).padStart(2, '0') + ':' + String(newM).padStart(2, '0') + ':00';
+    }
+
+    function subtractMinutesFromTimeStr(timeStr, minutes) {
+      return addMinutesToTimeStr(timeStr, -minutes);
+    }
+
+    // 条件付きステップをスキップすべきか判定
+    // conditionalOn.value は文字列または配列をサポート
+    function shouldSkipStep(step) {
+      if (!step.conditionalOn) return false;
+      var condKey = step.conditionalOn.key;
+      var condValue = step.conditionalOn.value;
+      var currentValue = wizardState.answers[condKey];
+
+      // boolean値の正規化（TRUE/FALSE文字列をbooleanに変換）
+      var normalizedCurrent = currentValue;
+      if (currentValue === 'TRUE' || currentValue === 'true') normalizedCurrent = true;
+      if (currentValue === 'FALSE' || currentValue === 'false') normalizedCurrent = false;
+
+      // value が配列の場合、いずれかに一致すればスキップしない
+      if (Array.isArray(condValue)) {
+        return condValue.indexOf(currentValue) === -1 && condValue.indexOf(normalizedCurrent) === -1;
+      }
+      // 単一値の場合（boolean比較も含む）
+      return currentValue !== condValue && normalizedCurrent !== condValue;
+    }
+
+
+    // 次の有効なステップへ進む
+    function advanceToNextValidStep() {
+      var schema = wizardState.schema;
+      wizardState.currentStep++;
+      // 条件付きステップをスキップ
+      while (wizardState.currentStep < schema.length && shouldSkipStep(schema[wizardState.currentStep])) {
+        wizardState.currentStep++;
+      }
+    }
+
+    // 次へ
+    function wizardNext() {
+      var errorEl = document.getElementById('wizardError');
+
+      // フォーム選択
+      if (wizardState.currentStep === -1) {
+        var formSelect = document.getElementById('wizardFormSelect');
+        var formType = formSelect ? formSelect.value : '';
+        if (!formType) {
+          errorEl.textContent = '登録タイプを選択してください';
+          return;
+        }
+        wizardState.formType = formType;
+        wizardState.schema = FORM_SCHEMA[formType] || [];
+        wizardState.currentStep = 0;
+        document.getElementById('wizardTitle').textContent = formType + ' - 新規登録';
+        addChatMessage('user', formType);
+        addChatMessage('bot', 'では、' + formType + 'の登録を始めます。順番に質問していきますね。');
+        renderWizardStep();
+        return;
+      }
+
+      var schema = wizardState.schema;
+
+      // 確認ステップ → 登録実行
+      if (wizardState.currentStep >= schema.length) {
+        submitWizard();
+        return;
+      }
+
+      // 通常ステップ
+      var step = schema[wizardState.currentStep];
+      var value = getWizardInputValue();
+
+      // バリデーション
+      var error = validateWizardInput(step, value);
+      if (error) {
+        errorEl.textContent = error;
+        return;
+      }
+
+      // 値を正規化して保存
+      if (step.type === 'time' && value) {
+        value = value + ':00'; // HH:MM → HH:MM:SS
+      }
+      wizardState.answers[step.key] = value;
+
+      // チャットに追加
+      var displayValue = formatAnswerForDisplay(step, value);
+      if (step.type !== 'autoId') {
+        addChatMessage('user', displayValue || '（未入力）');
+      }
+
+      // 時間タイプに基づく自動時間設定
+      if (step.key === 'timeType') {
+        var autoTimeSet = null;
+        if (value === '午前') {
+          autoTimeSet = { start: '09:00:00', end: '12:00:00', label: '午前（09:00〜12:00）' };
+        } else if (value === '午後') {
+          autoTimeSet = { start: '13:00:00', end: '17:00:00', label: '午後（13:00〜17:00）' };
+        } else if (value === '終日') {
+          autoTimeSet = { start: '09:00:00', end: '18:00:00', label: '終日（09:00〜18:00）' };
+        }
+        // 午前/午後/終日の場合、時間を自動設定し質問をスキップ
+        if (autoTimeSet) {
+          wizardState.answers['timeStart'] = autoTimeSet.start;
+          wizardState.answers['timeEnd'] = autoTimeSet.end;
+          addChatMessage('bot', '時間を自動設定しました: ' + autoTimeSet.label);
+          // fixedTarget, timeStart, timeEnd をスキップ
+          wizardState.currentStep++;
+          while (wizardState.currentStep < schema.length) {
+            var nextKey = schema[wizardState.currentStep].key;
+            if (nextKey === 'fixedTarget' || nextKey === 'timeStart' || nextKey === 'timeEnd') {
+              wizardState.currentStep++;
+            } else {
+              break;
+            }
+          }
+          // 次の質問を表示
+          if (wizardState.currentStep < schema.length) {
+            addChatMessage('bot', schema[wizardState.currentStep].label);
+          } else {
+            addChatMessage('bot', '全ての質問が完了しました。内容を確認してください。');
+          }
+          renderWizardStep();
+          return;
+        }
+        // 固定タイプの場合は、fixedTargetの質問へ進む
+        if (value === '固定') {
+          advanceToNextValidStep();
+          if (wizardState.currentStep < schema.length) {
+            addChatMessage('bot', schema[wizardState.currentStep].label);
+          }
+          renderWizardStep();
+          return;
+        }
+      }
+
+      // 固定タイプで開始/終了選択後の処理
+      if (step.key === 'fixedTarget') {
+        var fixedTarget = value; // '開始' or '終了'
+        advanceToNextValidStep();
+        // fixedTargetに応じてラベルを変更
+        if (fixedTarget === '開始') {
+          addChatMessage('bot', '固定する開始時刻は？');
+        } else {
+          // 終了固定の場合、timeStartをスキップしてtimeEndへ
+          if (wizardState.currentStep < schema.length && schema[wizardState.currentStep].key === 'timeStart') {
+            wizardState.currentStep++;
+          }
+          addChatMessage('bot', '固定する終了時刻は？');
+        }
+        renderWizardStep();
+        return;
+      }
+
+      // 固定タイプでtimeStart入力後、timeEndを自動計算
+      if (step.key === 'timeStart' && wizardState.answers['timeType'] === '固定' && wizardState.answers['fixedTarget'] === '開始') {
+        var serviceMin = parseInt(wizardState.answers['serviceMin'], 10) || 0;
+        var calcEnd = addMinutesToTimeStr(value, serviceMin);
+        wizardState.answers['timeEnd'] = calcEnd;
+        addChatMessage('bot', '終了時刻を自動計算しました: ' + calcEnd.substring(0, 5));
+        // timeEnd をスキップ
+        wizardState.currentStep++;
+        if (wizardState.currentStep < schema.length && schema[wizardState.currentStep].key === 'timeEnd') {
+          wizardState.currentStep++;
+        }
+        if (wizardState.currentStep < schema.length) {
+          addChatMessage('bot', schema[wizardState.currentStep].label);
+        } else {
+          addChatMessage('bot', '全ての質問が完了しました。内容を確認してください。');
+        }
+        renderWizardStep();
+        return;
+      }
+
+      // 固定タイプでtimeEnd入力後、timeStartを自動計算
+      if (step.key === 'timeEnd' && wizardState.answers['timeType'] === '固定' && wizardState.answers['fixedTarget'] === '終了') {
+        var serviceMin = parseInt(wizardState.answers['serviceMin'], 10) || 0;
+        var calcStart = subtractMinutesFromTimeStr(value, serviceMin);
+        wizardState.answers['timeStart'] = calcStart;
+        addChatMessage('bot', '開始時刻を自動計算しました: ' + calcStart.substring(0, 5));
+        advanceToNextValidStep();
+        if (wizardState.currentStep < schema.length) {
+          addChatMessage('bot', schema[wizardState.currentStep].label);
+        } else {
+          addChatMessage('bot', '全ての質問が完了しました。内容を確認してください。');
+        }
+        renderWizardStep();
+        return;
+      }
+
+      // 次のステップへ
+      advanceToNextValidStep();
+      if (wizardState.currentStep < schema.length) {
+        var nextStep = schema[wizardState.currentStep];
+        addChatMessage('bot', nextStep.label);
+      } else {
+        addChatMessage('bot', '全ての質問が完了しました。内容を確認してください。');
+      }
+      renderWizardStep();
+    }
+
+    // 戻る
+    function wizardBack() {
+      if (wizardState.currentStep <= 0) return;
+      wizardState.currentStep--;
+      renderWizardStep();
+    }
+
+    // スキップ
+    function wizardSkip() {
+      var schema = wizardState.schema;
+      var step = schema[wizardState.currentStep];
+      if (step.required) return;
+      wizardState.answers[step.key] = '';
+      addChatMessage('user', '（スキップ）');
+      wizardState.currentStep++;
+      if (wizardState.currentStep < schema.length) {
+        addChatMessage('bot', schema[wizardState.currentStep].label);
+      }
+      renderWizardStep();
+    }
+
+    // 回答を表示用にフォーマット
+    function formatAnswerForDisplay(step, value) {
+      if (!value) return '';
+      if (step.type === 'staffMultiSelect') {
+        return value.split(',').map(function(id) {
+          var s = staffOptions.find(function(x) { return x.id === id; });
+          return s ? s.label : id;
+        }).join(', ');
+      }
+      if (step.type === 'staffSelect') {
+        var s = staffOptions.find(function(x) { return x.id === value; });
+        return s ? s.label : value;
+      }
+      if (step.type === 'patientSelect') {
+        var p = patientOptions.find(function(x) { return x.id === value; });
+        return p ? p.label : value;
+      }
+      if (step.type === 'time') {
+        return value.substring(0, 5);
+      }
+      if (step.type === 'toggle') {
+        return value === 'TRUE' ? 'はい' : 'いいえ';
+      }
+      return value;
+    }
+
+    // チャットメッセージを追加
+    function addChatMessage(role, text) {
+      wizardState.chatHistory.push({ role: role, text: text });
+    }
+
+    // チャット履歴を描画
+    function renderChatHistory() {
+      var chatEl = document.getElementById('wizardChat');
+      var html = wizardState.chatHistory.map(function(msg) {
+        var labelText = msg.role === 'bot' ? 'システム' : 'あなた';
+        return '<div class="chat-message ' + msg.role + '"><div class="chat-label">' + labelText + '</div><div class="chat-bubble">' + escapeHtml(msg.text) + '</div></div>';
+      }).join('');
+      chatEl.innerHTML = html;
+      chatEl.scrollTop = chatEl.scrollHeight;
+    }
+
+    // プレビューを生成
+    function renderPreview() {
+      var schema = wizardState.schema;
+      var html = '<div class="wizard-preview"><table>';
+      schema.forEach(function(step) {
+        var value = wizardState.answers[step.key] || '';
+        var displayValue = formatAnswerForDisplay(step, value);
+        if (step.type === 'autoId') displayValue = '（自動発行）';
+        html += '<tr><th>' + escapeHtml(step.header) + '</th><td>' + escapeHtml(displayValue || '-') + '</td></tr>';
+      });
+      html += '</table></div>';
+      return html;
+    }
+
+    // 登録実行
+    function submitWizard() {
+      var nextBtn = document.getElementById('wizardNextBtn');
+      var errorEl = document.getElementById('wizardError');
+      nextBtn.disabled = true;
+      nextBtn.textContent = '登録中...';
+      errorEl.textContent = '';
+
+      // フォームタイプをウィザードで選択したものに固定
+      var formType = wizardState.formType;
+      var answers = wizardState.answers;
+
+      // デバッグ用ログ
+      console.log('submitWizard: formType=', formType);
+      console.log('submitWizard: answers=', JSON.stringify(answers));
+
+      // タイムアウト設定（30秒）
+      var timeoutId = setTimeout(function() {
+        nextBtn.disabled = false;
+        nextBtn.textContent = '登録';
+        errorEl.textContent = 'タイムアウト: サーバーからの応答がありませんでした';
+      }, 30000);
+
+      // サーバーに送信（末尾に追加）
+      google.script.run
+        .withSuccessHandler(function(result) {
+          clearTimeout(timeoutId);
+          console.log('submitWizard success:', result);
+          nextBtn.disabled = false;
+          nextBtn.textContent = '登録';
+          if (result && result.success) {
+            showToast('success', result.message || '登録しました');
+            wizardState.active = false;
+            document.getElementById('wizardPanel').classList.remove('active');
+            // 登録したフォームタイプに対応するシートに切り替えてリロード
+            if (formType && formType !== currentSheetName) {
+              loadSheet(formType);
+            } else {
+              reloadCurrentSheet();
+            }
+          } else {
+            errorEl.textContent = (result && result.error) || '登録に失敗しました';
+          }
+        })
+        .withFailureHandler(function(e) {
+          clearTimeout(timeoutId);
+          console.error('submitWizard error:', e);
+          nextBtn.disabled = false;
+          nextBtn.textContent = '登録';
+          errorEl.textContent = 'エラー: ' + (e.message || String(e));
+        })
+        .input_createRowFromWizard(formType, answers, null);
+    }
+
+    // ============================================================
+    // 同行割付ウィザード
+    // ============================================================
+    var mentorWizardState = {
+      weekStart: null,  // Date
+      traineeId: '',
+      dayOffMap: {},    // "staffId|yyyy/MM/dd": true
+      rows: []          // [{date, mentor, band, priority, status}]
+    };
+    var WEEKDAYS_LABEL = ['月', '火', '水', '木', '金', '土', '日'];
+
+    function getMonday(d) {
+      var date = new Date(d);
+      var day = date.getDay();
+      var diff = date.getDate() - day + (day === 0 ? -6 : 1);
+      date.setDate(diff);
+      date.setHours(0, 0, 0, 0);
+      return date;
+    }
+
+    function formatDateJP(d) {
+      return d.getFullYear() + '/' + String(d.getMonth() + 1).padStart(2, '0') + '/' + String(d.getDate()).padStart(2, '0');
+    }
+
+    function openMentorWizard() {
+      var panel = document.getElementById('mentorWizardPanel');
+      panel.classList.add('active');
+
+      // 今週の月曜を初期値
+      mentorWizardState.weekStart = getMonday(new Date());
+      updateMentorWeekDisplay();
+
+      // 新人リストを設定
+      var traineeSelect = document.getElementById('wizardTraineeSelect');
+      traineeSelect.innerHTML = '<option value="">-- 新人を選択 --</option>';
+      staffOptions.forEach(function(s) {
+        // スキル=新人を優先表示（全員表示）
+        var label = s.label + (s.skill === '新人' ? ' ★新人' : '');
+        traineeSelect.innerHTML += '<option value="' + s.id + '">' + label + '</option>';
+      });
+
+      // グリッド初期化
+      mentorWizardState.traineeId = '';
+      mentorWizardState.rows = [];
+      renderMentorGrid();
+    }
+
+    function closeMentorWizard() {
+      document.getElementById('mentorWizardPanel').classList.remove('active');
+    }
+
+    function updateMentorWeekDisplay() {
+      var start = mentorWizardState.weekStart;
+      var end = new Date(start);
+      end.setDate(end.getDate() + 6);
+      document.getElementById('mentorWeekDisplay').textContent = formatDateJP(start) + ' 〜 ' + formatDateJP(end);
+      if (mentorWizardState.traineeId) {
+        loadMentorPairsForWeek();
+      }
+    }
+
+    function mentorWeekPrev() {
+      mentorWizardState.weekStart.setDate(mentorWizardState.weekStart.getDate() - 7);
+      updateMentorWeekDisplay();
+      renderMentorGrid();
+    }
+
+    function mentorWeekNext() {
+      mentorWizardState.weekStart.setDate(mentorWizardState.weekStart.getDate() + 7);
+      updateMentorWeekDisplay();
+      renderMentorGrid();
+    }
+
+    function onTraineeChange() {
+      mentorWizardState.traineeId = document.getElementById('wizardTraineeSelect').value;
+      if (mentorWizardState.traineeId) {
+        loadMentorPairsForWeek();
+      } else {
+        mentorWizardState.rows = [];
+        renderMentorGrid();
+      }
+    }
+
+    function loadMentorPairsForWeek() {
+      var start = mentorWizardState.weekStart;
+      var end = new Date(start);
+      end.setDate(end.getDate() + 6);
+
+      google.script.run
+        .withSuccessHandler(function(result) {
+          // result: { pairs: [{date, mentor, band, priority}], dayOffMap: {...} }
+          mentorWizardState.dayOffMap = result.dayOffMap || {};
+          var existingPairs = result.pairs || [];
+
+          // 7日分の行を初期化
+          mentorWizardState.rows = [];
+          for (var i = 0; i < 7; i++) {
+            var d = new Date(start);
+            d.setDate(d.getDate() + i);
+            var dateStr = formatDateJP(d);
+
+            // 既存データがあれば反映
+            var existing = existingPairs.find(function(p) { return p.date === dateStr; });
+            mentorWizardState.rows.push({
+              date: dateStr,
+              weekday: WEEKDAYS_LABEL[i],
+              mentor: existing ? existing.mentor : '',
+              band: existing ? existing.band : '終日',
+              priority: existing ? existing.priority : 1
+            });
+          }
+          renderMentorGrid();
+        })
+        .withFailureHandler(function(e) {
+          console.error('loadMentorPairsForWeek error:', e);
+          // エラー時は空で初期化
+          mentorWizardState.rows = [];
+          for (var i = 0; i < 7; i++) {
+            var d = new Date(start);
+            d.setDate(d.getDate() + i);
+            mentorWizardState.rows.push({
+              date: formatDateJP(d),
+              weekday: WEEKDAYS_LABEL[i],
+              mentor: '',
+              band: '終日',
+              priority: 1
+            });
+          }
+          renderMentorGrid();
+        })
+        .input_getMentorPairsForWeek(mentorWizardState.traineeId, formatDateJP(start), formatDateJP(end));
+    }
+
+    function renderMentorGrid() {
+      var tbody = document.getElementById('mentorGridBody');
+      var traineeId = mentorWizardState.traineeId;
+
+      if (!traineeId || mentorWizardState.rows.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="5" style="text-align:center; color:#999;">新人を選択してください</td></tr>';
+        return;
+      }
+
+      var html = '';
+      mentorWizardState.rows.forEach(function(row, i) {
+        var mentorOptions = '<option value="">-- 未設定 --</option>';
+        staffOptions.forEach(function(s) {
+          if (s.id === traineeId) return; // trainee自身は除外
+          var selected = (s.id === row.mentor) ? ' selected' : '';
+          mentorOptions += '<option value="' + s.id + '"' + selected + '>' + s.label + '</option>';
+        });
+
+        var bandOptions = ['終日', '午前', '午後'].map(function(b) {
+          return '<option value="' + b + '"' + (b === row.band ? ' selected' : '') + '>' + b + '</option>';
+        }).join('');
+
+        // 状態チェック
+        var status = '';
+        var statusClass = 'status-empty';
+        if (row.mentor) {
+          var traineeOff = mentorWizardState.dayOffMap[traineeId + '|' + row.date];
+          var mentorOff = mentorWizardState.dayOffMap[row.mentor + '|' + row.date];
+          if (traineeOff) {
+            status = '⚠ 新人休み';
+            statusClass = 'status-warn';
+          } else if (mentorOff) {
+            status = '⚠ メンター休み';
+            statusClass = 'status-warn';
+          } else {
+            status = '✓ OK';
+            statusClass = 'status-ok';
+          }
+        } else {
+          status = '未設定';
+        }
+
+        html += '<tr>' +
+          '<td>' + row.weekday + '</td>' +
+          '<td>' + row.date + '</td>' +
+          '<td><select id="mentorSelect_' + i + '" onchange="onMentorGridChange(' + i + ')">' + mentorOptions + '</select></td>' +
+          '<td><select id="bandSelect_' + i + '" onchange="onMentorGridChange(' + i + ')">' + bandOptions + '</select></td>' +
+          '<td class="' + statusClass + '">' + status + '</td>' +
+          '</tr>';
+      });
+      tbody.innerHTML = html;
+    }
+
+    function onMentorGridChange(idx) {
+      var mentor = document.getElementById('mentorSelect_' + idx).value;
+      var band = document.getElementById('bandSelect_' + idx).value;
+      mentorWizardState.rows[idx].mentor = mentor;
+      mentorWizardState.rows[idx].band = band;
+      renderMentorGrid();
+    }
+
+    function applyAllDaysSameMentor() {
+      var mentor = prompt('全日に設定するメンターのスタッフIDを入力:\n（例: S001）');
+      if (!mentor) return;
+      mentorWizardState.rows.forEach(function(row) {
+        row.mentor = mentor;
+      });
+      renderMentorGrid();
+    }
+
+    function applyWeekdayMentor() {
+      var mentor = prompt('平日（月〜金）に設定するメンターのスタッフIDを入力:\n（例: S001）');
+      if (!mentor) return;
+      mentorWizardState.rows.forEach(function(row, i) {
+        if (i < 5) row.mentor = mentor; // 月〜金
+      });
+      renderMentorGrid();
+    }
+
+    function clearMentorGrid() {
+      mentorWizardState.rows.forEach(function(row) {
+        row.mentor = '';
+        row.band = '終日';
+      });
+      renderMentorGrid();
+    }
+
+    function saveMentorWizard() {
+      var errorEl = document.getElementById('mentorWizardError');
+      errorEl.textContent = '';
+
+      if (!mentorWizardState.traineeId) {
+        errorEl.textContent = '新人を選択してください';
+        return;
+      }
+
+      var start = mentorWizardState.weekStart;
+      var end = new Date(start);
+      end.setDate(end.getDate() + 6);
+
+      // mentor が設定されている行のみ保存
+      var rowsToSave = mentorWizardState.rows.filter(function(row) {
+        return row.mentor && row.mentor.trim() !== '';
+      }).map(function(row) {
+        return {
+          date: row.date,
+          mentor: row.mentor,
+          band: row.band,
+          priority: row.priority || 1
+        };
+      });
+
+      var saveBtn = document.getElementById('btnSaveMentorWizard');
+      saveBtn.disabled = true;
+      saveBtn.textContent = '保存中...';
+
+      google.script.run
+        .withSuccessHandler(function(result) {
+          saveBtn.disabled = false;
+          saveBtn.textContent = '保存';
+          if (result && result.success) {
+            showToast('success', '同行割付を保存しました（' + result.savedCount + '件）');
+            closeMentorWizard();
+            // スタッフ同行割付タブにいる場合は再読み込み
+            if (currentSheetName === 'スタッフ同行割付') {
+              reloadCurrentSheet();
+            }
+          } else {
+            errorEl.textContent = (result && result.error) || '保存に失敗しました';
+          }
+        })
+        .withFailureHandler(function(e) {
+          saveBtn.disabled = false;
+          saveBtn.textContent = '保存';
+          errorEl.textContent = 'エラー: ' + (e.message || String(e));
+        })
+        .input_saveMentorPairsWizard({
+          traineeId: mentorWizardState.traineeId,
+          from: formatDateJP(start),
+          to: formatDateJP(end),
+          rows: rowsToSave
+        });
+    }
+
+    // ============================================================
+    // 特別訪問週間ウィザード（新仕様：時間帯/固定対応）
+    // ============================================================
+    var specialWeekState = {
+      weekStart: null,
+      patientId: null,
+      patientName: '',
+      mode: '追加',
+      reason: '',
+      days: [],
+      normalByDate: {},
+      changesByDate: {},
+      specialRows: []
+    };
+
+    function openSpecialWeekWizard() {
+      var panel = document.getElementById('specialWeekWizardPanel');
+      panel.classList.add('active');
+
+      // 特別行の表示状態をリセット
+      specialWeekVisibleRows = 1;
+
+      var today = new Date();
+      specialWeekState.weekStart = getWeekStartMonday(today);
+      updateSpecialWeekDisplay();
+
+      var sel = document.getElementById('specialWeekPatientSelect');
+      sel.innerHTML = '<option value="">-- 患者を選択 --</option>';
+      patientOptions.forEach(function(p) {
+        var opt = document.createElement('option');
+        opt.value = p.id;
+        opt.textContent = p.label;
+        sel.appendChild(opt);
+      });
+
+      specialWeekState.patientId = null;
+      specialWeekState.patientName = '';
+      specialWeekState.mode = '追加';
+      specialWeekState.reason = '';
+      document.getElementById('specialWeekReason').value = '';
+      document.querySelector('input[name="specialWeekMode"][value="追加"]').checked = true;
+      onSpecialWeekModeChange();
+      clearSpecialWeekGrid();
+    }
+
+    function closeSpecialWeekWizard() {
+      document.getElementById('specialWeekWizardPanel').classList.remove('active');
+    }
+
+    function getWeekStartMonday(d) {
+      var date = new Date(d);
+      var day = date.getDay();
+      var diff = day === 0 ? -6 : 1 - day;
+      date.setDate(date.getDate() + diff);
+      date.setHours(0, 0, 0, 0);
+      return date;
+    }
+
+    function updateSpecialWeekDisplay() {
+      var start = specialWeekState.weekStart;
+      var end = new Date(start);
+      end.setDate(end.getDate() + 6);
+      document.getElementById('specialWeekDisplay').textContent =
+        formatDateJP(start) + ' 〜 ' + formatDateJP(end);
+
+      var WEEKDAYS = ['月', '火', '水', '木', '金', '土', '日'];
+      for (var i = 0; i < 7; i++) {
+        var d = new Date(start);
+        d.setDate(d.getDate() + i);
+        var th = document.getElementById('swTh' + i);
+        if (th) {
+          th.textContent = WEEKDAYS[i] + ' (' + (d.getMonth() + 1) + '/' + d.getDate() + ')';
+        }
+      }
+    }
+
+    function specialWeekPrev() {
+      specialWeekState.weekStart.setDate(specialWeekState.weekStart.getDate() - 7);
+      updateSpecialWeekDisplay();
+      if (specialWeekState.patientId) loadSpecialWeekData();
+    }
+
+    function specialWeekNext() {
+      specialWeekState.weekStart.setDate(specialWeekState.weekStart.getDate() + 7);
+      updateSpecialWeekDisplay();
+      if (specialWeekState.patientId) loadSpecialWeekData();
+    }
+
+    function onSpecialWeekPatientChange() {
+      var sel = document.getElementById('specialWeekPatientSelect');
+      specialWeekState.patientId = sel.value || null;
+      if (sel.selectedIndex > 0) {
+        specialWeekState.patientName = sel.options[sel.selectedIndex].textContent;
+      } else {
+        specialWeekState.patientName = '';
+      }
+      if (specialWeekState.patientId) {
+        loadSpecialWeekData();
+      } else {
+        clearSpecialWeekGrid();
+      }
+    }
+
+    function onSpecialWeekModeChange() {
+      var modeEl = document.querySelector('input[name="specialWeekMode"]:checked');
+      specialWeekState.mode = modeEl ? modeEl.value : '追加';
+      var hintEl = document.getElementById('specialWeekModeHint');
+      if (specialWeekState.mode === '追加') {
+        hintEl.textContent = '通常スケジュールに加えて特別訪問を追加';
+      } else {
+        hintEl.textContent = '通常スケジュールを置換して特別訪問のみ実施';
+      }
+      updateConflictArea();
+    }
+
+    function updateConflictArea() {
+      var area = document.getElementById('specialWeekConflictArea');
+      var hasChanges = Object.keys(specialWeekState.changesByDate).length > 0;
+      area.style.display = hasChanges ? 'block' : 'none';
+    }
+
+    function loadSpecialWeekData() {
+      var errorEl = document.getElementById('specialWeekWizardError');
+      errorEl.textContent = '';
+
+      google.script.run
+        .withSuccessHandler(function(data) {
+          if (!data || data.error) {
+            errorEl.textContent = data ? data.error : 'データの取得に失敗しました';
+            return;
+          }
+          specialWeekState.days = data.days || [];
+          specialWeekState.normalByDate = data.normalByDate || {};
+          specialWeekState.changesByDate = data.changesByDate || {};
+          specialWeekState.specialRows = data.specialRows || [];
+
+          // 既存データからモード・理由を復元
+          if (specialWeekState.specialRows.length > 0) {
+            var first = specialWeekState.specialRows[0];
+            if (first.mode) {
+              specialWeekState.mode = first.mode;
+              var radio = document.querySelector('input[name="specialWeekMode"][value="' + specialWeekState.mode + '"]');
+              if (radio) radio.checked = true;
+              onSpecialWeekModeChange();
+            }
+            if (first.reason) {
+              specialWeekState.reason = first.reason;
+              document.getElementById('specialWeekReason').value = first.reason;
+            }
+          }
+
+          updateConflictArea();
+          renderSpecialWeekGrid();
+        })
+        .withFailureHandler(function(e) {
+          errorEl.textContent = 'エラー: ' + (e.message || String(e));
+        })
+        .input_getSpecialWeekWizardData(formatDateJP(specialWeekState.weekStart), specialWeekState.patientId);
+    }
+
+    function clearSpecialWeekGrid() {
+      var tbody = document.getElementById('specialWeekGridBody');
+      tbody.innerHTML = '<tr><td colspan="8" style="text-align:center; color:#999; padding:20px;">患者を選択してください</td></tr>';
+    }
+
+    // 特別行の表示状態（初期は特別1のみ表示）
+    var specialWeekVisibleRows = 1; // 1=特別1のみ, 2=特別1-2, 3=特別1-3
+
+    function renderSpecialWeekGrid() {
+      var tbody = document.getElementById('specialWeekGridBody');
+      tbody.innerHTML = '';
+
+      var ROW_LABELS = ['通常', '個別変更', '特別1', '特別2', '特別3'];
+
+      // 既存データがあれば特別2,3も表示
+      var spMap = {};
+      (specialWeekState.specialRows || []).forEach(function(r) {
+        spMap[r.dateStr + '|' + r.rowLabel] = r;
+        // データがあれば行を表示
+        if (r.rowLabel === '特別2' && specialWeekVisibleRows < 2) specialWeekVisibleRows = 2;
+        if (r.rowLabel === '特別3' && specialWeekVisibleRows < 3) specialWeekVisibleRows = 3;
+      });
+
+      for (var rowIdx = 0; rowIdx < ROW_LABELS.length; rowIdx++) {
+        var tr = document.createElement('tr');
+        tr.id = 'swRow_' + rowIdx;
+
+        // 特別2(rowIdx=3), 特別3(rowIdx=4)は条件付き表示
+        if (rowIdx === 3 && specialWeekVisibleRows < 2) tr.style.display = 'none';
+        if (rowIdx === 4 && specialWeekVisibleRows < 3) tr.style.display = 'none';
+
+        var th = document.createElement('td');
+        th.className = 'row-header';
+
+        // 特別1行に「+」ボタン、特別2/3に「−」ボタンを追加
+        if (rowIdx === 2) {
+          th.innerHTML = ROW_LABELS[rowIdx] + ' <button type="button" onclick="addSpecialRow()" style="margin-left:4px;padding:0 6px;font-size:12px;cursor:pointer;" title="特別2を追加">+</button>';
+        } else if (rowIdx === 3) {
+          th.innerHTML = ROW_LABELS[rowIdx] +
+            ' <button type="button" onclick="addSpecialRow()" style="margin-left:4px;padding:0 6px;font-size:12px;cursor:pointer;" title="特別3を追加">+</button>' +
+            '<button type="button" onclick="removeSpecialRow(2)" style="margin-left:2px;padding:0 6px;font-size:12px;cursor:pointer;color:#c00;" title="特別2を非表示">−</button>';
+        } else if (rowIdx === 4) {
+          th.innerHTML = ROW_LABELS[rowIdx] +
+            ' <button type="button" onclick="removeSpecialRow(3)" style="margin-left:4px;padding:0 6px;font-size:12px;cursor:pointer;color:#c00;" title="特別3を非表示">−</button>';
+        } else {
+          th.textContent = ROW_LABELS[rowIdx];
+        }
+        tr.appendChild(th);
+
+        for (var dayIdx = 0; dayIdx < 7; dayIdx++) {
+          var td = document.createElement('td');
+          var dateStr = getDateStrForDay(dayIdx);
+
+          if (rowIdx === 0) {
+            td.className = 'cell-muted';
+            var items = specialWeekState.normalByDate[dateStr] || [];
+            if (items.length > 0) {
+              td.innerHTML = items.map(function(x) { return '<div>' + (x.text || '') + '</div>'; }).join('');
+            } else {
+              td.textContent = '-';
+            }
+          } else if (rowIdx === 1) {
+            td.className = 'cell-change';
+            var changes = specialWeekState.changesByDate[dateStr] || [];
+            if (changes.length > 0) {
+              td.innerHTML = changes.map(function(c) { return '<div>' + (c.text || '') + '</div>'; }).join('');
+            } else {
+              td.textContent = '-';
+            }
+          } else {
+            td.className = 'cell-special';
+            var rowLabel = ROW_LABELS[rowIdx];
+            var key = dateStr + '|' + rowLabel;
+            var cur = spMap[key] || {};
+
+            var timeType = cur.timeType || '時間帯';
+            var needStaff = cur.needStaff || 1;
+            var changeHandle = cur.changeHandle || 'そのまま残す';
+            var html = '<div style="display:flex;flex-direction:column;gap:3px;">';
+            html += '<select data-k="' + key + '" class="swTimeType" style="width:80px;">';
+            html += '<option value="時間帯"' + (timeType==='時間帯'?' selected':'') + '>時間帯</option>';
+            html += '<option value="固定"' + (timeType==='固定'?' selected':'') + '>固定</option>';
+            html += '</select>';
+            html += '<div style="display:flex;gap:2px;align-items:center;">';
+            html += '<span style="font-size:10px;">早</span><input type="time" data-k="' + key + '" class="swEarliest" value="' + (cur.earliest||'') + '" style="width:75px;font-size:10px;">';
+            html += '<span style="font-size:10px;">遅</span><input type="time" data-k="' + key + '" class="swLatest" value="' + (cur.latest||'') + '" style="width:75px;font-size:10px;">';
+            html += '</div>';
+            html += '<div style="display:flex;gap:2px;align-items:center;">';
+            html += '<select data-k="' + key + '" class="swSvc" style="width:50px;font-size:10px;">';
+            [30,45,60,90,120].forEach(function(m) {
+              html += '<option value="' + m + '"' + ((Number(cur.svcMin||0)===m)?'selected':'') + '>' + m + '分</option>';
+            });
+            html += '</select>';
+            html += '<select data-k="' + key + '" class="swNeedStaff" style="width:40px;font-size:10px;" title="必要スタッフ数">';
+            [1,2,3].forEach(function(n) {
+              html += '<option value="' + n + '"' + (needStaff===n?' selected':'') + '>' + n + '人</option>';
+            });
+            html += '</select>';
+            html += '</div>';
+            html += '<div style="display:flex;gap:2px;align-items:center;color:#888;font-size:9px;">';
+            html += '<span>固定:</span><input type="time" data-k="' + key + '" class="swStart" value="' + (cur.start||'') + '" style="width:65px;font-size:9px;">';
+            html += '<input type="time" data-k="' + key + '" class="swEnd" value="' + (cur.end||'') + '" style="width:65px;font-size:9px;">';
+            html += '</div>';
+            html += '<select data-k="' + key + '" class="swChangeHandle" style="width:100%;font-size:9px;" title="個別変更の扱い">';
+            html += '<option value="そのまま残す"' + (changeHandle==='そのまま残す'?' selected':'') + '>個別変更を残す</option>';
+            html += '<option value="置換する"' + (changeHandle==='置換する'?' selected':'') + '>個別変更を置換</option>';
+            html += '</select>';
+            html += '</div>';
+
+            td.innerHTML = html;
+          }
+          tr.appendChild(td);
+        }
+        tbody.appendChild(tr);
+      }
+    }
+
+    function addSpecialRow() {
+      if (specialWeekVisibleRows < 3) {
+        specialWeekVisibleRows++;
+        var row = document.getElementById('swRow_' + (specialWeekVisibleRows + 1));
+        if (row) row.style.display = '';
+      }
+    }
+
+    function removeSpecialRow(rowNum) {
+      // rowNum: 2=特別2, 3=特別3
+      if (rowNum === 3 && specialWeekVisibleRows >= 3) {
+        var row3 = document.getElementById('swRow_4');
+        if (row3) row3.style.display = 'none';
+        specialWeekVisibleRows = 2;
+      } else if (rowNum === 2 && specialWeekVisibleRows >= 2) {
+        var row2 = document.getElementById('swRow_3');
+        var row3 = document.getElementById('swRow_4');
+        if (row2) row2.style.display = 'none';
+        if (row3) row3.style.display = 'none';
+        specialWeekVisibleRows = 1;
+      }
+    }
+
+    function getDateStrForDay(dayIdx) {
+      var d = new Date(specialWeekState.weekStart);
+      d.setDate(d.getDate() + dayIdx);
+      return formatDateJP(d);
+    }
+
+    function saveSpecialWeekWizard() {
+      var errorEl = document.getElementById('specialWeekWizardError');
+      errorEl.textContent = '';
+
+      if (!specialWeekState.patientId) {
+        errorEl.textContent = '患者を選択してください';
+        return;
+      }
+
+      specialWeekState.reason = document.getElementById('specialWeekReason').value || '';
+
+      var items = [];
+      document.querySelectorAll('.swTimeType').forEach(function(sel) {
+        var key = sel.dataset.k;
+        var parts = key.split('|');
+        var dateStr = parts[0];
+        var rowLabel = parts[1];
+
+        var timeType = sel.value;
+        var earliest = document.querySelector('.swEarliest[data-k="' + key + '"]').value;
+        var latest = document.querySelector('.swLatest[data-k="' + key + '"]').value;
+        var svcMin = document.querySelector('.swSvc[data-k="' + key + '"]').value;
+        var start = document.querySelector('.swStart[data-k="' + key + '"]').value;
+        var end = document.querySelector('.swEnd[data-k="' + key + '"]').value;
+        var needStaffEl = document.querySelector('.swNeedStaff[data-k="' + key + '"]');
+        var needStaff = needStaffEl ? Number(needStaffEl.value) || 1 : 1;
+        var changeHandleEl = document.querySelector('.swChangeHandle[data-k="' + key + '"]');
+        var changeHandle = changeHandleEl ? changeHandleEl.value : 'そのまま残す';
+
+        var hasSomething = (timeType === '固定') ? (start && end) : (earliest && latest && svcMin);
+        if (!hasSomething) return;
+
+        items.push({
+          dateStr: dateStr,
+          rowLabel: rowLabel,
+          timeType: timeType,
+          earliest: earliest,
+          latest: latest,
+          svcMin: svcMin,
+          needStaff: needStaff,
+          start: start,
+          end: end,
+          note: '',
+          changeHandle: changeHandle
+        });
+      });
+
+      var payload = {
+        weekStartStr: formatDateJP(specialWeekState.weekStart),
+        patientId: specialWeekState.patientId,
+        patientName: specialWeekState.patientName,
+        mode: specialWeekState.mode,
+        reason: specialWeekState.reason,
+        items: items
+      };
+
+      var saveBtn = document.getElementById('btnSaveSpecialWeek');
+      saveBtn.disabled = true;
+      saveBtn.textContent = '保存中...';
+
+      google.script.run
+        .withSuccessHandler(function(result) {
+          saveBtn.disabled = false;
+          saveBtn.textContent = '保存';
+          if (result && (result.success || result.ok)) {
+            showToast('success', result.message || '特別訪問週間を保存しました');
+            closeSpecialWeekWizard();
+          } else {
+            errorEl.textContent = (result && result.error) || '保存に失敗しました';
+          }
+        })
+        .withFailureHandler(function(e) {
+          saveBtn.disabled = false;
+          saveBtn.textContent = '保存';
+          errorEl.textContent = 'エラー: ' + (e.message || String(e));
+        })
+        .input_saveSpecialWeekWizard(payload);
+    }
+
+  </script>
+</body>
+</html>

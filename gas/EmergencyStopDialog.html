@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: 'Segoe UI', 'Hiragino Kaku Gothic ProN', sans-serif;
+      background: #1a1a1a; color: #fff; padding: 16px;
+      display: flex; flex-direction: column; align-items: center;
+      justify-content: center; min-height: 100%;
+    }
+    .title {
+      font-size: 14px; color: #ff6666; margin-bottom: 12px;
+      text-align: center; font-weight: 600;
+    }
+    .stop-btn {
+      width: 100%; max-width: 280px; padding: 20px 16px;
+      background: linear-gradient(135deg, #dc0000 0%, #ff0000 50%, #dc0000 100%);
+      color: #ffffff; font-size: 22px; font-weight: 900;
+      border: 3px solid #8b0000; border-radius: 12px;
+      cursor: pointer; letter-spacing: 3px;
+      box-shadow: 0 4px 20px rgba(220, 0, 0, 0.6);
+      text-shadow: 1px 1px 3px rgba(0,0,0,0.4);
+      animation: pulse 1.5s ease-in-out infinite;
+      transition: all 0.15s;
+    }
+    .stop-btn:hover {
+      background: linear-gradient(135deg, #ff0000 0%, #ff3333 50%, #ff0000 100%);
+      box-shadow: 0 6px 30px rgba(255, 0, 0, 0.8);
+      transform: scale(1.03);
+    }
+    .stop-btn:active { transform: scale(0.97); }
+    .stop-btn:disabled {
+      opacity: 0.5; cursor: not-allowed; animation: none;
+      transform: none;
+    }
+    @keyframes pulse {
+      0%, 100% { box-shadow: 0 4px 20px rgba(220, 0, 0, 0.6); }
+      50% { box-shadow: 0 4px 35px rgba(255, 0, 0, 0.9); }
+    }
+    .status {
+      margin-top: 14px; font-size: 13px; text-align: center;
+      min-height: 40px; color: #ccc; line-height: 1.5;
+    }
+    .status.ok { color: #4caf50; }
+    .status.error { color: #ff6666; }
+    .status.sending { color: #ffcc00; }
+    .hint {
+      margin-top: 10px; font-size: 11px; color: #888;
+      text-align: center; line-height: 1.4;
+    }
+  </style>
+</head>
+<body>
+  <div class="title">Playwright 非常停止パネル</div>
+  <button class="stop-btn" id="stopBtn" onclick="doStop()">*** 非常停止 ***</button>
+  <div class="status" id="statusMsg">ボタンを押すと即座に停止リクエストを送信します</div>
+  <div class="hint">※ 現在処理中の利用者の操作完了後に停止します</div>
+
+  <script>
+    var API_URL = 'https://kaipoke-api.net:8443';
+
+    function doStop() {
+      var btn = document.getElementById('stopBtn');
+      var msg = document.getElementById('statusMsg');
+      btn.disabled = true;
+      msg.className = 'status sending';
+      msg.textContent = '非常停止を送信中...';
+
+      // まず fetch() で直接VPSに送信を試みる（CORS対応済みの場合）
+      fetch(API_URL + '/api/stop', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({})
+      })
+      .then(function(response) { return response.json(); })
+      .then(function(result) {
+        if (result.success) {
+          var taskName = (result.current_task && result.current_task.command) ? result.current_task.command : 'なし';
+          msg.className = 'status ok';
+          msg.textContent = '停止要求を送信しました！\n対象タスク: ' + taskName;
+        } else {
+          msg.className = 'status error';
+          msg.textContent = '停止失敗: ' + (result.error || '不明なエラー');
+        }
+        btn.disabled = false;
+      })
+      .catch(function(error) {
+        // fetch失敗（CORS未対応の場合）→ GAS経由にフォールバック
+        console.log('fetch failed, falling back to google.script.run: ' + error.message);
+        msg.textContent = 'GAS経由で送信中...';
+        google.script.run
+          .withSuccessHandler(function(result) {
+            msg.className = result.success ? 'status ok' : 'status error';
+            msg.textContent = result.message;
+            btn.disabled = false;
+          })
+          .withFailureHandler(function(err) {
+            msg.className = 'status error';
+            msg.textContent = 'エラー: ' + err.message;
+            btn.disabled = false;
+          })
+          .emergencyStop();
+      });
+    }
+  </script>
+</body>
+</html>
