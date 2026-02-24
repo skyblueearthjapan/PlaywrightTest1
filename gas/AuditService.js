@@ -92,18 +92,21 @@ function audit_buildWeekSummary_(dataset) {
 
   // 実績（Actual）から患者×日×スタッフを抽出
   var actualPlanMap = dataset.actualPlanMap;
+  var processedPdKeys = {};  // 患者×日の判定済みフラグ（patientSummary二重カウント防止）
 
   for (var pdKey in actualPlanMap) {
     var actuals = actualPlanMap[pdKey];
     if (!actuals || actuals.length === 0) continue;
 
-    actuals.forEach(function(actual) {
-      var pid = actual.pid;
-      var dateStr = actual.dateStr;
-      var staffId = actual.staffId || '_UNASSIGNED_';
+    // 患者×日ごとに1回だけ判定を実行（needStaff=2等での二重カウント防止）
+    var firstActual = actuals[0];
+    var pid = firstActual.pid;
+    var dateStr = firstActual.dateStr;
+    var judgement = audit_judgePatientDay_(dataset, expectedByPidDate, pid, dateStr);
 
-      // 本番判定（Phase 2）: Expected vs Actual
-      var judgement = audit_judgePatientDay_(dataset, expectedByPidDate, pid, dateStr);
+    // 各actualをセルサマリに追加（スタッフ別に振り分け）
+    actuals.forEach(function(actual) {
+      var staffId = actual.staffId || '_UNASSIGNED_';
 
       // セルサマリに追加
       var sdKey = audit_makeSdKey_(staffId, dateStr);
@@ -120,12 +123,16 @@ function audit_buildWeekSummary_(dataset) {
           detailKey: audit_makePdKey_(pid, dateStr)
         });
       }
+    });
 
-      // 患者サマリを更新
+    // 患者サマリを更新（患者×日ごとに1回のみ）
+    if (!processedPdKeys[pdKey]) {
+      processedPdKeys[pdKey] = true;
+
       if (!patientSummary[pid]) {
         patientSummary[pid] = {
           pid: pid,
-          pname: actual.pname || '',
+          pname: firstActual.pname || '',
           overallStatus: AUDIT_STATUS.OK,
           okCount: 0,
           warnCount: 0,
@@ -152,7 +159,7 @@ function audit_buildWeekSummary_(dataset) {
       } else {
         patientSummary[pid].okCount++;
       }
-    });
+    }
   }
 
   // Expected-only（実績がない期待）もチェック
@@ -209,6 +216,51 @@ function audit_buildWeekSummary_(dataset) {
     }
   }
 
+  // === C-6: 週回数チェック (WEEKLY_COUNT_MISMATCH) ===
+  // 患者マスタのweeklyCountと、週内の非キャンセル期待数を比較
+  for (var wcPid in dataset.patientMasterMap) {
+    var wcMaster = dataset.patientMasterMap[wcPid];
+    if (!wcMaster || !wcMaster.weeklyCount || wcMaster.weeklyCount <= 0) continue;
+
+    // 週内の非キャンセル期待数をカウント
+    var weeklyExpectedCount = 0;
+    dataset.weekDates.forEach(function(wd) {
+      var wcKey = audit_makePdKey_(wcPid, wd.dateStr);
+      var wcExpected = expectedByPidDate[wcKey];
+      if (wcExpected && wcExpected.visits) {
+        var activeVisits = wcExpected.visits.filter(function(v) { return !v.isCancelled; });
+        // needStaff=2の場合でもvisitは2件あるが論理的には1回の訪問
+        // needStaffを考慮して訪問回数を算出
+        if (activeVisits.length > 0) {
+          var needStaff = activeVisits[0].needStaff || 1;
+          weeklyExpectedCount += Math.ceil(activeVisits.length / needStaff);
+        }
+      }
+    });
+
+    if (weeklyExpectedCount !== wcMaster.weeklyCount) {
+      // patientSummaryに警告を追加
+      if (!patientSummary[wcPid]) {
+        patientSummary[wcPid] = {
+          pid: wcPid,
+          pname: wcMaster.name || '',
+          overallStatus: AUDIT_STATUS.OK,
+          okCount: 0,
+          warnCount: 0,
+          ngCount: 0,
+          reasons: []
+        };
+      }
+      patientSummary[wcPid].warnCount++;
+      if (patientSummary[wcPid].overallStatus !== AUDIT_STATUS.NG) {
+        patientSummary[wcPid].overallStatus = AUDIT_STATUS.WARN;
+      }
+      patientSummary[wcPid].reasons.push(
+        AUDIT_TAGS.WEEKLY_COUNT_MISMATCH + ': マスタ週' + wcMaster.weeklyCount + '回に対し期待' + weeklyExpectedCount + '回'
+      );
+    }
+  }
+
   // スタッフ一覧を取得（表示用）
   var staffList = [];
   for (var staffId in dataset.staffMasterMap) {
@@ -221,11 +273,23 @@ function audit_buildWeekSummary_(dataset) {
     return a.staffId.localeCompare(b.staffId);
   });
 
+  // 未割当のユニーク患者数を集計（全日横断で重複排除）
+  var unassignedPidSet = {};
+  for (var csKey in cellSummary) {
+    if (csKey.indexOf('_UNASSIGNED_|') === 0) {
+      cellSummary[csKey].forEach(function(item) {
+        unassignedPidSet[item.pid] = true;
+      });
+    }
+  }
+  var unassignedPatientCount = Object.keys(unassignedPidSet).length;
+
   // デバッグ情報
   var cellSummaryKeyCount = Object.keys(cellSummary).length;
   var patientSummaryKeyCount = Object.keys(patientSummary).length;
   console.log('audit_buildWeekSummary_: cellSummary keys =', cellSummaryKeyCount);
   console.log('audit_buildWeekSummary_: patientSummary keys =', patientSummaryKeyCount);
+  console.log('audit_buildWeekSummary_: unassignedPatientCount =', unassignedPatientCount);
 
   return {
     weekStartStr: dataset.weekStartStr,
@@ -235,6 +299,7 @@ function audit_buildWeekSummary_(dataset) {
     staffList: staffList,
     cellSummary: cellSummary,
     patientSummary: patientSummary,
+    unassignedPatientCount: unassignedPatientCount,  // ユニーク未割当患者数
     warnings: dataset.warnings || [],
     fromCache: dataset.fromCache || false,
     // デバッグ用
@@ -242,7 +307,8 @@ function audit_buildWeekSummary_(dataset) {
       actualPlanMapKeys: Object.keys(dataset.actualPlanMap || {}).length,
       expectedByPidDateKeys: Object.keys(dataset.expectedByPidDate || {}).length,
       cellSummaryKeys: cellSummaryKeyCount,
-      patientSummaryKeys: patientSummaryKeyCount
+      patientSummaryKeys: patientSummaryKeyCount,
+      unassignedPatientCount: unassignedPatientCount
     }
   };
 }
@@ -274,11 +340,21 @@ function audit_buildCellDetail_(dataset, staffId, dateStr) {
 
       var judgement = audit_judgePatientDay_(dataset, expectedByPidDate, actual.pid, dateStr);
 
+      // checksを表示用に変換
+      var displayChecks = (judgement.checks || []).map(function(chk) {
+        return {
+          label: audit_getCheckLabel_(chk),
+          status: chk.status || AUDIT_STATUS.OK,
+          detail: chk.explanation || chk.reason || ''
+        };
+      });
+
       items.push({
         pid: actual.pid,
         pname: actual.pname || '',
         status: judgement.status,
         tags: judgement.tags,
+        checks: displayChecks,
         startMin: actual.startMin,
         endMin: actual.endMin,
         startStr: audit_minToTimeStr_(actual.startMin),
@@ -300,6 +376,38 @@ function audit_buildCellDetail_(dataset, staffId, dateStr) {
     dateStr: dateStr,
     items: items
   };
+}
+
+// ============================================================
+// チェックラベル変換ヘルパー
+// ============================================================
+
+/**
+ * チェック結果のtypeを日本語ラベルに変換
+ * @param {Object} check - チェック結果オブジェクト
+ * @return {string} 日本語ラベル
+ */
+function audit_getCheckLabel_(check) {
+  var typeLabels = {
+    'timeWindow': '時間窓',
+    'cancel': 'キャンセル',
+    'eventConflict': 'イベント衝突',
+    'unassigned': '未割当',
+    'missing': '実績不足',
+    'extra': '余剰実績',
+    'genderViolation': '性別制限',
+    'twoStaffTime': '2人訪問時間',
+    'twoStaffMissing': '2人訪問人数',
+    'twoStaffDuplicate': '2人訪問重複',
+    'shiftViolation': 'シフト時間',
+    'staffDayOff': 'スタッフ休み',
+    'staffHalfDayOff': 'スタッフ半休',
+    'staffRestricted': 'スタッフ制限',
+    'weeklyCount': '週回数',
+    'svcDuration': 'サービス時間',
+    'workdayViolation': '勤務日'
+  };
+  return typeLabels[check.type] || check.type || '判定';
 }
 
 // ============================================================

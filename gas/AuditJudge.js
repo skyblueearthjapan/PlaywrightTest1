@@ -185,6 +185,273 @@ function audit_judgePatientDay_(dataset, expectedByPidDate, pid, dateStr) {
     }
   });
 
+  // === C-1: 2人訪問チェック ===
+  // needStaff=2 の期待がある場合のみ実行
+  var twoStaffExpects = activeExpects.filter(function(e) { return (e.needStaff || 1) >= 2; });
+  if (twoStaffExpects.length > 0 && actuals.length > 0) {
+    if (actuals.length < 2) {
+      // 2人必要なのに実績が2件未満
+      status = AUDIT_STATUS.NG;
+      tags.push(AUDIT_TAGS.TWO_STAFF_MISSING);
+      checks.push({
+        type: 'twoStaffMissing',
+        status: AUDIT_STATUS.NG,
+        reason: '2人訪問が必要ですが実績が' + actuals.length + '件のみです'
+      });
+    } else if (actuals.length >= 2) {
+      // staffIdが同一かチェック
+      var staffIds = {};
+      var hasDuplicate = false;
+      actuals.forEach(function(a) {
+        if (a.staffId && staffIds[a.staffId]) {
+          hasDuplicate = true;
+        }
+        if (a.staffId) staffIds[a.staffId] = true;
+      });
+
+      if (hasDuplicate) {
+        status = AUDIT_STATUS.NG;
+        tags.push(AUDIT_TAGS.TWO_STAFF_DUPLICATE);
+        checks.push({
+          type: 'twoStaffDuplicate',
+          status: AUDIT_STATUS.NG,
+          reason: '2人訪問で同一スタッフが割り当てられています'
+        });
+      }
+
+      // 時間ズレチェック（先頭2件で比較）
+      var a0 = actuals[0];
+      var a1 = actuals[1];
+      if (a0.startMin !== null && a1.startMin !== null &&
+          a0.endMin !== null && a1.endMin !== null) {
+        var startDiff = Math.abs(a0.startMin - a1.startMin);
+        var endDiff = Math.abs(a0.endMin - a1.endMin);
+        if (startDiff > bufferMin || endDiff > bufferMin) {
+          if (status !== AUDIT_STATUS.NG) {
+            status = AUDIT_STATUS.WARN;
+          }
+          tags.push(AUDIT_TAGS.TWO_STAFF_TIME_MISMATCH);
+          checks.push({
+            type: 'twoStaffTimeMismatch',
+            status: AUDIT_STATUS.WARN,
+            reason: '2人訪問の時間にズレがあります（開始差:' + startDiff + '分, 終了差:' + endDiff + '分）'
+          });
+        }
+      }
+    }
+  }
+
+  // === C-3: スタッフ勤務時間チェック (SHIFT_VIOLATION) ===
+  // === C-4: スタッフ勤務日チェック (WORKDAY_VIOLATION) ===
+  // === C-5: スタッフ個別変更チェック (STAFF_DAY_OFF, STAFF_HALF_DAY_OFF, STAFF_RESTRICTED) ===
+  // === C-7: サービス時間長チェック (SVC_DURATION_MISMATCH) ===
+  actuals.forEach(function(actual) {
+    var staffId = actual.staffId;
+    if (!staffId) return;
+
+    var staffMaster = dataset.staffMasterMap ? dataset.staffMasterMap[staffId] : null;
+
+    // C-2: 性別制限チェック (GENDER_VIOLATION)
+    // needStaffに関係なく、sexLimitがある患者の全actualをチェック
+    var master = dataset.patientMasterMap ? dataset.patientMasterMap[pid] : null;
+    if (master && master.sexLimit && master.sexLimit !== '指定なし' && master.sexLimit !== '-'
+        && master.sexLimit !== '選択なし' && master.sexLimit !== '選択肢なし' && master.sexLimit !== 'なし') {
+      if (staffMaster && staffMaster.sex) {
+        // sexLimitが「女性のみ」等のパターンから性別を抽出
+        var requiredSex = master.sexLimit.replace('のみ', '').replace('スタッフ', '').trim();
+        if (staffMaster.sex !== requiredSex) {
+          status = AUDIT_STATUS.NG;
+          tags.push(AUDIT_TAGS.GENDER_VIOLATION);
+          checks.push({
+            type: 'genderViolation',
+            status: AUDIT_STATUS.NG,
+            staffId: staffId,
+            staffName: staffMaster.name || actual.staffName || '',
+            reason: '性別制限違反: ' + requiredSex + '希望だが' + staffMaster.sex + 'スタッフ（' + (staffMaster.name || staffId) + '）'
+          });
+        }
+      }
+    }
+
+    // C-3: シフト時間チェック
+    if (staffMaster && staffMaster.shiftStart !== null && staffMaster.shiftEnd !== null) {
+      if (actual.startMin !== null && actual.endMin !== null) {
+        if (actual.startMin < staffMaster.shiftStart - bufferMin ||
+            actual.endMin > staffMaster.shiftEnd + bufferMin) {
+          if (status !== AUDIT_STATUS.NG) {
+            status = AUDIT_STATUS.WARN;
+          }
+          tags.push(AUDIT_TAGS.SHIFT_VIOLATION);
+          checks.push({
+            type: 'shiftViolation',
+            status: AUDIT_STATUS.WARN,
+            staffId: staffId,
+            staffName: staffMaster.name || actual.staffName || '',
+            reason: 'シフト時間外: スタッフ(' + (staffMaster.name || staffId) + ')のシフト'
+              + audit_minToTimeStr_(staffMaster.shiftStart) + '-' + audit_minToTimeStr_(staffMaster.shiftEnd)
+              + ' に対し実績' + audit_minToTimeStr_(actual.startMin) + '-' + audit_minToTimeStr_(actual.endMin)
+          });
+        }
+      }
+    }
+
+    // C-4: 勤務日チェック
+    if (staffMaster && staffMaster.workDays && staffMaster.workDays.length > 0) {
+      // dateStrから曜日を取得
+      var dateObj = audit_parseDate_(dateStr);
+      if (dateObj) {
+        var youbi = audit_getYoubiEn_(dateObj);
+        if (staffMaster.workDays.indexOf(youbi) < 0) {
+          status = AUDIT_STATUS.NG;
+          tags.push(AUDIT_TAGS.WORKDAY_VIOLATION);
+          checks.push({
+            type: 'workdayViolation',
+            status: AUDIT_STATUS.NG,
+            staffId: staffId,
+            staffName: staffMaster.name || actual.staffName || '',
+            reason: '勤務日外: スタッフ(' + (staffMaster.name || staffId) + ')の勤務曜日は'
+              + staffMaster.workDays.join(',') + ' ですが' + youbi + 'に訪問しています'
+          });
+        }
+      }
+    }
+
+    // C-5: スタッフ個別変更チェック
+    var staffChangeMap = dataset.staffChangeMap || {};
+    var scKey = audit_makeSdKey_(staffId, dateStr);
+    var staffChanges = staffChangeMap[scKey] || [];
+    staffChanges.forEach(function(change) {
+      if (change.restrictionType === '休み') {
+        status = AUDIT_STATUS.NG;
+        tags.push(AUDIT_TAGS.STAFF_DAY_OFF);
+        checks.push({
+          type: 'staffDayOff',
+          status: AUDIT_STATUS.NG,
+          staffId: staffId,
+          staffName: staffMaster ? staffMaster.name : (actual.staffName || ''),
+          reason: 'スタッフ(' + (staffMaster ? staffMaster.name : staffId) + ')は休みですが訪問が割り当てられています'
+        });
+      } else if (change.restrictionType === '午前休') {
+        if (actual.startMin !== null && actual.startMin < 780) {
+          if (status !== AUDIT_STATUS.NG) {
+            status = AUDIT_STATUS.WARN;
+          }
+          tags.push(AUDIT_TAGS.STAFF_HALF_DAY_OFF);
+          checks.push({
+            type: 'staffHalfDayOff',
+            status: AUDIT_STATUS.WARN,
+            staffId: staffId,
+            staffName: staffMaster ? staffMaster.name : (actual.staffName || ''),
+            reason: 'スタッフ(' + (staffMaster ? staffMaster.name : staffId) + ')は午前休ですが午前中（'
+              + audit_minToTimeStr_(actual.startMin) + '）に訪問が割り当てられています'
+          });
+        }
+      } else if (change.restrictionType === '午後休') {
+        if (actual.endMin !== null && actual.endMin > 780) {
+          if (status !== AUDIT_STATUS.NG) {
+            status = AUDIT_STATUS.WARN;
+          }
+          tags.push(AUDIT_TAGS.STAFF_HALF_DAY_OFF);
+          checks.push({
+            type: 'staffHalfDayOff',
+            status: AUDIT_STATUS.WARN,
+            staffId: staffId,
+            staffName: staffMaster ? staffMaster.name : (actual.staffName || ''),
+            reason: 'スタッフ(' + (staffMaster ? staffMaster.name : staffId) + ')は午後休ですが午後（'
+              + audit_minToTimeStr_(actual.endMin) + '）まで訪問が割り当てられています'
+          });
+        }
+      } else if (change.restrictionType === '遅刻') {
+        if (actual.startMin !== null && change.startMin !== null && actual.startMin < change.startMin) {
+          if (status !== AUDIT_STATUS.NG) {
+            status = AUDIT_STATUS.WARN;
+          }
+          tags.push(AUDIT_TAGS.STAFF_RESTRICTED);
+          checks.push({
+            type: 'staffRestricted',
+            status: AUDIT_STATUS.WARN,
+            staffId: staffId,
+            staffName: staffMaster ? staffMaster.name : (actual.staffName || ''),
+            reason: 'スタッフ(' + (staffMaster ? staffMaster.name : staffId) + ')は遅刻（'
+              + audit_minToTimeStr_(change.startMin) + '出勤予定）ですが'
+              + audit_minToTimeStr_(actual.startMin) + 'に訪問が割り当てられています'
+          });
+        }
+      } else if (change.restrictionType === '早退') {
+        if (actual.endMin !== null && change.endMin !== null && actual.endMin > change.endMin) {
+          if (status !== AUDIT_STATUS.NG) {
+            status = AUDIT_STATUS.WARN;
+          }
+          tags.push(AUDIT_TAGS.STAFF_RESTRICTED);
+          checks.push({
+            type: 'staffRestricted',
+            status: AUDIT_STATUS.WARN,
+            staffId: staffId,
+            staffName: staffMaster ? staffMaster.name : (actual.staffName || ''),
+            reason: 'スタッフ(' + (staffMaster ? staffMaster.name : staffId) + ')は早退（'
+              + audit_minToTimeStr_(change.endMin) + '退勤予定）ですが'
+              + audit_minToTimeStr_(actual.endMin) + 'まで訪問が割り当てられています'
+          });
+        }
+      } else if (change.restrictionType === '時間指定') {
+        // 制限時間帯と実績が重複する場合
+        if (change.startMin !== null && change.endMin !== null &&
+            actual.startMin !== null && actual.endMin !== null) {
+          if (audit_isTimeOverlap_(actual.startMin, actual.endMin, change.startMin, change.endMin)) {
+            if (status !== AUDIT_STATUS.NG) {
+              status = AUDIT_STATUS.WARN;
+            }
+            tags.push(AUDIT_TAGS.STAFF_RESTRICTED);
+            checks.push({
+              type: 'staffRestricted',
+              status: AUDIT_STATUS.WARN,
+              staffId: staffId,
+              staffName: staffMaster ? staffMaster.name : (actual.staffName || ''),
+              reason: 'スタッフ(' + (staffMaster ? staffMaster.name : staffId) + ')の制限時間（'
+                + audit_minToTimeStr_(change.startMin) + '-' + audit_minToTimeStr_(change.endMin)
+                + '）と訪問時間（' + audit_minToTimeStr_(actual.startMin) + '-' + audit_minToTimeStr_(actual.endMin)
+                + '）が重複しています'
+            });
+          }
+        }
+      }
+    });
+
+    // C-7: サービス時間長チェック
+    if (actual.startMin !== null && actual.endMin !== null) {
+      var actualDuration = actual.endMin - actual.startMin;
+      // マッチした期待のsvcMinと比較
+      // usedActualIdxsから対応する期待を探す
+      activeExpects.forEach(function(exp, expIdx) {
+        // この actual がどの expected に対応するか探す
+        // usedActualIdxs は actualIdx -> true なので逆引きが必要
+        // 簡易的に: 各actualに最も近いexpectedのsvcMinを使う
+      });
+      // より確実な方法: 全activeExpectsのsvcMinを確認（needStaff考慮）
+      var patientMaster = dataset.patientMasterMap ? dataset.patientMasterMap[pid] : null;
+      var expectedSvcMin = patientMaster ? patientMaster.svcMin : null;
+      // 期待のsvcMinが明示的にある場合はそれを使用
+      if (activeExpects.length > 0 && activeExpects[0].svcMin) {
+        expectedSvcMin = activeExpects[0].svcMin;
+      }
+      if (expectedSvcMin !== null && expectedSvcMin > 0) {
+        if (Math.abs(actualDuration - expectedSvcMin) > bufferMin) {
+          if (status !== AUDIT_STATUS.NG) {
+            status = AUDIT_STATUS.WARN;
+          }
+          tags.push(AUDIT_TAGS.SVC_DURATION_MISMATCH);
+          checks.push({
+            type: 'svcDurationMismatch',
+            status: AUDIT_STATUS.WARN,
+            staffId: staffId,
+            reason: 'サービス時間不一致: 期待' + expectedSvcMin + '分に対し実績' + actualDuration + '分（差:'
+              + Math.abs(actualDuration - expectedSvcMin) + '分）'
+          });
+        }
+      }
+    }
+  });
+
   // タグの重複除去
   tags = tags.filter(function(tag, idx, arr) {
     return arr.indexOf(tag) === idx;
@@ -459,8 +726,9 @@ function audit_analyzeConditions_(dataset, pid, dateStr, youbi) {
       });
     }
 
-    // 性別制限
-    if (master.sexLimit && master.sexLimit !== '指定なし' && master.sexLimit !== '-') {
+    // 性別制限（「選択なし」「選択肢なし」「指定なし」「-」「なし」は制限なしとして除外）
+    if (master.sexLimit && master.sexLimit !== '指定なし' && master.sexLimit !== '-'
+        && master.sexLimit !== '選択なし' && master.sexLimit !== '選択肢なし' && master.sexLimit !== 'なし') {
       conditions.push({
         category: AUDIT_CONDITION_CATEGORY.STAFF,
         source: 'MASTER',
@@ -487,8 +755,9 @@ function audit_analyzeConditions_(dataset, pid, dateStr, youbi) {
       });
     }
 
-    // NGスタッフ
-    if (master.ngStaff) {
+    // NGスタッフ（「選択なし」等は制限なしとして除外）
+    if (master.ngStaff && master.ngStaff !== '選択なし' && master.ngStaff !== '選択肢なし'
+        && master.ngStaff !== '指定なし' && master.ngStaff !== '-' && master.ngStaff !== 'なし') {
       conditions.push({
         category: AUDIT_CONDITION_CATEGORY.STAFF,
         source: 'MASTER',
@@ -500,8 +769,9 @@ function audit_analyzeConditions_(dataset, pid, dateStr, youbi) {
       });
     }
 
-    // 継続希望
-    if (master.contPref && master.contPref !== '指定なし' && master.contPref !== '-') {
+    // 継続希望（「選択なし」等は制限なしとして除外）
+    if (master.contPref && master.contPref !== '指定なし' && master.contPref !== '-'
+        && master.contPref !== '選択なし' && master.contPref !== '選択肢なし' && master.contPref !== 'なし') {
       conditions.push({
         category: AUDIT_CONDITION_CATEGORY.STAFF,
         source: 'MASTER',

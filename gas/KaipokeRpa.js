@@ -522,7 +522,7 @@ function startApply(month, weekStart) {
   }
 
   var weekRange = getWeekRange_(weekStart);
-  console.log('[startApply] month=' + targetMonth + ' weekStart=' + weekStart + ' corrections=' + corrections.length + '件');
+  console.log('[runApply] month=' + targetMonth + ' weekStart=' + weekStart + ' corrections=' + corrections.length + '件');
 
   // correction_dataを直接送信
   var payload = {
@@ -1913,11 +1913,9 @@ function finalizePostApplyVerification(exportResultJson, month) {
 }
 
 /**
- * [後方互換] 適用後検証メインフロー（同期版）
- * 注意: GAS実行時間制限に達する可能性があります。
- * 新UIでは startExportForVerification + pollExportResult + finalizePostApplyVerification を使用。
- * @param {string} month - 対象月（YYYY-MM形式）
- * @returns {Object} { success, message, verifyResults }
+ * [後方互換] 適用後検証メインフロー（ブロッキング版）
+ * 新しいコードでは startExportForVerification → pollExportResult → finalizePostApplyVerification を使用
+ * @deprecated クライアントサイドポーリング版を使用してください
  */
 function runPostApplyVerification(month) {
   var targetMonth = month || getCurrentMonth();

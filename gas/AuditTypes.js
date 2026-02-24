@@ -69,7 +69,21 @@ const AUDIT_TAGS = {
   OUT_OF_WINDOW: 'OUT_OF_WINDOW',
   EVENT_CONFLICT: 'EVENT_CONFLICT',
   CANCELLED_BUT_VISITED: 'CANCELLED_BUT_VISITED',
-  TIME_PARSE_ERROR: 'TIME_PARSE_ERROR'
+  TIME_PARSE_ERROR: 'TIME_PARSE_ERROR',
+  // 2人訪問系
+  TWO_STAFF_TIME_MISMATCH: '2人訪問時間ズレ',
+  TWO_STAFF_MISSING: '2人訪問人数不足',
+  TWO_STAFF_DUPLICATE: '2人訪問スタッフ重複',
+  // スタッフ制約系
+  GENDER_VIOLATION: '性別制限違反',
+  SHIFT_VIOLATION: 'シフト時間外',
+  STAFF_DAY_OFF: 'スタッフ休み',
+  STAFF_HALF_DAY_OFF: 'スタッフ半休中',
+  STAFF_RESTRICTED: 'スタッフ時間制限',
+  WORKDAY_VIOLATION: '勤務日外',
+  // サービス品質系
+  WEEKLY_COUNT_MISMATCH: '週回数不一致',
+  SVC_DURATION_MISMATCH: 'サービス時間不一致'
 };
 
 // ============================================================

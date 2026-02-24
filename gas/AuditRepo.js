@@ -69,6 +69,10 @@ function audit_loadWeekDataset_(weekStartStr) {
     return audit_loadActualPlans_(ss, tz, weekStartStrNorm, weekEndStr);
   }, '割当結果', warnings);
 
+  var staffChangeMap = audit_safeLoad_(function() {
+    return audit_loadStaffChanges_(ss, tz, weekStartStrNorm, weekEndStr);
+  }, 'スタッフ個別変更リクエスト', warnings);
+
   return {
     weekStartStr: weekStartStrNorm,
     weekEndStr: weekEndStr,
@@ -80,6 +84,7 @@ function audit_loadWeekDataset_(weekStartStr) {
     eventMap: eventMap,
     specialWeekMap: specialWeekMap,
     actualPlanMap: actualPlanMap,
+    staffChangeMap: staffChangeMap,
     warnings: warnings,
     loadedAt: new Date().toISOString()
   };
@@ -190,7 +195,12 @@ function audit_loadStaffMaster_(ss, tz) {
 
   var idx = {
     staffId: audit_findHeaderIdx_(header, 'staff_id'),
-    name: audit_findHeaderIdx_(header, 'スタッフ名')
+    name: audit_findHeaderIdx_(header, 'スタッフ名'),
+    sex: audit_findHeaderIdx_(header, '性別'),
+    shiftStart: audit_findHeaderIdx_(header, 'シフト開始'),
+    shiftEnd: audit_findHeaderIdx_(header, 'シフト終了'),
+    workDays: audit_findHeaderIdx_(header, '勤務曜日'),
+    maxVisits: audit_findHeaderIdx_(header, '最大訪問件数/日')
   };
 
   var map = {};
@@ -200,7 +210,12 @@ function audit_loadStaffMaster_(ss, tz) {
 
     map[staffId] = {
       staffId: staffId,
-      name: idx.name >= 0 ? String(row[idx.name] || '') : ''
+      name: idx.name >= 0 ? String(row[idx.name] || '') : '',
+      sex: idx.sex >= 0 ? String(row[idx.sex] || '') : '',
+      shiftStart: idx.shiftStart >= 0 ? audit_parseTimeToMin_(row[idx.shiftStart]) : null,
+      shiftEnd: idx.shiftEnd >= 0 ? audit_parseTimeToMin_(row[idx.shiftEnd]) : null,
+      workDays: idx.workDays >= 0 ? audit_parseDays_(row[idx.workDays]) : [],
+      maxVisits: idx.maxVisits >= 0 ? audit_toNumber_(row[idx.maxVisits], 0) : 0
     };
   });
 
@@ -545,6 +560,8 @@ function audit_loadActualPlans_(ss, tz, weekStartStr, weekEndStr) {
     var visitId = idx.visitId >= 0 ? String(row[idx.visitId] || '').trim() : '';
     // EV_ で始まるものはイベント行なのでスキップ
     if (visitId.indexOf('EV_') === 0) { debugCounts.evSkipped++; return; }
+    // 同行展開で生成されたトレイニー行（V001_T_S006等）は監査対象外
+    if (visitId.indexOf('_T_') >= 0) { debugCounts.evSkipped++; return; }
 
     var pid = idx.pid >= 0 ? String(row[idx.pid] || '').trim() : '';
     if (!pid) { debugCounts.noPid++; return; }
@@ -583,6 +600,64 @@ function audit_loadActualPlans_(ss, tz, weekStartStr, weekEndStr) {
 
   console.log('audit_loadActualPlans_: フィルタ結果', JSON.stringify(debugCounts));
   console.log('audit_loadActualPlans_: map keys =', Object.keys(map).length);
+  return map;
+}
+
+// ============================================================
+// スタッフ個別変更リクエスト読み込み
+// ============================================================
+
+/**
+ * スタッフ個別変更リクエストをロードしてMap化（週範囲内のみ）
+ * @param {Spreadsheet} ss
+ * @param {string} tz
+ * @param {string} weekStartStr
+ * @param {string} weekEndStr
+ * @return {Object} staffId|dateStr -> [{ staffId, dateStr, restrictionType, startMin, endMin }]
+ */
+function audit_loadStaffChanges_(ss, tz, weekStartStr, weekEndStr) {
+  var sheet = ss.getSheetByName(SHEETS.STAFF_CHANGE_REQUEST);
+  if (!sheet || sheet.getLastRow() <= 1) return {};
+
+  var values = sheet.getDataRange().getValues();
+  var header = values[0].map(function(h) { return String(h || '').trim(); });
+  var data = values.slice(1);
+
+  var idx = {
+    staffChangeId: audit_findHeaderIdx_(header, 'staff_change_id'),
+    staffId: audit_findHeaderIdx_(header, 'staff_id'),
+    date: audit_findHeaderIdx_(header, '日付'),
+    restrictionType: audit_findHeaderIdx_(header, '制限タイプ'),
+    startTime: audit_findHeaderIdx_(header, '開始時刻'),
+    endTime: audit_findHeaderIdx_(header, '終了時刻')
+  };
+
+  var map = {};
+  data.forEach(function(row) {
+    var staffId = idx.staffId >= 0 ? String(row[idx.staffId] || '').trim() : '';
+    if (!staffId) return;
+
+    var dateObj = idx.date >= 0 ? audit_parseDate_(row[idx.date]) : null;
+    if (!dateObj) return;
+
+    var dateStr = audit_formatDateStr_(dateObj, tz);
+    if (dateStr < weekStartStr || dateStr > weekEndStr) return;
+
+    var restrictionType = idx.restrictionType >= 0 ? String(row[idx.restrictionType] || '').trim() : '';
+    if (!restrictionType) return;
+
+    var key = audit_makeSdKey_(staffId, dateStr);
+    if (!map[key]) map[key] = [];
+
+    map[key].push({
+      staffId: staffId,
+      dateStr: dateStr,
+      restrictionType: restrictionType,
+      startMin: idx.startTime >= 0 ? audit_parseTimeToMin_(row[idx.startTime]) : null,
+      endMin: idx.endTime >= 0 ? audit_parseTimeToMin_(row[idx.endTime]) : null
+    });
+  });
+
   return map;
 }
 
@@ -657,6 +732,7 @@ function audit_saveToCache_(cache, cacheKey, dataset) {
         eventMap: dataset.eventMap,
         specialWeekMap: dataset.specialWeekMap,
         actualPlanMap: dataset.actualPlanMap,
+        staffChangeMap: dataset.staffChangeMap,
         loadedAt: dataset.loadedAt
         // expectedByPidDate は除外（再生成可能なため）
       };

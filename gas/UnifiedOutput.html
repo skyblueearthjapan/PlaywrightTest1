@@ -441,6 +441,72 @@
     .toast.error { background: var(--color-error); color: white; }
 
     /* ============================================================
+       週ビュー 監査オーバーレイ
+       ============================================================ */
+    .audit-overlay-badge {
+      display: inline-flex; gap: 2px; font-size: 10px; font-weight: 600;
+      position: absolute; top: 2px; right: 2px;
+      background: rgba(255,255,255,0.9); border-radius: 4px; padding: 1px 4px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.15);
+    }
+    .audit-overlay-badge .ok { color: #2e7d32; }
+    .audit-overlay-badge .warn { color: #f57f17; }
+    .audit-overlay-badge .ng { color: #c62828; }
+    .audit-overlay-badge.has-ng { border: 1px solid #c62828; }
+    .audit-overlay-badge.has-warn { border: 1px solid #f57f17; }
+    .audit-overlay-badge.has-ok { border: 1px solid #c8e6c9; }
+
+    .week-table td.audit-cell { cursor: pointer; }
+    .week-table td.audit-cell:hover .audit-overlay-badge { transform: scale(1.1); }
+    .week-table td.audit-cell.audit-ng { border-left: 3px solid #c62828 !important; }
+    .week-table td.audit-cell.audit-warn { border-left: 3px solid #f57f17 !important; }
+    .week-table td.audit-cell:first-child.audit-ng,
+    .week-table td.audit-cell:first-child.audit-warn { border-left: 3px solid var(--color-green) !important; }
+
+    /* 週ビュー 監査ポップアップ */
+    .audit-week-popup-overlay {
+      position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0,0,0,0.2); z-index: 1000;
+    }
+    .audit-week-popup {
+      position: fixed; z-index: 1001;
+      background: #fff; border-radius: 8px; box-shadow: 0 4px 20px rgba(0,0,0,0.25);
+      min-width: 320px; max-width: 420px; max-height: 400px;
+      display: flex; flex-direction: column; overflow: hidden;
+    }
+    .audit-week-popup-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 10px 14px; background: var(--color-green); color: #fff; font-weight: 600; font-size: 13px;
+    }
+    .audit-week-popup-header .close-btn {
+      background: none; border: none; color: #fff; font-size: 18px; cursor: pointer; line-height: 1;
+    }
+    .audit-week-popup-body {
+      padding: 10px 14px; overflow-y: auto; flex: 1; font-size: 12px;
+    }
+    .audit-week-popup-item {
+      display: flex; align-items: center; gap: 8px; padding: 6px 0;
+      border-bottom: 1px solid #f0f0f0; cursor: pointer;
+    }
+    .audit-week-popup-item:hover { background: #f5f5f5; }
+    .audit-week-popup-item .status { font-weight: 700; font-size: 14px; }
+    .audit-week-popup-item .status.ok { color: #2e7d32; }
+    .audit-week-popup-item .status.warn { color: #f57f17; }
+    .audit-week-popup-item .status.ng { color: #c62828; }
+    .audit-week-popup-item .name { flex: 1; font-weight: 500; }
+    .audit-week-popup-item .time { color: #666; font-size: 11px; }
+    .audit-week-popup-item .tags { font-size: 10px; margin-top: 2px; }
+    .audit-week-popup-tag { display: inline-block; padding: 1px 5px; border-radius: 3px; font-size: 10px; margin: 1px 2px; }
+    .audit-week-popup-tag.ok { background: #e8f5e9; color: #2e7d32; }
+    .audit-week-popup-tag.warn { background: #fff8e1; color: #f57f17; }
+    .audit-week-popup-tag.ng { background: #ffebee; color: #c62828; }
+
+    .audit-unassigned-banner {
+      background: #ffebee; color: #c62828; padding: 6px 12px; font-size: 12px; font-weight: 500;
+      border-radius: 4px; margin-bottom: 8px; display: flex; align-items: center; gap: 6px;
+    }
+
+    /* ============================================================
        監査（合否判定）ビュー
        ============================================================ */
     .audit-controls {
@@ -599,6 +665,54 @@
     .audit-tag.ok { background: var(--color-green-light); border-color: var(--color-green); color: var(--color-green-dark); }
     .audit-tag.warn { background: var(--color-orange-light); border-color: var(--color-orange); color: var(--color-orange-dark); }
     .audit-tag.ng { background: rgba(232, 139, 139, 0.3); border-color: var(--color-error); color: var(--color-error); }
+
+    /* ============================================================
+       監査チェックリスト（セル詳細・ポップアップ共通）
+       ============================================================ */
+    .audit-check-list {
+      display: flex; flex-direction: column; gap: 2px;
+      margin: 4px 0 8px 0; padding: 0;
+    }
+    .audit-check-list-item {
+      display: flex; align-items: center; gap: 6px;
+      padding: 3px 8px; border-radius: 4px; font-size: 11px;
+    }
+    .audit-check-list-item .check-icon {
+      font-weight: 700; width: 16px; text-align: center; flex-shrink: 0;
+    }
+    .audit-check-list-item .check-label {
+      font-weight: 500; min-width: 60px; flex-shrink: 0;
+    }
+    .audit-check-list-item .check-detail {
+      color: var(--color-text-light); flex: 1; font-size: 10px;
+    }
+    .audit-check-ok {
+      background: rgba(183, 211, 138, 0.2); border-left: 2px solid var(--color-green);
+    }
+    .audit-check-ok .check-icon { color: var(--color-green-dark); }
+    .audit-check-ng {
+      background: rgba(232, 139, 139, 0.2); border-left: 2px solid var(--color-error);
+    }
+    .audit-check-ng .check-icon { color: var(--color-error); }
+    .audit-check-warn {
+      background: rgba(246, 178, 107, 0.2); border-left: 2px solid var(--color-orange);
+    }
+    .audit-check-warn .check-icon { color: var(--color-orange-dark); }
+    .audit-check-na {
+      background: rgba(128, 128, 128, 0.1); border-left: 2px solid #ccc;
+    }
+    .audit-check-na .check-icon { color: #999; }
+    .audit-check-na .check-label { color: #999; }
+    .audit-check-na .check-detail { color: #aaa; }
+
+    /* 日本語タグバッジ */
+    .audit-tag-ja {
+      display: inline-block; padding: 2px 6px; border-radius: 4px;
+      font-size: 10px; font-weight: 600; margin: 1px 2px; white-space: nowrap;
+    }
+    .audit-tag-ja.ok { background: var(--color-green-light); color: var(--color-green-dark); }
+    .audit-tag-ja.warn { background: var(--color-orange-light); color: var(--color-orange-dark); }
+    .audit-tag-ja.ng { background: rgba(232, 139, 139, 0.3); color: var(--color-error); }
 
     /* 条件分析UI（新機能） */
     .audit-collapsible summary { cursor: pointer; user-select: none; }
@@ -1256,6 +1370,16 @@
     </div>
   </div>
 
+  <!-- 週ビュー監査ポップアップ -->
+  <div id="auditWeekPopupOverlay" class="audit-week-popup-overlay" style="display:none;" onclick="closeWeekViewAuditPopup()"></div>
+  <div id="auditWeekPopup" class="audit-week-popup" style="display:none;">
+    <div class="audit-week-popup-header">
+      <span id="auditWeekPopupTitle">セル詳細</span>
+      <button class="close-btn" onclick="closeWeekViewAuditPopup()">×</button>
+    </div>
+    <div class="audit-week-popup-body" id="auditWeekPopupBody"></div>
+  </div>
+
   <!-- トースト -->
   <div class="toast" id="toast"></div>
 
@@ -1525,7 +1649,8 @@
 
       setStatus('success', '週ビュー（' + data.rowCount + '名）');
 
-      var html = '<div class="table-container"><table class="week-table">';
+      var html = '<div id="auditUnassignedBanner" style="display:none;"></div>';
+      html += '<div class="table-container"><table class="week-table" id="weekViewTable">';
 
       // ヘッダー
       html += '<thead><tr>';
@@ -1540,13 +1665,286 @@
         html += '<tr>';
         row.forEach(function(cell, idx) {
           var content = cell ? '<div class="cell-content">' + escapeHtml(cell) + '</div>' : '-';
-          html += '<td>' + content + '</td>';
+          html += '<td style="position:relative;">' + content + '</td>';
         });
         html += '</tr>';
       });
       html += '</tbody></table></div>';
 
       document.getElementById('mainContent').innerHTML = html;
+
+      // 週ビューシートの週開始日を特定して保存
+      var wsStr = data.weekStartStr || '';
+      if (!wsStr && data.headerRow && data.headerRow.length >= 2) {
+        // I1メタデータがない場合: ヘッダー "MM/dd(曜)" から年を推定
+        wsStr = parseWeekStartFromHeader(data.headerRow);
+      }
+      weekViewAuditWeekStart = wsStr;
+      console.log('renderWeekView: weekViewAuditWeekStart =', wsStr);
+
+      // 自動で監査情報をオーバーレイ
+      autoLoadAuditOverlay();
+    }
+
+    // ============================================================
+    // 週ビュー 監査オーバーレイ（自動）
+    // ============================================================
+    var weekViewAuditLoading = false;
+    var weekViewAuditWeekStart = ''; // 週ビューシートの実際の週開始日 (yyyy/MM/dd)
+
+    /**
+     * ヘッダー "MM/dd(曜)" から週開始日を推定する（I1メタデータがない場合のフォールバック）
+     */
+    function parseWeekStartFromHeader(headerRow) {
+      // headerRow[1] = "05/04(月)" 等
+      var firstCol = headerRow[1] || '';
+      var m = firstCol.match(/(\d{1,2})\/(\d{1,2})/);
+      if (!m) return '';
+      var month = parseInt(m[1], 10);
+      var day = parseInt(m[2], 10);
+      // 年の推定: 現在年で試し、曜日が月曜であるか検証
+      var now = new Date();
+      var candidates = [now.getFullYear(), now.getFullYear() + 1, now.getFullYear() - 1];
+      for (var i = 0; i < candidates.length; i++) {
+        var d = new Date(candidates[i], month - 1, day);
+        if (d.getDay() === 1) { // 月曜
+          var yy = d.getFullYear();
+          var mm = ('0' + (d.getMonth() + 1)).slice(-2);
+          var dd = ('0' + d.getDate()).slice(-2);
+          return yy + '/' + mm + '/' + dd;
+        }
+      }
+      // 曜日不一致の場合でもベストエフォートで返す
+      var yy = now.getFullYear();
+      var mm = ('0' + month).slice(-2);
+      var dd = ('0' + day).slice(-2);
+      return yy + '/' + mm + '/' + dd;
+    }
+
+    function autoLoadAuditOverlay() {
+      if (weekViewAuditLoading) return;
+      var weekStartStr = weekViewAuditWeekStart;
+      if (!weekStartStr) return;
+
+      weekViewAuditLoading = true;
+      setStatus('loading', '週ビュー＋監査情報を読み込み中...');
+
+      google.script.run
+        .withSuccessHandler(function(result) {
+          weekViewAuditLoading = false;
+          if (result && !result.error) {
+            overlayAuditOnWeekView(result);
+            var c = countAuditIssues(result);
+            var summary = '○' + c.ok;
+            if (c.warn > 0) summary += ' △' + c.warn;
+            if (c.ng > 0) summary += ' ×' + c.ng;
+            setStatus('success', '週ビュー（監査: ' + summary + '）');
+          } else {
+            setStatus('success', '週ビュー（監査データ取得失敗）');
+          }
+        })
+        .withFailureHandler(function(e) {
+          weekViewAuditLoading = false;
+          console.warn('autoLoadAuditOverlay error:', e);
+          setStatus('success', '週ビュー（監査エラー）');
+        })
+        .audit_getWeekSummary(weekStartStr);
+    }
+
+    function countAuditIssues(data) {
+      var ng = 0, warn = 0, ok = 0;
+      var cellSummary = data.cellSummary || {};
+      for (var key in cellSummary) {
+        var items = cellSummary[key];
+        items.forEach(function(item) {
+          if (item.status === 'NG') ng++;
+          else if (item.status === 'WARN') warn++;
+          else ok++;
+        });
+      }
+      return { ng: ng, warn: warn, ok: ok };
+    }
+
+    function matchStaffNameToId(displayName, staffList) {
+      var normalized = displayName.replace(/[\s　]+/g, '').trim();
+      for (var i = 0; i < staffList.length; i++) {
+        var staff = staffList[i];
+        var sName = staff.name.replace(/[\s　]+/g, '').trim();
+        if (sName === normalized) return staff.staffId;
+      }
+      // フォールバック: 部分一致
+      for (var i = 0; i < staffList.length; i++) {
+        var staff = staffList[i];
+        var sName = staff.name.replace(/[\s　]+/g, '').trim();
+        if (normalized.indexOf(sName) >= 0 || sName.indexOf(normalized) >= 0) return staff.staffId;
+      }
+      return null;
+    }
+
+    function overlayAuditOnWeekView(auditData) {
+      var weekTable = document.getElementById('weekViewTable');
+      if (!weekTable) return;
+
+      var tbody = weekTable.querySelector('tbody');
+      if (!tbody) return;
+
+      var staffList = auditData.staffList || [];
+      var cellSummary = auditData.cellSummary || {};
+      var weekDates = auditData.weekDates || [];
+
+      // 未割当チェック
+      var unassignedTotal = 0;
+      weekDates.forEach(function(wd) {
+        var uKey = '_UNASSIGNED_|' + wd.dateStr;
+        var uItems = cellSummary[uKey] || [];
+        unassignedTotal += uItems.length;
+      });
+      var banner = document.getElementById('auditUnassignedBanner');
+      if (banner && unassignedTotal > 0) {
+        banner.className = 'audit-unassigned-banner';
+        banner.innerHTML = '× 未割当の訪問が ' + unassignedTotal + ' 件あります';
+        banner.style.display = 'flex';
+      }
+
+      var rows = tbody.querySelectorAll('tr');
+      rows.forEach(function(tr) {
+        var cells = tr.querySelectorAll('td');
+        if (cells.length < 2) return;
+
+        var staffName = cells[0].textContent.trim();
+        var staffId = matchStaffNameToId(staffName, staffList);
+        if (!staffId) return;
+
+        for (var dayIdx = 0; dayIdx < weekDates.length && dayIdx < cells.length - 1; dayIdx++) {
+          var cell = cells[dayIdx + 1];
+          var dateStr = weekDates[dayIdx].dateStr;
+          var sdKey = staffId + '|' + dateStr;
+          var items = cellSummary[sdKey] || [];
+
+          if (items.length === 0) continue;
+
+          var okCount = 0, warnCount = 0, ngCount = 0;
+          items.forEach(function(item) {
+            if (item.status === 'OK') okCount++;
+            else if (item.status === 'WARN') warnCount++;
+            else if (item.status === 'NG') ngCount++;
+          });
+
+          // セルにクラス追加
+          cell.classList.add('audit-cell');
+          if (ngCount > 0) cell.classList.add('audit-ng');
+          else if (warnCount > 0) cell.classList.add('audit-warn');
+
+          // バッジ追加
+          var badge = document.createElement('div');
+          badge.className = 'audit-overlay-badge';
+          if (ngCount > 0) badge.classList.add('has-ng');
+          else if (warnCount > 0) badge.classList.add('has-warn');
+          else badge.classList.add('has-ok');
+
+          var badgeHtml = '';
+          if (okCount > 0) badgeHtml += '<span class="ok">○' + okCount + '</span>';
+          if (warnCount > 0) badgeHtml += '<span class="warn">△' + warnCount + '</span>';
+          if (ngCount > 0) badgeHtml += '<span class="ng">×' + ngCount + '</span>';
+          badge.innerHTML = badgeHtml;
+          cell.appendChild(badge);
+
+          // クリックで詳細ポップアップ
+          cell.setAttribute('data-staff-id', staffId);
+          cell.setAttribute('data-date-str', dateStr);
+          cell.setAttribute('data-staff-name', staffName);
+          cell.onclick = function(e) {
+            var sid = this.getAttribute('data-staff-id');
+            var ds = this.getAttribute('data-date-str');
+            var sn = this.getAttribute('data-staff-name');
+            showWeekViewAuditPopup(sid, ds, sn, e);
+          };
+        }
+      });
+    }
+
+    function showWeekViewAuditPopup(staffId, dateStr, staffName, evt) {
+      var overlay = document.getElementById('auditWeekPopupOverlay');
+      var popup = document.getElementById('auditWeekPopup');
+      var title = document.getElementById('auditWeekPopupTitle');
+      var body = document.getElementById('auditWeekPopupBody');
+
+      title.textContent = staffName + ' - ' + dateStr.substring(5);
+      body.innerHTML = '<div style="text-align:center;color:#999;padding:20px;">読み込み中...</div>';
+
+      // ポップアップ位置（クリック位置の近く）
+      var x = evt.clientX, y = evt.clientY;
+      var pw = 360, ph = 300;
+      if (x + pw > window.innerWidth) x = window.innerWidth - pw - 10;
+      if (y + ph > window.innerHeight) y = window.innerHeight - ph - 10;
+      if (x < 10) x = 10;
+      if (y < 10) y = 10;
+      popup.style.left = x + 'px';
+      popup.style.top = y + 'px';
+
+      overlay.style.display = 'block';
+      popup.style.display = 'flex';
+
+      // 週ビューシートの週開始日を使用
+      var weekStartStr = weekViewAuditWeekStart;
+      if (!weekStartStr) { closeWeekViewAuditPopup(); return; }
+
+      google.script.run
+        .withSuccessHandler(function(data) {
+          renderWeekViewAuditPopup(data);
+        })
+        .withFailureHandler(function(e) {
+          body.innerHTML = '<div style="color:#c62828;padding:10px;">エラー: ' + (e.message || String(e)) + '</div>';
+        })
+        .audit_getCellDetail(staffId, dateStr, weekStartStr);
+    }
+
+    function renderWeekViewAuditPopup(data) {
+      var body = document.getElementById('auditWeekPopupBody');
+      var items = data.items || [];
+      if (items.length === 0) {
+        body.innerHTML = '<div style="text-align:center;color:#999;">この日の訪問はありません</div>';
+        return;
+      }
+
+      var html = '';
+      items.forEach(function(item) {
+        var statusClass = item.status.toLowerCase();
+        var statusIcon = item.status === 'OK' ? '○' : (item.status === 'WARN' ? '△' : '×');
+        html += '<div class="audit-week-popup-item" onclick="popupShowPatientDetail(\'' + item.pid + '\')">';
+        html += '<span class="status ' + statusClass + '">' + statusIcon + '</span>';
+        html += '<span class="name">' + escapeHtml(item.pname || item.pid) + '</span>';
+        html += '<span class="time">' + (item.startStr || '') + '-' + (item.endStr || '') + '</span>';
+        html += '</div>';
+        // 日本語タグバッジ表示
+        if (item.tags && item.tags.length > 0) {
+          html += '<div style="margin:-4px 0 2px 28px;">';
+          html += renderTagBadges(item.tags);
+          html += '</div>';
+        }
+        // 条件チェックリスト表示
+        if (item.checks && item.checks.length > 0) {
+          html += '<div style="margin:0 0 6px 28px;">';
+          html += renderCheckList(item.checks);
+          html += '</div>';
+        }
+      });
+      body.innerHTML = html;
+    }
+
+    function popupShowPatientDetail(pid) {
+      closeWeekViewAuditPopup();
+      // auditState.weekStartStr を同期（showAuditPatientDetailが参照するため）
+      if (weekViewAuditWeekStart) {
+        auditState.weekStartStr = weekViewAuditWeekStart;
+      }
+      // 監査モードの患者詳細モーダルを再利用
+      showAuditPatientDetail(pid);
+    }
+
+    function closeWeekViewAuditPopup() {
+      document.getElementById('auditWeekPopupOverlay').style.display = 'none';
+      document.getElementById('auditWeekPopup').style.display = 'none';
     }
 
     // ============================================================
@@ -1586,8 +1984,17 @@
       }
       setStatus('success', statusMsg);
 
+      var isAssignNg = data.sheetName === '割当不可';
+
       var tableClass = isRouteSummary ? 'sheet-table route-table-clickable' : 'sheet-table';
-      var html = '<div class="table-container"><table class="' + tableClass + '">';
+      var html = '';
+      if (isAssignNg) {
+        html += '<div style="padding:6px 12px;background:#fff3e0;border-bottom:1px solid #ffe0b2;display:flex;align-items:center;gap:12px;">';
+        html += '<span style="color:#e65100;font-size:13px;">割当結果と不一致がある場合:</span>';
+        html += '<button class="action-btn secondary" style="font-size:12px;padding:4px 12px;" onclick="rebuildNgSheet(this)">割当不可を再構築</button>';
+        html += '</div>';
+      }
+      html += '<div class="table-container"><table class="' + tableClass + '">';
 
       html += '<thead><tr>';
       data.header.forEach(function(h) {
@@ -1756,7 +2163,25 @@
           if (result.ok) {
             showToast(result.message, 'success');
             if (jobKey === 'updateWeekView' || jobKey === 'assignResult') {
-              loadWeekView();
+              // 監査キャッシュをクリアしてから週ビューを再読込
+              // weekViewAuditWeekStart (yyyy/MM/dd) を優先使用（キャッシュキーとフォーマット一致のため）
+              var cacheWeekStart = weekViewAuditWeekStart || (weekStart ? weekStart.replace(/-/g, '/') : '');
+              if (cacheWeekStart) {
+                // 監査ローディングフラグをリセット（再取得を許可）
+                weekViewAuditLoading = false;
+                google.script.run
+                  .withSuccessHandler(function() {
+                    console.log('[runJob] 監査キャッシュクリア完了、週ビュー再読込');
+                    loadWeekView();
+                  })
+                  .withFailureHandler(function(e) {
+                    console.warn('[runJob] 監査キャッシュクリア失敗（無視）:', e);
+                    loadWeekView();
+                  })
+                  .audit_clearCache(cacheWeekStart);
+              } else {
+                loadWeekView();
+              }
             }
           } else {
             showToast('エラー: ' + result.message, 'error');
@@ -1770,6 +2195,28 @@
           loadLogs();
         })
         .runJob(jobKey, weekStart);
+    }
+
+    function rebuildNgSheet(btn) {
+      btn.disabled = true;
+      btn.textContent = '再構築中...';
+      google.script.run
+        .withSuccessHandler(function(result) {
+          btn.disabled = false;
+          btn.textContent = '割当不可を再構築';
+          if (result.ok) {
+            showToast(result.message, 'success');
+            loadSheetTable('割当不可');
+          } else {
+            showToast('エラー: ' + result.message, 'error');
+          }
+        })
+        .withFailureHandler(function(e) {
+          btn.disabled = false;
+          btn.textContent = '割当不可を再構築';
+          showToast('エラー: ' + e.message, 'error');
+        })
+        .runJob('rebuildNgSheet', '');
     }
 
     // ============================================================
@@ -1865,13 +2312,18 @@
     };
 
     function showAuditView() {
+      // 週ビューの週開始日を優先的に使用（yyyy/MM/dd → YYYY-MM-DD変換）
+      var weekViewISO = '';
+      if (weekViewAuditWeekStart) {
+        weekViewISO = weekViewAuditWeekStart.replace(/\//g, '-');
+      }
+
       // 既に監査モードでデータがある場合: 対象週が変わっていなければスキップ
       if (isAuditMode && auditState.data) {
-        var selectedWeekCheck = getSelectedWeekStart();
         var currentAuditDate = document.getElementById('auditWeekStart').value;
-        if (selectedWeekCheck && selectedWeekCheck !== currentAuditDate) {
-          // 対象週が変わった → 再同期して再読み込み
-          document.getElementById('auditWeekStart').value = selectedWeekCheck;
+        var targetDate = weekViewISO || getSelectedWeekStart() || currentAuditDate;
+        if (targetDate && targetDate !== currentAuditDate) {
+          document.getElementById('auditWeekStart').value = targetDate;
           auditState.data = null;
           auditRetryCount = 0;
           loadAuditData();
@@ -1899,19 +2351,23 @@
       // ステータスバー更新
       setStatus('', '監査ビュー');
 
-      // 週開始日を対象週セレクタに同期（未選択時は今週の月曜）
+      // 週開始日: 週ビューシートの日付を優先、なければ右パネルセレクタ、なければ今週
       var dateInput = document.getElementById('auditWeekStart');
-      var selectedWeek = getSelectedWeekStart();
-      if (selectedWeek) {
-        // jobTargetWeek の値 (YYYY-MM-DD) をそのまま設定
-        dateInput.value = selectedWeek;
-      } else if (!dateInput.value) {
-        var today = new Date();
-        var day = today.getDay();
-        var diff = (day === 0) ? -6 : 1 - day;
-        var monday = new Date(today);
-        monday.setDate(today.getDate() + diff);
-        dateInput.value = formatDateISO(monday);
+      if (weekViewISO) {
+        dateInput.value = weekViewISO;
+        console.log('showAuditView: 週ビューの週開始日を使用 =', weekViewISO);
+      } else {
+        var selectedWeek = getSelectedWeekStart();
+        if (selectedWeek) {
+          dateInput.value = selectedWeek;
+        } else if (!dateInput.value) {
+          var today = new Date();
+          var day = today.getDay();
+          var diff = (day === 0) ? -6 : 1 - day;
+          var monday = new Date(today);
+          monday.setDate(today.getDate() + diff);
+          dateInput.value = formatDateISO(monday);
+        }
       }
 
       // リトライカウントをリセット
@@ -1938,7 +2394,7 @@
     var auditRetryCount = 0;
     var AUDIT_MAX_RETRY = 3;
 
-    function loadAuditData() {
+    function loadAuditData(forceRefresh) {
       // 多重呼び出し防止
       if (auditLoading) {
         console.log('loadAuditData: 既にロード中のためスキップ');
@@ -1955,6 +2411,26 @@
       var parts = dateVal.split('-');
       var weekStartStr = parts[0] + '/' + parts[1] + '/' + parts[2];
       auditState.weekStartStr = weekStartStr;
+
+      // forceRefresh が true の場合はキャッシュクリアしてからデータ取得
+      if (forceRefresh) {
+        auditLoading = true;
+        setStatus('loading', 'キャッシュクリア＆監査データ読み込み中...');
+        console.log('loadAuditData: forceRefresh=true, キャッシュクリア開始', weekStartStr);
+        google.script.run
+          .withSuccessHandler(function() {
+            console.log('loadAuditData: キャッシュクリア完了、データ取得開始');
+            auditLoading = false;
+            loadAuditData(false); // キャッシュクリア後に通常取得
+          })
+          .withFailureHandler(function(e) {
+            console.warn('loadAuditData: キャッシュクリア失敗、データ取得試行', e);
+            auditLoading = false;
+            loadAuditData(false); // 失敗してもデータ取得は試みる
+          })
+          .audit_clearCache(weekStartStr);
+        return;
+      }
 
       auditLoading = true; // ローディング開始
       console.log('loadAuditData: 開始', weekStartStr, '(リトライ:', auditRetryCount, ')');
@@ -2218,16 +2694,17 @@
         html += '<span class="name">' + (item.pname || item.pid) + '</span>';
         html += '<span style="font-size:11px;color:#666;">' + (item.startStr || '') + '-' + (item.endStr || '') + '</span>';
         html += '</div>';
+        // 日本語タグバッジ表示
         if (item.tags && item.tags.length > 0) {
-          html += '<div style="margin:-4px 0 8px 28px;"><span class="tags">';
-          item.tags.forEach(function(tag) {
-            var tagClass = '';
-            if (tag.indexOf('CONFLICT') >= 0 || tag.indexOf('UNASSIGNED') >= 0 || tag.indexOf('CANCELLED_BUT') >= 0 || tag.indexOf('OUT_OF') >= 0) tagClass = 'ng';
-            else if (tag.indexOf('DIFF') >= 0 || tag.indexOf('MISSING') >= 0 || tag.indexOf('EXTRA') >= 0) tagClass = 'warn';
-            else tagClass = 'ok';
-            html += '<span class="audit-tag ' + tagClass + '">' + tag + '</span> ';
-          });
-          html += '</span></div>';
+          html += '<div style="margin:-4px 0 2px 28px;">';
+          html += renderTagBadges(item.tags);
+          html += '</div>';
+        }
+        // 条件チェックリスト表示
+        if (item.checks && item.checks.length > 0) {
+          html += '<div style="margin:0 0 8px 28px;">';
+          html += renderCheckList(item.checks);
+          html += '</div>';
         }
       });
       content.innerHTML = html;
@@ -2278,6 +2755,108 @@
     var youbiJapanese = {
       'Mon': '月', 'Tue': '火', 'Wed': '水', 'Thu': '木', 'Fri': '金', 'Sat': '土', 'Sun': '日'
     };
+
+    // 監査タグの日本語ラベルマッピング
+    var AUDIT_TAG_LABELS = {
+      'MASTER': '通常パターン',
+      'CHANGE(時間変更)': '個別変更(時間)',
+      'CHANGE(追加)': '個別変更(追加)',
+      'CHANGE(キャンセル)': '個別変更(キャンセル)',
+      'SPECIAL_ADD': '特別週間(追加)',
+      'SPECIAL_REPLACE': '特別週間(置換)',
+      'TIME_DIFF': '時間差あり',
+      'MISSING_ACTUAL': '実績なし',
+      'EXTRA_ACTUAL': '余剰実績',
+      'UNASSIGNED': '未割当',
+      'OUT_OF_WINDOW': '時間窓外',
+      'EVENT_CONFLICT': 'イベント衝突',
+      'CANCELLED_BUT_VISITED': 'キャンセル済み訪問あり',
+      'TWO_STAFF_TIME_MISMATCH': '2人訪問時間ズレ',
+      'TWO_STAFF_MISSING': '2人訪問人数不足',
+      'TWO_STAFF_DUPLICATE': '2人訪問スタッフ重複',
+      'GENDER_VIOLATION': '性別制限違反',
+      'SHIFT_VIOLATION': 'シフト時間外',
+      'STAFF_DAY_OFF': 'スタッフ休み',
+      'STAFF_HALF_DAY_OFF': 'スタッフ半休中',
+      'STAFF_RESTRICTED': 'スタッフ時間制限',
+      'WEEKLY_COUNT_MISMATCH': '週回数不一致',
+      'SVC_DURATION_MISMATCH': 'サービス時間不一致',
+      'WORKDAY_VIOLATION': '勤務日外',
+      'TIME_PARSE_ERROR': '時刻解析エラー'
+    };
+
+    /**
+     * タグの日本語ラベルを取得するヘルパー
+     * TIME_DIFF(+10m) のような動的タグにも対応
+     */
+    function getTagLabel(tag) {
+      // 完全一致
+      if (AUDIT_TAG_LABELS[tag]) return AUDIT_TAG_LABELS[tag];
+      // TIME_DIFF(+10m) のようなプレフィクスマッチ
+      for (var key in AUDIT_TAG_LABELS) {
+        if (tag.indexOf(key) === 0) {
+          var suffix = tag.substring(key.length);
+          return AUDIT_TAG_LABELS[key] + suffix;
+        }
+      }
+      // 日本語タグはそのまま返す
+      return tag;
+    }
+
+    /**
+     * タグのステータスクラスを判定するヘルパー
+     */
+    function getTagStatusClass(tag) {
+      if (tag.indexOf('CONFLICT') >= 0 || tag.indexOf('UNASSIGNED') >= 0 ||
+          tag.indexOf('CANCELLED_BUT') >= 0 || tag.indexOf('OUT_OF') >= 0 ||
+          tag.indexOf('VIOLATION') >= 0 || tag.indexOf('違反') >= 0 ||
+          tag.indexOf('MISMATCH') >= 0 || tag.indexOf('不一致') >= 0 ||
+          tag.indexOf('不足') >= 0 || tag.indexOf('重複') >= 0) return 'ng';
+      if (tag.indexOf('DIFF') >= 0 || tag.indexOf('MISSING') >= 0 ||
+          tag.indexOf('EXTRA') >= 0 || tag.indexOf('実績なし') >= 0 ||
+          tag.indexOf('余剰') >= 0 || tag.indexOf('ズレ') >= 0 ||
+          tag.indexOf('休み') >= 0 || tag.indexOf('半休') >= 0 ||
+          tag.indexOf('時間外') >= 0 || tag.indexOf('制限') >= 0 ||
+          tag.indexOf('勤務日外') >= 0) return 'warn';
+      return 'ok';
+    }
+
+    /**
+     * タグ配列を日本語バッジHTMLに変換するヘルパー
+     */
+    function renderTagBadges(tags) {
+      if (!tags || tags.length === 0) return '';
+      var html = '';
+      tags.forEach(function(tag) {
+        var label = getTagLabel(tag);
+        var cls = getTagStatusClass(tag);
+        html += '<span class="audit-tag-ja ' + cls + '">' + escapeHtml(label) + '</span>';
+      });
+      return html;
+    }
+
+    /**
+     * checks配列をチェックリストHTMLに変換するヘルパー
+     */
+    function renderCheckList(checks) {
+      if (!checks || checks.length === 0) return '';
+      var html = '<div class="audit-check-list">';
+      checks.forEach(function(chk) {
+        var st = (chk.status || 'OK').toUpperCase();
+        var cls, icon;
+        if (st === 'OK') { cls = 'audit-check-ok'; icon = '✓'; }
+        else if (st === 'NG') { cls = 'audit-check-ng'; icon = '✗'; }
+        else if (st === 'WARN') { cls = 'audit-check-warn'; icon = '!'; }
+        else { cls = 'audit-check-na'; icon = '-'; }
+        html += '<div class="audit-check-list-item ' + cls + '">';
+        html += '<span class="check-icon">' + icon + '</span>';
+        html += '<span class="check-label">' + escapeHtml(chk.label || chk.type || '') + '</span>';
+        html += '<span class="check-detail">' + escapeHtml(chk.detail || chk.explanation || chk.reason || '') + '</span>';
+        html += '</div>';
+      });
+      html += '</div>';
+      return html;
+    }
 
     // 週間概要ビューを描画
     function renderAuditWeekOverview(data) {
@@ -2365,6 +2944,23 @@
                 }
               }
             });
+          }
+
+          // 日本語タグ表示（コンパクト）
+          if (dj.tags && dj.tags.length > 0) {
+            html += '<div style="margin-top:4px;display:flex;flex-wrap:wrap;gap:2px;justify-content:center;">';
+            html += renderTagBadges(dj.tags);
+            html += '</div>';
+          }
+
+          // チェック詳細サマリ（NG/WARNがある場合のみ展開表示）
+          if (dj.checks && dj.checks.length > 0) {
+            var failChecks = dj.checks.filter(function(c) { return c.status === 'NG' || c.status === 'WARN'; });
+            if (failChecks.length > 0) {
+              html += '<div style="margin-top:4px;text-align:left;">';
+              html += renderCheckList(failChecks);
+              html += '</div>';
+            }
           }
 
           // クリックヒント
@@ -2588,16 +3184,10 @@
         html += '</details>';
       }
 
-      // タグ（コンパクト表示）
+      // タグ（日本語バッジ表示）
       if (dj.tags && dj.tags.length > 0) {
         html += '<div class="tags" style="margin-top:12px;">';
-        dj.tags.forEach(function(tag) {
-          var tagClass = '';
-          if (tag.indexOf('CONFLICT') >= 0 || tag.indexOf('UNASSIGNED') >= 0 || tag.indexOf('CANCELLED_BUT') >= 0 || tag.indexOf('OUT_OF') >= 0) tagClass = 'ng';
-          else if (tag.indexOf('DIFF') >= 0 || tag.indexOf('MISSING') >= 0 || tag.indexOf('EXTRA') >= 0) tagClass = 'warn';
-          else tagClass = 'ok';
-          html += '<span class="audit-tag ' + tagClass + '">' + tag + '</span> ';
-        });
+        html += renderTagBadges(dj.tags);
         html += '</div>';
       }
 
@@ -3290,7 +3880,7 @@
         }
       }
 
-      // --- 絶対タイムアウト（30分） ---
+      // --- 絶対タイムアウト（60分） ---
       if (elapsed > APPLY_ABSOLUTE_TIMEOUT) {
         applyStopPolling_();
         kaipokeHideLoading();

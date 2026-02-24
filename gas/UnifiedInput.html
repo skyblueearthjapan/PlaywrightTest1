@@ -50,7 +50,7 @@
     .header-badge { font-size: 11px; background: var(--color-orange); padding: 4px 10px; border-radius: 12px; font-weight: 500; }
     .header-status { font-size: 12px; background: rgba(255,255,255,0.2); padding: 4px 12px; border-radius: 12px; }
     .main-container { flex: 1; display: flex; overflow: hidden; }
-    .left-panel { flex: 1; padding: 16px; overflow: auto; background: var(--color-white); display: flex; flex-direction: column; }
+    .left-panel { flex: 1; padding: 16px; overflow: hidden; background: var(--color-white); display: flex; flex-direction: column; min-width: 0; }
     .status-bar {
       display: flex; align-items: center; justify-content: space-between;
       margin-bottom: 12px; padding: 10px 14px;
@@ -66,8 +66,8 @@
     }
     .refresh-btn:hover { background: var(--color-green-dark); }
     .refresh-btn:disabled { background: var(--color-disabled); cursor: not-allowed; }
-    #mainContent { flex: 1; overflow: hidden; display: flex; flex-direction: column; }
-    #normalTableArea, #specialWeekArea { flex: 1; display: flex; flex-direction: column; }
+    #mainContent { flex: 1; overflow: hidden; display: flex; flex-direction: column; min-width: 0; }
+    #normalTableArea, #specialWeekArea { flex: 1; display: flex; flex-direction: column; min-width: 0; overflow: hidden; }
     .table-container {
       flex: 1;
       overflow: scroll; /* 縦横スクロールバーを常に表示 */
@@ -236,7 +236,6 @@
     .wizard-input-container input[type="text"],
     .wizard-input-container input[type="number"],
     .wizard-input-container input[type="date"],
-    .wizard-input-container input[type="time"],
     .wizard-input-container textarea,
     .wizard-input-container select {
       width: 100%;
@@ -342,8 +341,7 @@
     .special-week-grid .cell-muted { color: #999; font-size: 11px; background: #f5f5f5; }
     .special-week-grid .cell-change { color: var(--color-orange-dark); font-size: 11px; background: #fff8e1; }
     .special-week-grid .cell-special { font-weight: 500; }
-    .special-week-grid input[type="time"] { width: 90px; padding: 4px; border: 1px solid var(--color-border); border-radius: 4px; font-size: 11px; }
-    .special-week-grid select { width: 100%; padding: 4px; border: 1px solid var(--color-border); border-radius: 4px; font-size: 11px; }
+    .special-week-grid select { width: auto; padding: 4px; border: 1px solid var(--color-border); border-radius: 4px; font-size: 11px; }
     .special-week-footer { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--color-border); background: #f9f9f9; }
     .special-week-mode { display: flex; gap: 12px; }
     .special-week-mode label { display: flex; align-items: center; gap: 4px; font-size: 12px; cursor: pointer; }
@@ -353,7 +351,77 @@
     .special-week-conflict-title { font-size: 12px; font-weight: 600; color: var(--color-orange-dark); margin-bottom: 4px; }
     .special-week-conflict select { width: 100%; margin-top: 4px; }
     #wizardTraineeSelect { width: 100%; padding: 8px; border: 1px solid var(--color-border); border-radius: 4px; font-size: 12px; }
+    /* 週セレクタバー */
+    .input-week-selector {
+      display: flex; align-items: center; gap: 10px; padding: 8px 14px;
+      background: #e3f2fd; border-radius: 8px; border: 1px solid #90caf9;
+      margin-bottom: 8px; font-size: 13px; flex-wrap: wrap;
+    }
+    .input-week-selector label { font-weight: 600; color: #1565c0; white-space: nowrap; }
+    .input-week-selector select { padding: 4px 8px; border: 1px solid #90caf9; border-radius: 4px; font-size: 12px; }
+    /* ウィザード曜日ボタン */
+    .wizard-weekday-btn {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 44px; height: 44px; border: 1px solid var(--color-border);
+      border-radius: 8px; background: var(--color-white); cursor: pointer;
+      font-size: 14px; font-weight: 600; transition: all 0.15s ease;
+    }
+    .wizard-weekday-btn:hover { background: var(--color-blue-light); border-color: var(--color-blue); }
+    .wizard-weekday-btn.selected { background: #1976d2; color: #fff; border-color: #1565c0; }
+    .wizard-weekday-btn.sat { color: #1976d2; }
+    .wizard-weekday-btn.sun { color: #d32f2f; }
+    .wizard-weekday-btn.selected.sat, .wizard-weekday-btn.selected.sun { color: #fff; }
+    /* 曜日選択結果 */
+    .wizard-weekday-result {
+      margin-top: 8px; padding: 8px 12px; background: #e3f2fd;
+      border-radius: 6px; font-size: 13px; color: #1565c0; font-weight: 500;
+    }
+    /* フィルタ中バッジ */
+    .week-filter-badge {
+      display: inline-block; padding: 2px 8px; background: #1976d2;
+      color: #fff; border-radius: 10px; font-size: 10px; font-weight: 600;
+    }
     @media (max-width: 900px) { .right-panel { display: none; } }
+
+    /* 患者個別変更グリッド（teal系配色） */
+    .patient-change-body { display: flex; padding: 16px; gap: 16px; }
+    .patient-change-left { width: 280px; display: flex; flex-direction: column; gap: 12px; }
+    .patient-change-right { flex: 1; overflow-x: auto; }
+    .patient-change-section { display: flex; flex-direction: column; gap: 6px; }
+    .patient-change-label { font-size: 12px; font-weight: 600; color: var(--color-text); }
+    .patient-change-nav { display: flex; align-items: center; gap: 8px; }
+    .patient-change-nav button { padding: 6px 10px; border: 1px solid var(--color-border); background: var(--color-white); border-radius: 4px; cursor: pointer; }
+    .patient-change-nav button:hover { background: #e0f2f1; }
+    .patient-change-nav span { flex: 1; text-align: center; font-size: 13px; font-weight: 500; }
+    .patient-change-grid { width: 100%; border-collapse: collapse; font-size: 12px; }
+    .patient-change-grid th { background: #00897b; color: var(--color-white); padding: 8px 10px; text-align: center; white-space: nowrap; }
+    .patient-change-grid td { border: 1px solid var(--color-border); padding: 6px 8px; background: var(--color-white); vertical-align: top; }
+    .patient-change-grid td.row-header { background: #fafafa; font-weight: 500; white-space: nowrap; }
+    .patient-change-grid .cell-normal { color: #555; font-size: 11px; background: #e0f2f1; }
+    .patient-change-grid .cell-edit { font-size: 11px; background: #fff; min-width: 140px; }
+    .patient-change-grid select { width: auto; padding: 4px; border: 1px solid var(--color-border); border-radius: 4px; font-size: 11px; }
+    .patient-change-grid input[type="text"] { width: 100%; padding: 4px; border: 1px solid var(--color-border); border-radius: 4px; font-size: 11px; }
+    .patient-change-footer { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--color-border); background: #f9f9f9; }
+
+    /* スタッフ個別変更グリッド（赤橙系配色） */
+    .staff-change-body { display: flex; padding: 16px; gap: 16px; }
+    .staff-change-left { width: 280px; display: flex; flex-direction: column; gap: 12px; }
+    .staff-change-right { flex: 1; overflow-x: auto; }
+    .staff-change-section { display: flex; flex-direction: column; gap: 6px; }
+    .staff-change-label { font-size: 12px; font-weight: 600; color: var(--color-text); }
+    .staff-change-nav { display: flex; align-items: center; gap: 8px; }
+    .staff-change-nav button { padding: 6px 10px; border: 1px solid var(--color-border); background: var(--color-white); border-radius: 4px; cursor: pointer; }
+    .staff-change-nav button:hover { background: #fbe9e7; }
+    .staff-change-nav span { flex: 1; text-align: center; font-size: 13px; font-weight: 500; }
+    .staff-change-grid { width: 100%; border-collapse: collapse; font-size: 12px; }
+    .staff-change-grid th { background: #d84315; color: var(--color-white); padding: 8px 10px; text-align: center; white-space: nowrap; }
+    .staff-change-grid td { border: 1px solid var(--color-border); padding: 6px 8px; background: var(--color-white); vertical-align: top; }
+    .staff-change-grid td.row-header { background: #fafafa; font-weight: 500; white-space: nowrap; }
+    .staff-change-grid .cell-normal { color: #555; font-size: 11px; background: #fbe9e7; }
+    .staff-change-grid .cell-edit { font-size: 11px; background: #fff; min-width: 140px; }
+    .staff-change-grid select { width: auto; padding: 4px; border: 1px solid var(--color-border); border-radius: 4px; font-size: 11px; }
+    .staff-change-grid input[type="text"] { width: 100%; padding: 4px; border: 1px solid var(--color-border); border-radius: 4px; font-size: 11px; }
+    .staff-change-footer { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--color-border); background: #f9f9f9; }
   </style>
 </head>
 <body>
@@ -519,11 +587,120 @@
     </div>
   </div>
 
+  <!-- 患者個別変更グリッド -->
+  <div class="wizard-panel" id="patientChangeGridPanel">
+    <div class="wizard-header" style="background: linear-gradient(135deg, #80cbc4 0%, #00897b 100%);">
+      <h3>患者個別変更（週グリッド）</h3>
+      <button class="wizard-close" onclick="closePatientChangeGrid()">×</button>
+    </div>
+    <div class="patient-change-body">
+      <div class="patient-change-left">
+        <div class="patient-change-section">
+          <label class="patient-change-label">対象週</label>
+          <div class="patient-change-nav">
+            <button type="button" onclick="patientChangeWeekPrev()">◀</button>
+            <span id="patientChangeWeekDisplay">----/--/-- 〜 ----/--/--</span>
+            <button type="button" onclick="patientChangeWeekNext()">▶</button>
+          </div>
+        </div>
+        <div class="patient-change-section">
+          <label class="patient-change-label">患者を選択</label>
+          <select id="patientChangePatientSelect" onchange="onPatientChangePatientSelect()" style="width:100%; padding:8px; border:1px solid var(--color-border); border-radius:4px; font-size:12px;">
+            <option value="">-- 患者を選択 --</option>
+          </select>
+        </div>
+        <div id="patientChangeGridError" class="wizard-error"></div>
+      </div>
+      <div class="patient-change-right">
+        <table class="patient-change-grid">
+          <thead>
+            <tr>
+              <th style="width:60px;">行</th>
+              <th id="pcTh0">月</th>
+              <th id="pcTh1">火</th>
+              <th id="pcTh2">水</th>
+              <th id="pcTh3">木</th>
+              <th id="pcTh4">金</th>
+              <th id="pcTh5">土</th>
+              <th id="pcTh6">日</th>
+            </tr>
+          </thead>
+          <tbody id="patientChangeGridBody">
+            <tr><td colspan="8" style="text-align:center; color:#999; padding:20px;">患者を選択してください</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <div class="patient-change-footer">
+      <button class="wizard-btn secondary" onclick="closePatientChangeGrid()">キャンセル</button>
+      <button class="wizard-btn success" id="btnSavePatientChangeGrid" onclick="savePatientChangeGrid()">保存</button>
+    </div>
+  </div>
+
+  <!-- スタッフ個別変更グリッド -->
+  <div class="wizard-panel" id="staffChangeGridPanel">
+    <div class="wizard-header" style="background: linear-gradient(135deg, #ff8a65 0%, #d84315 100%);">
+      <h3>スタッフ個別変更（週グリッド）</h3>
+      <button class="wizard-close" onclick="closeStaffChangeGrid()">×</button>
+    </div>
+    <div class="staff-change-body">
+      <div class="staff-change-left">
+        <div class="staff-change-section">
+          <label class="staff-change-label">対象週</label>
+          <div class="staff-change-nav">
+            <button type="button" onclick="staffChangeWeekPrev()">◀</button>
+            <span id="staffChangeWeekDisplay">----/--/-- 〜 ----/--/--</span>
+            <button type="button" onclick="staffChangeWeekNext()">▶</button>
+          </div>
+        </div>
+        <div class="staff-change-section">
+          <label class="staff-change-label">スタッフを選択</label>
+          <select id="staffChangeStaffSelect" onchange="onStaffChangeStaffSelect()" style="width:100%; padding:8px; border:1px solid var(--color-border); border-radius:4px; font-size:12px;">
+            <option value="">-- スタッフを選択 --</option>
+          </select>
+        </div>
+        <div id="staffChangeGridError" class="wizard-error"></div>
+      </div>
+      <div class="staff-change-right">
+        <table class="staff-change-grid">
+          <thead>
+            <tr>
+              <th style="width:60px;">行</th>
+              <th id="scTh0">月</th>
+              <th id="scTh1">火</th>
+              <th id="scTh2">水</th>
+              <th id="scTh3">木</th>
+              <th id="scTh4">金</th>
+              <th id="scTh5">土</th>
+              <th id="scTh6">日</th>
+            </tr>
+          </thead>
+          <tbody id="staffChangeGridBody">
+            <tr><td colspan="8" style="text-align:center; color:#999; padding:20px;">スタッフを選択してください</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <div class="staff-change-footer">
+      <button class="wizard-btn secondary" onclick="closeStaffChangeGrid()">キャンセル</button>
+      <button class="wizard-btn success" id="btnSaveStaffChangeGrid" onclick="saveStaffChangeGrid()">保存</button>
+    </div>
+  </div>
+
   <div class="main-container">
     <div class="left-panel">
       <div class="status-bar">
         <span class="status-text" id="statusText">読み込み中...</span>
         <button class="refresh-btn" id="refreshBtn" onclick="reloadCurrentSheet()">更新</button>
+      </div>
+      <div class="input-week-selector" id="weekSelectorBar" style="display:none;">
+        <label>対象月:</label>
+        <select id="inputTargetMonth" onchange="onInputMonthChange()"></select>
+        <label>対象週:</label>
+        <select id="inputTargetWeek" onchange="onInputWeekChange()"></select>
+        <span id="inputWeekLabel" style="font-size:11px; color:#1976d2;"></span>
+        <button onclick="clearWeekFilter()" style="padding:4px 10px; font-size:11px; border:1px solid #90caf9; background:#fff; border-radius:4px; cursor:pointer;">フィルタ解除</button>
+        <span class="week-filter-badge" id="weekFilterBadge" style="display:none;">フィルタ中</span>
       </div>
       <div id="mainContent">
         <div id="normalTableArea">
@@ -545,6 +722,8 @@
         <button class="operation-btn primary" onclick="openWizard()"><span class="icon">💬</span>ウィザードで登録</button>
         <button class="operation-btn" onclick="openMentorWizard()"><span class="icon">👥</span>同行割付ウィザード</button>
         <button class="operation-btn" onclick="openSpecialWeekWizard()"><span class="icon">📅</span>特別訪問週間</button>
+        <button class="operation-btn" onclick="openPatientChangeGrid()"><span class="icon">📋</span>患者個別変更（週グリッド）</button>
+        <button class="operation-btn" onclick="openStaffChangeGrid()"><span class="icon">📋</span>スタッフ個別変更（週グリッド）</button>
       </div>
       <div class="operation-group">
         <div class="operation-group-title">行操作</div>
@@ -605,6 +784,13 @@
     var staffOptions = []; // { id, name, label }
     var patientOptions = []; // { id, name, label }
 
+    // 週セレクタ状態
+    var weekSelectorState = { initialized: false, selectedMonth: '', selectedWeekStart: '', isFiltering: false };
+    var WEEK_DATE_SHEETS = ['個別変更リクエスト', 'スタッフ個別変更リクエスト', 'イベントリクエスト'];
+    var WEEK_DATE_FORM_TYPES = ['個別変更リクエスト', 'スタッフ個別変更', 'イベントリクエスト'];
+    function isWeekDateSheet(name) { return WEEK_DATE_SHEETS.indexOf(name) >= 0; }
+    function isWeekDateFormType(ft) { return WEEK_DATE_FORM_TYPES.indexOf(ft) >= 0; }
+
     // 特別訪問週間シート用状態
     var isSpecialWeekMode = false;
     var specialWeekSheetState = {
@@ -621,7 +807,7 @@
     // 英語→日本語変換マップ
     var EN_TO_JP_MAP = { 'Sun':'日', 'Mon':'月', 'Tue':'火', 'Wed':'水', 'Thu':'木', 'Fri':'金', 'Sat':'土' };
     var JP_TO_EN_MAP = { '日':'Sun', '月':'Mon', '火':'Tue', '水':'Wed', '木':'Thu', '金':'Fri', '土':'Sat' };
-    var TIME_OPTIONS = generateTimeOptions(8, 20, 5); // 08:00〜20:00, 5分刻み
+    var TIME_OPTIONS = generateTimeOptions(7, 19, 5); // 07:00〜19:00, 5分刻み
 
     function generateTimeOptions(startHour, endHour, stepMin) {
       var opts = [];
@@ -632,6 +818,27 @@
         }
       }
       return opts;
+    }
+
+    /**
+     * グリッド用 時間セレクト HTML を生成
+     * @param {string} cls - selectに付与するclass名
+     * @param {string} attr - data-day="N" や data-k="..." 等の属性文字列
+     * @param {string} value - 既存値 "HH:mm" (空可)
+     * @param {string} [style] - 追加style
+     * @returns {string} HTML文字列
+     */
+    function timeSelectHtml(cls, attr, value, style) {
+      var val = value ? String(value).substring(0, 5) : '';
+      var s = style || 'width:80px;font-size:11px;';
+      var html = '<select class="' + cls + '" ' + attr + ' style="' + s + '">';
+      html += '<option value="">--:--</option>';
+      for (var i = 0; i < TIME_OPTIONS.length; i++) {
+        var t = TIME_OPTIONS[i];
+        html += '<option value="' + t + '"' + (t === val ? ' selected' : '') + '>' + t + '</option>';
+      }
+      html += '</select>';
+      return html;
     }
 
     // ============================================================
@@ -746,7 +953,7 @@
       if (currentSheetName === '特別訪問週間') {
         isSpecialWeekMode = true;
         document.getElementById('normalTableArea').style.display = 'none';
-        document.getElementById('specialWeekArea').style.display = 'block';
+        document.getElementById('specialWeekArea').style.display = 'flex';
         if (!specialWeekSheetState.weekMonday) {
           specialWeekSheetState.weekMonday = getMonday(new Date());
         }
@@ -755,6 +962,7 @@
         loadSpecialWeekSheetData();
       } else {
         loadSheet(currentSheetName);
+        updateWeekSelectorVisibility();
       }
     });
 
@@ -775,10 +983,11 @@
       localStorage.setItem('unifiedInput_lastSheet', sheetName);
       resetState();
       restoreNormalStatusBar();
-      // エリア切り替え（固定DOM）
-      document.getElementById('normalTableArea').style.display = 'block';
+      // エリア切り替え（固定DOM）— flex を維持するため 'flex' を指定
+      document.getElementById('normalTableArea').style.display = 'flex';
       document.getElementById('specialWeekArea').style.display = 'none';
       loadSheet(sheetName);
+      updateWeekSelectorVisibility();
     }
 
     // ============================================================
@@ -795,9 +1004,12 @@
       localStorage.setItem('unifiedInput_lastSheet', '特別訪問週間');
       resetState();
 
+      // 週セレクタバーを非表示
+      document.getElementById('weekSelectorBar').style.display = 'none';
+
       // エリア切り替え（固定DOM - 通常テーブルを隠し、特別訪問週間エリアを表示）
       document.getElementById('normalTableArea').style.display = 'none';
-      document.getElementById('specialWeekArea').style.display = 'block';
+      document.getElementById('specialWeekArea').style.display = 'flex';
 
       // 週初期化
       if (!specialWeekSheetState.weekMonday) {
@@ -1017,6 +1229,9 @@
             return { sheetRowIndex: i + 2, isSelected: false, isDirty: false, isNew: false };
           });
           renderTable(data);
+          if (isWeekDateSheet(currentSheetName) && weekSelectorState.isFiltering) {
+            applyWeekFilter();
+          }
           document.getElementById('refreshBtn').disabled = false;
         })
         .withFailureHandler(function(e) {
@@ -1242,15 +1457,43 @@
       var editorHtml = createEditorHtml(editorType, currentValue, headerName);
       td.innerHTML = editorHtml;
 
-      var input = td.querySelector('input, select');
-      if (input) {
-        input.focus();
-        if (input.tagName === 'INPUT') input.select();
-        input.addEventListener('blur', finishCellEdit);
-        input.addEventListener('keydown', function(e) {
-          if (e.key === 'Enter') finishCellEdit();
-          else if (e.key === 'Escape') cancelCellEdit();
-        });
+      // 曜日ボタン式日付エディタの場合はボタンクリックで確定
+      var weekdayEditor = td.querySelector('.cell-weekday-editor');
+      if (weekdayEditor) {
+        // ボタンのmousedownでblurを防止（各ボタンに設定済み）
+        // カレンダーinputにフォーカス
+        var dateInput = td.querySelector('input[type="date"]');
+        if (dateInput) {
+          dateInput.focus();
+          dateInput.addEventListener('blur', function() {
+            // 曜日ボタンクリック中はblurを無視
+            setTimeout(function() {
+              if (editingCell && !td.querySelector(':focus') && !td.matches(':hover')) {
+                finishCellEdit();
+              }
+            }, 200);
+          });
+          dateInput.addEventListener('change', function() {
+            // カレンダーで日付変更時、hidden inputも更新
+            var hidden = td.querySelector('input.cell-weekday-date');
+            if (hidden) hidden.value = dateInput.value;
+            finishCellEdit();
+          });
+          dateInput.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape') cancelCellEdit();
+          });
+        }
+      } else {
+        var input = td.querySelector('input, select');
+        if (input) {
+          input.focus();
+          if (input.tagName === 'INPUT') input.select();
+          input.addEventListener('blur', finishCellEdit);
+          input.addEventListener('keydown', function(e) {
+            if (e.key === 'Enter') finishCellEdit();
+            else if (e.key === 'Escape') cancelCellEdit();
+          });
+        }
       }
     }
 
@@ -1269,6 +1512,9 @@
         case 'staff_type_select':
           return createSelect(['同じ人希望', 'ローテーション優先', 'どちらでも'], value);
         case 'operation_select':
+          if (!value || String(value).trim() === '') {
+            return createSelect(['-- 選択必須 --', 'キャンセル', '時間変更', '追加'], '-- 選択必須 --');
+          }
           return createSelect(['キャンセル', '時間変更', '追加'], value);
         case 'skill_select':
           return createSelect(['', 'ベテラン', '中堅', '新人'], value);
@@ -1289,6 +1535,9 @@
           return createSelect(TIME_OPTIONS, timeVal);
         case 'date_picker':
           var dateVal = value ? formatDateForInput(value) : '';
+          if (isWeekDateSheet(currentSheetName) && weekSelectorState.selectedWeekStart) {
+            return createDateWeekdayEditor(dateVal);
+          }
           return '<input type="date" value="' + dateVal + '" />';
         case 'weekday_multi':
           return createWeekdayEditor(value);
@@ -1447,6 +1696,9 @@
     }
 
     function getEditorValue(td) {
+      // 曜日ボタン式日付エディタ（hidden input）
+      var hiddenDate = td.querySelector('input.cell-weekday-date');
+      if (hiddenDate) return hiddenDate.value;
       var input = td.querySelector('input[type="text"], input[type="number"], input[type="date"], select');
       if (input) return input.value;
 
@@ -1780,6 +2032,23 @@
       var dirtyKeys = Object.keys(dirtyCells);
       if (dirtyKeys.length === 0) { showToast('info', '保存する変更がありません'); return; }
 
+      // 操作列の空欄チェック（個別変更リクエスト）
+      if (currentSheetName === '個別変更リクエスト') {
+        var opColIdx = tableData.header.indexOf('操作');
+        if (opColIdx >= 0) {
+          var emptyOpRows = [];
+          tableData.rows.forEach(function(row, idx) {
+            var pid = row[tableData.header.indexOf('patient_id')];
+            if (!pid) return; // 空行はスキップ
+            var op = String(row[opColIdx] || '').trim();
+            if (!op || op === '-- 選択必須 --') emptyOpRows.push(idx + 1);
+          });
+          if (emptyOpRows.length > 0) {
+            showToast('error', '操作が未設定の行があります（行: ' + emptyOpRows.join(', ') + '）。スケジュールに反映されません。');
+          }
+        }
+      }
+
       setStatus('loading', '保存中...');
       var updates = dirtyKeys.map(function(key) {
         var parts = key.split('-');
@@ -1873,6 +2142,14 @@
       document.getElementById('infoSheetName').textContent = getDisplaySheetName(sheetName);
       document.getElementById('infoRowCount').textContent = rowCount;
       document.getElementById('infoColCount').textContent = colCount;
+    }
+
+    // formType→実際のシート名への変換
+    function formTypeToSheetName(formType) {
+      var map = {
+        'スタッフ個別変更': 'スタッフ個別変更リクエスト'
+      };
+      return map[formType] || formType;
     }
 
     // シート名から表示名への変換
@@ -2149,6 +2426,9 @@
         case 'number':
           return '<input type="number" id="wizardInput" value="' + escapeHtml(currentVal) + '" ' + (step.min !== undefined ? 'min="' + step.min + '"' : '') + ' placeholder="数値を入力" />';
         case 'date':
+          if (isWeekDateFormType(wizardState.formType) && weekSelectorState.selectedWeekStart) {
+            return renderWeekdayButtons(currentVal);
+          }
           return '<input type="date" id="wizardInput" value="' + escapeHtml(currentVal) + '" />';
         case 'time':
           var timeVal = currentVal ? String(currentVal).substring(0, 5) : '';
@@ -2555,8 +2835,9 @@
             wizardState.active = false;
             document.getElementById('wizardPanel').classList.remove('active');
             // 登録したフォームタイプに対応するシートに切り替えてリロード
-            if (formType && formType !== currentSheetName) {
-              loadSheet(formType);
+            var targetSheet = formTypeToSheetName(formType);
+            if (targetSheet && targetSheet !== currentSheetName) {
+              loadSheet(targetSheet);
             } else {
               reloadCurrentSheet();
             }
@@ -2596,6 +2877,277 @@
 
     function formatDateJP(d) {
       return d.getFullYear() + '/' + String(d.getMonth() + 1).padStart(2, '0') + '/' + String(d.getDate()).padStart(2, '0');
+    }
+
+    // ============================================================
+    // 週セレクタ ユーティリティ
+    // ============================================================
+    function getWeeksForMonth(yearMonth) {
+      var parts = yearMonth.split('-');
+      var year = parseInt(parts[0]);
+      var month = parseInt(parts[1]) - 1;
+      var weeks = [];
+      var date = new Date(year, month, 1);
+      while (date.getDay() !== 1) { date.setDate(date.getDate() + 1); }
+      var weekNum = 1;
+      while (date.getMonth() === month) {
+        var mm = ('0' + (date.getMonth() + 1)).slice(-2);
+        var dd = ('0' + date.getDate()).slice(-2);
+        var dateStr = date.getFullYear() + '-' + mm + '-' + dd;
+        weeks.push({ value: dateStr, label: dateStr + '（' + (month + 1) + '月' + weekNum + '週目）' });
+        weekNum++;
+        date.setDate(date.getDate() + 7);
+      }
+      return weeks;
+    }
+
+    function getCurrentWeekMonday() {
+      var now = new Date();
+      now.setHours(0,0,0,0);
+      var day = now.getDay();
+      var diff = (day + 6) % 7;
+      var monday = new Date(now);
+      monday.setDate(now.getDate() - diff);
+      var mm = ('0' + (monday.getMonth() + 1)).slice(-2);
+      var dd = ('0' + monday.getDate()).slice(-2);
+      return monday.getFullYear() + '-' + mm + '-' + dd;
+    }
+
+    function calcDateFromWeekday(weekStartStr, dayIndex) {
+      var parts = weekStartStr.split('-');
+      var d = new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]));
+      d.setDate(d.getDate() + dayIndex);
+      var mm = ('0' + (d.getMonth() + 1)).slice(-2);
+      var dd = ('0' + d.getDate()).slice(-2);
+      return d.getFullYear() + '-' + mm + '-' + dd;
+    }
+
+    // ============================================================
+    // 週セレクタ管理
+    // ============================================================
+    function initInputWeekSelector() {
+      if (weekSelectorState.initialized) return;
+      weekSelectorState.initialized = true;
+      var monthSel = document.getElementById('inputTargetMonth');
+      var now = new Date();
+      var months = [];
+      for (var offset = -1; offset <= 6; offset++) {
+        var d = new Date(now.getFullYear(), now.getMonth() + offset, 1);
+        var val = d.getFullYear() + '-' + ('0' + (d.getMonth() + 1)).slice(-2);
+        months.push(val);
+      }
+      monthSel.innerHTML = '';
+      months.forEach(function(m) {
+        var opt = document.createElement('option');
+        opt.value = m;
+        opt.textContent = m;
+        monthSel.appendChild(opt);
+      });
+      // 現在月を選択
+      var currentMonth = now.getFullYear() + '-' + ('0' + (now.getMonth() + 1)).slice(-2);
+      monthSel.value = currentMonth;
+      weekSelectorState.selectedMonth = currentMonth;
+      onInputMonthChange();
+    }
+
+    function onInputMonthChange() {
+      var monthSel = document.getElementById('inputTargetMonth');
+      var weekSel = document.getElementById('inputTargetWeek');
+      weekSelectorState.selectedMonth = monthSel.value;
+      var weeks = getWeeksForMonth(monthSel.value);
+      weekSel.innerHTML = '';
+      weeks.forEach(function(w) {
+        var opt = document.createElement('option');
+        opt.value = w.value;
+        opt.textContent = w.label;
+        weekSel.appendChild(opt);
+      });
+      // 今週の月曜を自動選択
+      var currentMonday = getCurrentWeekMonday();
+      var found = false;
+      for (var i = 0; i < weekSel.options.length; i++) {
+        if (weekSel.options[i].value === currentMonday) {
+          weekSel.value = currentMonday;
+          found = true;
+          break;
+        }
+      }
+      weekSelectorState.selectedWeekStart = weekSel.value;
+      onInputWeekChange();
+    }
+
+    function onInputWeekChange() {
+      var weekSel = document.getElementById('inputTargetWeek');
+      weekSelectorState.selectedWeekStart = weekSel.value;
+      var currentMonday = getCurrentWeekMonday();
+      var label = document.getElementById('inputWeekLabel');
+      if (weekSel.value === currentMonday) {
+        label.textContent = '（今週）';
+      } else {
+        label.textContent = '';
+      }
+      applyWeekFilter();
+    }
+
+    function updateWeekSelectorVisibility() {
+      var bar = document.getElementById('weekSelectorBar');
+      if (isWeekDateSheet(currentSheetName)) {
+        bar.style.display = 'flex';
+        initInputWeekSelector();
+      } else {
+        bar.style.display = 'none';
+      }
+    }
+
+    // ============================================================
+    // テーブルフィルタリング（週ベース）
+    // ============================================================
+    function parseDateToNum(val) {
+      if (!val) return 0;
+      var s = String(val).trim();
+      // YYYY-MM-DD or YYYY/MM/DD
+      var m = s.match(/^(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})/);
+      if (m) return parseInt(m[1]) * 10000 + parseInt(m[2]) * 100 + parseInt(m[3]);
+      return 0;
+    }
+
+    function applyWeekFilter() {
+      if (!isWeekDateSheet(currentSheetName)) return;
+      var weekStart = weekSelectorState.selectedWeekStart;
+      if (!weekStart) { clearWeekFilter(); return; }
+      var startNum = parseDateToNum(weekStart);
+      var parts = weekStart.split('-');
+      var endDate = new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]));
+      endDate.setDate(endDate.getDate() + 6);
+      var endNum = parseDateToNum(endDate.getFullYear() + '-' + (endDate.getMonth() + 1) + '-' + endDate.getDate());
+
+      // 日付列のインデックスを検索
+      var dateColIdx = -1;
+      for (var i = 0; i < tableData.header.length; i++) {
+        if (tableData.header[i] === '日付') { dateColIdx = i; break; }
+      }
+      if (dateColIdx < 0) { clearWeekFilter(); return; }
+
+      var table = document.getElementById('dataTable');
+      var rows = table.querySelectorAll('tbody tr');
+      var shown = 0;
+      var total = rows.length;
+      rows.forEach(function(tr, idx) {
+        var cellVal = tableData.rows[idx] ? tableData.rows[idx][dateColIdx] : '';
+        var dateNum = parseDateToNum(cellVal);
+        if (dateNum >= startNum && dateNum <= endNum) {
+          tr.style.display = '';
+          shown++;
+        } else {
+          tr.style.display = 'none';
+        }
+      });
+      weekSelectorState.isFiltering = true;
+      document.getElementById('weekFilterBadge').style.display = 'inline-block';
+      document.getElementById('infoRowCount').textContent = shown + ' / ' + total;
+    }
+
+    function clearWeekFilter() {
+      var table = document.getElementById('dataTable');
+      var rows = table.querySelectorAll('tbody tr');
+      rows.forEach(function(tr) { tr.style.display = ''; });
+      weekSelectorState.isFiltering = false;
+      document.getElementById('weekFilterBadge').style.display = 'none';
+      if (tableData.rows) {
+        document.getElementById('infoRowCount').textContent = tableData.rows.length;
+      }
+    }
+
+    // セル編集用：曜日ボタン＋カレンダー併用エディタ
+    function createDateWeekdayEditor(currentVal) {
+      var ws = weekSelectorState.selectedWeekStart;
+      var html = '<div class="cell-weekday-editor" style="display:flex;flex-direction:column;gap:3px;padding:4px;min-width:220px;">';
+      // 曜日ボタン行
+      html += '<div style="display:flex;gap:2px;">';
+      WEEKDAYS_LABEL.forEach(function(label, i) {
+        var dateStr = calcDateFromWeekday(ws, i);
+        var dayClass = (i === 5) ? ' sat' : (i === 6) ? ' sun' : '';
+        var selected = (currentVal === dateStr) ? ' selected' : '';
+        var parts = dateStr.split('-');
+        var dateLabel = parseInt(parts[1]) + '/' + parseInt(parts[2]);
+        html += '<button type="button" class="wizard-weekday-btn' + dayClass + selected + '" ' +
+          'style="width:30px;height:36px;font-size:11px;padding:0;" ' +
+          'data-date="' + dateStr + '" ' +
+          'onmousedown="event.preventDefault();" ' +
+          'onclick="selectCellWeekday(this, \'' + dateStr + '\')">' +
+          label + '<br><span style="font-size:8px;font-weight:normal;">' + dateLabel + '</span></button>';
+      });
+      html += '</div>';
+      // カレンダー（併用）
+      html += '<div style="display:flex;align-items:center;gap:4px;">';
+      html += '<span style="font-size:9px;color:#888;">他の日:</span>';
+      html += '<input type="date" value="' + escapeHtml(currentVal || '') + '" style="flex:1;font-size:11px;padding:2px 4px;" />';
+      html += '</div>';
+      // hidden input（getEditorValueで読み取る）
+      html += '<input type="hidden" class="cell-weekday-date" value="' + escapeHtml(currentVal || '') + '" />';
+      html += '</div>';
+      return html;
+    }
+
+    function selectCellWeekday(btn, dateStr) {
+      var td = btn.closest('td');
+      if (!td) return;
+      // ボタンのselected切替
+      td.querySelectorAll('.wizard-weekday-btn').forEach(function(b) { b.classList.remove('selected'); });
+      btn.classList.add('selected');
+      // hidden input更新
+      var hidden = td.querySelector('input.cell-weekday-date');
+      if (hidden) hidden.value = dateStr;
+      // カレンダーも同期
+      var dateInput = td.querySelector('input[type="date"]');
+      if (dateInput) dateInput.value = dateStr;
+      // 確定
+      finishCellEdit();
+    }
+
+    // ============================================================
+    // ウィザード曜日ボタン
+    // ============================================================
+    function renderWeekdayButtons(currentVal) {
+      var ws = weekSelectorState.selectedWeekStart;
+      var html = '<div style="display:flex; gap:6px; flex-wrap:wrap;">';
+      WEEKDAYS_LABEL.forEach(function(label, i) {
+        var dateStr = calcDateFromWeekday(ws, i);
+        var dayClass = (i === 5) ? ' sat' : (i === 6) ? ' sun' : '';
+        var selected = (currentVal === dateStr) ? ' selected' : '';
+        var parts = dateStr.split('-');
+        var dateLabel = parseInt(parts[1]) + '/' + parseInt(parts[2]);
+        html += '<button type="button" class="wizard-weekday-btn' + dayClass + selected + '" ' +
+          'data-date="' + dateStr + '" onclick="selectWizardWeekday(this, \'' + dateStr + '\')">' +
+          label + '<br><span style="font-size:10px;font-weight:normal;">' + dateLabel + '</span></button>';
+      });
+      html += '</div>';
+      html += '<input type="hidden" id="wizardInput" value="' + escapeHtml(currentVal || '') + '" />';
+      if (currentVal) {
+        html += '<div class="wizard-weekday-result" id="weekdayResult">' + currentVal + '（' + getWeekdayLabel(currentVal) + '）</div>';
+      } else {
+        html += '<div class="wizard-weekday-result" id="weekdayResult" style="display:none;"></div>';
+      }
+      return html;
+    }
+
+    function getWeekdayLabel(dateStr) {
+      var parts = dateStr.split('-');
+      var d = new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]));
+      return ['日', '月', '火', '水', '木', '金', '土'][d.getDay()] + '曜日';
+    }
+
+    function selectWizardWeekday(btn, dateStr) {
+      // 全ボタンからselectedを除去
+      var buttons = btn.parentElement.querySelectorAll('.wizard-weekday-btn');
+      buttons.forEach(function(b) { b.classList.remove('selected'); });
+      btn.classList.add('selected');
+      // 隠しinputを更新
+      document.getElementById('wizardInput').value = dateStr;
+      // 結果表示を更新
+      var result = document.getElementById('weekdayResult');
+      result.textContent = dateStr + '（' + getWeekdayLabel(dateStr) + '）';
+      result.style.display = 'block';
     }
 
     function openMentorWizard() {
@@ -3095,12 +3647,12 @@
             html += '<option value="固定"' + (timeType==='固定'?' selected':'') + '>固定</option>';
             html += '</select>';
             html += '<div style="display:flex;gap:2px;align-items:center;">';
-            html += '<span style="font-size:10px;">早</span><input type="time" data-k="' + key + '" class="swEarliest" value="' + (cur.earliest||'') + '" style="width:75px;font-size:10px;">';
-            html += '<span style="font-size:10px;">遅</span><input type="time" data-k="' + key + '" class="swLatest" value="' + (cur.latest||'') + '" style="width:75px;font-size:10px;">';
+            html += '<span style="font-size:10px;">早</span>' + timeSelectHtml('swEarliest', 'data-k="' + key + '"', cur.earliest||'', 'width:75px;font-size:10px;');
+            html += '<span style="font-size:10px;">遅</span>' + timeSelectHtml('swLatest', 'data-k="' + key + '"', cur.latest||'', 'width:75px;font-size:10px;');
             html += '</div>';
             html += '<div style="display:flex;gap:2px;align-items:center;">';
             html += '<select data-k="' + key + '" class="swSvc" style="width:50px;font-size:10px;">';
-            [30,45,60,90,120].forEach(function(m) {
+            [20,25,30,35,40,45,50,55,60,65,70,75,80,85,90].forEach(function(m) {
               html += '<option value="' + m + '"' + ((Number(cur.svcMin||0)===m)?'selected':'') + '>' + m + '分</option>';
             });
             html += '</select>';
@@ -3111,13 +3663,19 @@
             html += '</select>';
             html += '</div>';
             html += '<div style="display:flex;gap:2px;align-items:center;color:#888;font-size:9px;">';
-            html += '<span>固定:</span><input type="time" data-k="' + key + '" class="swStart" value="' + (cur.start||'') + '" style="width:65px;font-size:9px;">';
-            html += '<input type="time" data-k="' + key + '" class="swEnd" value="' + (cur.end||'') + '" style="width:65px;font-size:9px;">';
+            html += '<span>固定:</span>' + timeSelectHtml('swStart', 'data-k="' + key + '"', cur.start||'', 'width:70px;font-size:9px;');
+            html += timeSelectHtml('swEnd', 'data-k="' + key + '"', cur.end||'', 'width:70px;font-size:9px;');
             html += '</div>';
             html += '<select data-k="' + key + '" class="swChangeHandle" style="width:100%;font-size:9px;" title="個別変更の扱い">';
             html += '<option value="そのまま残す"' + (changeHandle==='そのまま残す'?' selected':'') + '>個別変更を残す</option>';
             html += '<option value="置換する"' + (changeHandle==='置換する'?' selected':'') + '>個別変更を置換</option>';
             html += '</select>';
+            html += '<div style="display:flex;gap:4px;margin-top:2px;">';
+            if (dayIdx < 6) {
+              html += '<button type="button" onclick="copySpecialCellRight(\'' + key + '\',' + dayIdx + ')" style="flex:1;padding:1px 4px;font-size:10px;cursor:pointer;background:#e3f2fd;border:1px solid #90caf9;border-radius:3px;" title="右の日にコピー">→ コピー</button>';
+            }
+            html += '<button type="button" onclick="clearSpecialCell(\'' + key + '\')" style="padding:1px 4px;font-size:10px;cursor:pointer;background:#ffebee;border:1px solid #ef9a9a;border-radius:3px;color:#c62828;" title="この日をクリア">× クリア</button>';
+            html += '</div>';
             html += '</div>';
 
             td.innerHTML = html;
@@ -3155,6 +3713,48 @@
       var d = new Date(specialWeekState.weekStart);
       d.setDate(d.getDate() + dayIdx);
       return formatDateJP(d);
+    }
+
+    function copySpecialCellRight(srcKey, srcDayIdx) {
+      if (srcDayIdx >= 6) return;
+      var parts = srcKey.split('|');
+      var rowLabel = parts[1];
+      var dstDateStr = getDateStrForDay(srcDayIdx + 1);
+      var dstKey = dstDateStr + '|' + rowLabel;
+
+      // 各フィールドをコピー
+      var fields = [
+        { cls: 'swTimeType', prop: 'value' },
+        { cls: 'swEarliest', prop: 'value' },
+        { cls: 'swLatest', prop: 'value' },
+        { cls: 'swSvc', prop: 'value' },
+        { cls: 'swNeedStaff', prop: 'value' },
+        { cls: 'swStart', prop: 'value' },
+        { cls: 'swEnd', prop: 'value' },
+        { cls: 'swChangeHandle', prop: 'value' }
+      ];
+      fields.forEach(function(f) {
+        var src = document.querySelector('.' + f.cls + '[data-k="' + srcKey + '"]');
+        var dst = document.querySelector('.' + f.cls + '[data-k="' + dstKey + '"]');
+        if (src && dst) dst.value = src.value;
+      });
+    }
+
+    function clearSpecialCell(key) {
+      var fields = [
+        { cls: 'swEarliest', val: '' },
+        { cls: 'swLatest', val: '' },
+        { cls: 'swStart', val: '' },
+        { cls: 'swEnd', val: '' },
+        { cls: 'swTimeType', val: '時間帯' },
+        { cls: 'swSvc', val: '30' },
+        { cls: 'swNeedStaff', val: '1' },
+        { cls: 'swChangeHandle', val: 'そのまま残す' }
+      ];
+      fields.forEach(function(f) {
+        var el = document.querySelector('.' + f.cls + '[data-k="' + key + '"]');
+        if (el) el.value = f.val;
+      });
     }
 
     function saveSpecialWeekWizard() {
@@ -3234,6 +3834,634 @@
           errorEl.textContent = 'エラー: ' + (e.message || String(e));
         })
         .input_saveSpecialWeekWizard(payload);
+    }
+
+    // ============================================================
+    // 患者個別変更グリッド
+    // ============================================================
+    var patientChangeGridState = {
+      weekStart: null,
+      patientId: null,
+      patientName: '',
+      normalByDate: {},
+      changesByDate: {}
+    };
+
+    function openPatientChangeGrid() {
+      var panel = document.getElementById('patientChangeGridPanel');
+      panel.classList.add('active');
+
+      patientChangeGridState.weekStart = getWeekStartMonday(new Date());
+      updatePatientChangeWeekDisplay();
+
+      var sel = document.getElementById('patientChangePatientSelect');
+      sel.innerHTML = '<option value="">-- 患者を選択 --</option>';
+      patientOptions.forEach(function(p) {
+        var opt = document.createElement('option');
+        opt.value = p.id;
+        opt.textContent = p.label;
+        sel.appendChild(opt);
+      });
+
+      patientChangeGridState.patientId = null;
+      patientChangeGridState.patientName = '';
+      patientChangeGridState.normalByDate = {};
+      patientChangeGridState.changesByDate = {};
+      clearPatientChangeGrid();
+    }
+
+    function closePatientChangeGrid() {
+      document.getElementById('patientChangeGridPanel').classList.remove('active');
+    }
+
+    function updatePatientChangeWeekDisplay() {
+      var start = patientChangeGridState.weekStart;
+      var end = new Date(start);
+      end.setDate(end.getDate() + 6);
+      document.getElementById('patientChangeWeekDisplay').textContent =
+        formatDateJP(start) + ' 〜 ' + formatDateJP(end);
+
+      var WEEKDAYS = ['月', '火', '水', '木', '金', '土', '日'];
+      for (var i = 0; i < 7; i++) {
+        var d = new Date(start);
+        d.setDate(d.getDate() + i);
+        var th = document.getElementById('pcTh' + i);
+        if (th) {
+          th.textContent = WEEKDAYS[i] + ' (' + (d.getMonth() + 1) + '/' + d.getDate() + ')';
+        }
+      }
+    }
+
+    function patientChangeWeekPrev() {
+      patientChangeGridState.weekStart.setDate(patientChangeGridState.weekStart.getDate() - 7);
+      updatePatientChangeWeekDisplay();
+      if (patientChangeGridState.patientId) loadPatientChangeGridData();
+    }
+
+    function patientChangeWeekNext() {
+      patientChangeGridState.weekStart.setDate(patientChangeGridState.weekStart.getDate() + 7);
+      updatePatientChangeWeekDisplay();
+      if (patientChangeGridState.patientId) loadPatientChangeGridData();
+    }
+
+    function onPatientChangePatientSelect() {
+      var sel = document.getElementById('patientChangePatientSelect');
+      patientChangeGridState.patientId = sel.value || null;
+      if (sel.selectedIndex > 0) {
+        patientChangeGridState.patientName = sel.options[sel.selectedIndex].textContent;
+      } else {
+        patientChangeGridState.patientName = '';
+      }
+      if (patientChangeGridState.patientId) {
+        loadPatientChangeGridData();
+      } else {
+        clearPatientChangeGrid();
+      }
+    }
+
+    function clearPatientChangeGrid() {
+      var tbody = document.getElementById('patientChangeGridBody');
+      tbody.innerHTML = '<tr><td colspan="8" style="text-align:center; color:#999; padding:20px;">患者を選択してください</td></tr>';
+    }
+
+    function loadPatientChangeGridData() {
+      var errorEl = document.getElementById('patientChangeGridError');
+      errorEl.textContent = '';
+
+      google.script.run
+        .withSuccessHandler(function(data) {
+          if (!data || data.error) {
+            errorEl.textContent = data ? data.error : 'データの取得に失敗しました';
+            return;
+          }
+          patientChangeGridState.normalByDate = data.normalByDate || {};
+          patientChangeGridState.changesByDate = data.changesByDate || {};
+          renderPatientChangeGrid();
+        })
+        .withFailureHandler(function(e) {
+          errorEl.textContent = 'エラー: ' + (e.message || String(e));
+        })
+        .input_getPatientChangeGridData(formatDateJP(patientChangeGridState.weekStart), patientChangeGridState.patientId);
+    }
+
+    function pcGetDateStr(dayIdx) {
+      var d = new Date(patientChangeGridState.weekStart);
+      d.setDate(d.getDate() + dayIdx);
+      return formatDateJP(d);
+    }
+
+    function renderPatientChangeGrid() {
+      var tbody = document.getElementById('patientChangeGridBody');
+      tbody.innerHTML = '';
+
+      // Row 0: 通常（読取専用）
+      var trNormal = document.createElement('tr');
+      var thNormal = document.createElement('td');
+      thNormal.className = 'row-header';
+      thNormal.textContent = '通常';
+      trNormal.appendChild(thNormal);
+
+      for (var i = 0; i < 7; i++) {
+        var td = document.createElement('td');
+        td.className = 'cell-normal';
+        var dateStr = pcGetDateStr(i);
+        var items = patientChangeGridState.normalByDate[dateStr] || [];
+        if (items.length > 0) {
+          td.innerHTML = items.map(function(x) { return '<div>' + (x.text || '') + '</div>'; }).join('');
+        } else {
+          td.textContent = '−';
+        }
+        trNormal.appendChild(td);
+      }
+      tbody.appendChild(trNormal);
+
+      // Row 1: 個別変更（編集可）
+      var trEdit = document.createElement('tr');
+      var thEdit = document.createElement('td');
+      thEdit.className = 'row-header';
+      thEdit.textContent = '個別変更';
+      trEdit.appendChild(thEdit);
+
+      for (var dayIdx = 0; dayIdx < 7; dayIdx++) {
+        var td = document.createElement('td');
+        td.className = 'cell-edit';
+        var dateStr = pcGetDateStr(dayIdx);
+        var existing = (patientChangeGridState.changesByDate[dateStr] || [])[0] || {};
+
+        var html = '<div style="display:flex;flex-direction:column;gap:3px;">';
+        // 操作select
+        html += '<select class="pcOp" data-day="' + dayIdx + '" onchange="onPcOpChange(' + dayIdx + ')">';
+        var ops = ['', 'キャンセル', '時間変更', '追加'];
+        ops.forEach(function(op) {
+          var sel = (existing.op === op) ? ' selected' : '';
+          var label = op || '-- 操作 --';
+          html += '<option value="' + op + '"' + sel + '>' + label + '</option>';
+        });
+        html += '</select>';
+
+        // 時間入力エリア（操作が時間変更 or 追加のときのみ表示）
+        var showTime = (existing.op === '時間変更' || existing.op === '追加');
+        html += '<div class="pcTimeArea" data-day="' + dayIdx + '" style="display:' + (showTime ? 'flex' : 'none') + ';flex-direction:column;gap:2px;">';
+
+        // 時間タイプ
+        var existTT = existing.timeType || '固定';
+        html += '<select class="pcTimeType" data-day="' + dayIdx + '" onchange="onPcTimeTypeChange(' + dayIdx + ')" style="font-size:10px;">';
+        html += '<option value="固定"' + (existTT === '固定' ? ' selected' : '') + '>固定</option>';
+        html += '<option value="時間帯"' + (existTT === '時間帯' ? ' selected' : '') + '>時間帯</option>';
+        html += '</select>';
+
+        // 固定時間入力
+        var showFixed = (existTT === '固定');
+        html += '<div class="pcFixedArea" data-day="' + dayIdx + '" style="display:' + (showFixed ? 'flex' : 'none') + ';flex-direction:column;gap:2px;">';
+        html += '<div style="display:flex;align-items:center;gap:2px;"><span style="font-size:10px;">開始</span>' + timeSelectHtml('pcStart', 'data-day="' + dayIdx + '"', existing.start || '') + '</div>';
+        html += '<div style="display:flex;align-items:center;gap:2px;"><span style="font-size:10px;">終了</span>' + timeSelectHtml('pcEnd', 'data-day="' + dayIdx + '"', existing.end || '') + '</div>';
+        html += '</div>';
+
+        // 時間帯入力
+        var showBand = (existTT === '時間帯');
+        html += '<div class="pcBandArea" data-day="' + dayIdx + '" style="display:' + (showBand ? 'flex' : 'none') + ';flex-direction:column;gap:2px;">';
+        html += '<div style="display:flex;align-items:center;gap:2px;"><span style="font-size:10px;">最早</span>' + timeSelectHtml('pcEarliest', 'data-day="' + dayIdx + '"', existing.earliest || '') + '</div>';
+        html += '<div style="display:flex;align-items:center;gap:2px;"><span style="font-size:10px;">最遅</span>' + timeSelectHtml('pcLatest', 'data-day="' + dayIdx + '"', existing.latest || '') + '</div>';
+        html += '</div>';
+
+        html += '</div>';
+
+        // 備考
+        html += '<input type="text" class="pcNote" data-day="' + dayIdx + '" placeholder="備考" value="' + (existing.note || '') + '">';
+
+        // ボタン
+        html += '<div style="display:flex;gap:4px;margin-top:2px;">';
+        if (dayIdx < 6) {
+          html += '<button type="button" onclick="copyPatientCellRight(' + dayIdx + ')" style="flex:1;padding:1px 4px;font-size:10px;cursor:pointer;background:#e0f2f1;border:1px solid #80cbc4;border-radius:3px;" title="右の日にコピー">→ コピー</button>';
+        }
+        html += '<button type="button" onclick="clearPatientCell(' + dayIdx + ')" style="padding:1px 4px;font-size:10px;cursor:pointer;background:#ffebee;border:1px solid #ef9a9a;border-radius:3px;color:#c62828;" title="この日をクリア">× クリア</button>';
+        html += '</div>';
+        html += '</div>';
+
+        td.innerHTML = html;
+        trEdit.appendChild(td);
+      }
+      tbody.appendChild(trEdit);
+    }
+
+    function onPcOpChange(dayIdx) {
+      var sel = document.querySelector('.pcOp[data-day="' + dayIdx + '"]');
+      var timeArea = document.querySelector('.pcTimeArea[data-day="' + dayIdx + '"]');
+      if (sel && timeArea) {
+        var op = sel.value;
+        timeArea.style.display = (op === '時間変更' || op === '追加') ? 'flex' : 'none';
+      }
+    }
+
+    function onPcTimeTypeChange(dayIdx) {
+      var ttSel = document.querySelector('.pcTimeType[data-day="' + dayIdx + '"]');
+      var fixedArea = document.querySelector('.pcFixedArea[data-day="' + dayIdx + '"]');
+      var bandArea = document.querySelector('.pcBandArea[data-day="' + dayIdx + '"]');
+      if (!ttSel || !fixedArea || !bandArea) return;
+      var tt = ttSel.value;
+      fixedArea.style.display = (tt === '固定') ? 'flex' : 'none';
+      bandArea.style.display = (tt === '時間帯') ? 'flex' : 'none';
+    }
+
+    function copyPatientCellRight(srcDay) {
+      if (srcDay >= 6) return;
+      var dstDay = srcDay + 1;
+      var fields = [
+        { cls: 'pcOp' },
+        { cls: 'pcTimeType' },
+        { cls: 'pcStart' },
+        { cls: 'pcEnd' },
+        { cls: 'pcEarliest' },
+        { cls: 'pcLatest' },
+        { cls: 'pcNote' }
+      ];
+      fields.forEach(function(f) {
+        var src = document.querySelector('.' + f.cls + '[data-day="' + srcDay + '"]');
+        var dst = document.querySelector('.' + f.cls + '[data-day="' + dstDay + '"]');
+        if (src && dst) dst.value = src.value;
+      });
+      onPcOpChange(dstDay);
+      onPcTimeTypeChange(dstDay);
+    }
+
+    function clearPatientCell(dayIdx) {
+      var opEl = document.querySelector('.pcOp[data-day="' + dayIdx + '"]');
+      var ttEl = document.querySelector('.pcTimeType[data-day="' + dayIdx + '"]');
+      var startEl = document.querySelector('.pcStart[data-day="' + dayIdx + '"]');
+      var endEl = document.querySelector('.pcEnd[data-day="' + dayIdx + '"]');
+      var earliestEl = document.querySelector('.pcEarliest[data-day="' + dayIdx + '"]');
+      var latestEl = document.querySelector('.pcLatest[data-day="' + dayIdx + '"]');
+      var noteEl = document.querySelector('.pcNote[data-day="' + dayIdx + '"]');
+      if (opEl) opEl.value = '';
+      if (ttEl) ttEl.value = '固定';
+      if (startEl) startEl.value = '';
+      if (endEl) endEl.value = '';
+      if (earliestEl) earliestEl.value = '';
+      if (latestEl) latestEl.value = '';
+      if (noteEl) noteEl.value = '';
+      onPcOpChange(dayIdx);
+      onPcTimeTypeChange(dayIdx);
+    }
+
+    function savePatientChangeGrid() {
+      var errorEl = document.getElementById('patientChangeGridError');
+      errorEl.textContent = '';
+
+      if (!patientChangeGridState.patientId) {
+        errorEl.textContent = '患者を選択してください';
+        return;
+      }
+
+      var items = [];
+      for (var dayIdx = 0; dayIdx < 7; dayIdx++) {
+        var dateStr = pcGetDateStr(dayIdx);
+        var opEl = document.querySelector('.pcOp[data-day="' + dayIdx + '"]');
+        var ttEl = document.querySelector('.pcTimeType[data-day="' + dayIdx + '"]');
+        var startEl = document.querySelector('.pcStart[data-day="' + dayIdx + '"]');
+        var endEl = document.querySelector('.pcEnd[data-day="' + dayIdx + '"]');
+        var earliestEl = document.querySelector('.pcEarliest[data-day="' + dayIdx + '"]');
+        var latestEl = document.querySelector('.pcLatest[data-day="' + dayIdx + '"]');
+        var noteEl = document.querySelector('.pcNote[data-day="' + dayIdx + '"]');
+
+        var op = opEl ? opEl.value : '';
+        if (!op) continue;
+
+        var timeType = ttEl ? ttEl.value : '固定';
+
+        items.push({
+          dateStr: dateStr,
+          op: op,
+          timeType: timeType,
+          start: startEl ? startEl.value : '',
+          end: endEl ? endEl.value : '',
+          earliest: earliestEl ? earliestEl.value : '',
+          latest: latestEl ? latestEl.value : '',
+          note: noteEl ? noteEl.value : ''
+        });
+      }
+
+      var payload = {
+        weekStartStr: formatDateJP(patientChangeGridState.weekStart),
+        patientId: patientChangeGridState.patientId,
+        patientName: patientChangeGridState.patientName,
+        items: items
+      };
+
+      var saveBtn = document.getElementById('btnSavePatientChangeGrid');
+      saveBtn.disabled = true;
+      saveBtn.textContent = '保存中...';
+
+      google.script.run
+        .withSuccessHandler(function(result) {
+          saveBtn.disabled = false;
+          saveBtn.textContent = '保存';
+          if (result && (result.success || result.ok)) {
+            showToast('success', result.message || '患者個別変更を保存しました');
+            closePatientChangeGrid();
+          } else {
+            errorEl.textContent = (result && result.error) || '保存に失敗しました';
+          }
+        })
+        .withFailureHandler(function(e) {
+          saveBtn.disabled = false;
+          saveBtn.textContent = '保存';
+          errorEl.textContent = 'エラー: ' + (e.message || String(e));
+        })
+        .input_savePatientChangeGrid(payload);
+    }
+
+    // ============================================================
+    // スタッフ個別変更グリッド
+    // ============================================================
+    var staffChangeGridState = {
+      weekStart: null,
+      staffId: null,
+      staffName: '',
+      normalByDate: {},
+      changesByDate: {}
+    };
+
+    function openStaffChangeGrid() {
+      var panel = document.getElementById('staffChangeGridPanel');
+      panel.classList.add('active');
+
+      staffChangeGridState.weekStart = getWeekStartMonday(new Date());
+      updateStaffChangeWeekDisplay();
+
+      var sel = document.getElementById('staffChangeStaffSelect');
+      sel.innerHTML = '<option value="">-- スタッフを選択 --</option>';
+      staffOptions.forEach(function(s) {
+        var opt = document.createElement('option');
+        opt.value = s.id;
+        opt.textContent = s.label;
+        sel.appendChild(opt);
+      });
+
+      staffChangeGridState.staffId = null;
+      staffChangeGridState.staffName = '';
+      staffChangeGridState.normalByDate = {};
+      staffChangeGridState.changesByDate = {};
+      clearStaffChangeGrid();
+    }
+
+    function closeStaffChangeGrid() {
+      document.getElementById('staffChangeGridPanel').classList.remove('active');
+    }
+
+    function updateStaffChangeWeekDisplay() {
+      var start = staffChangeGridState.weekStart;
+      var end = new Date(start);
+      end.setDate(end.getDate() + 6);
+      document.getElementById('staffChangeWeekDisplay').textContent =
+        formatDateJP(start) + ' 〜 ' + formatDateJP(end);
+
+      var WEEKDAYS = ['月', '火', '水', '木', '金', '土', '日'];
+      for (var i = 0; i < 7; i++) {
+        var d = new Date(start);
+        d.setDate(d.getDate() + i);
+        var th = document.getElementById('scTh' + i);
+        if (th) {
+          th.textContent = WEEKDAYS[i] + ' (' + (d.getMonth() + 1) + '/' + d.getDate() + ')';
+        }
+      }
+    }
+
+    function staffChangeWeekPrev() {
+      staffChangeGridState.weekStart.setDate(staffChangeGridState.weekStart.getDate() - 7);
+      updateStaffChangeWeekDisplay();
+      if (staffChangeGridState.staffId) loadStaffChangeGridData();
+    }
+
+    function staffChangeWeekNext() {
+      staffChangeGridState.weekStart.setDate(staffChangeGridState.weekStart.getDate() + 7);
+      updateStaffChangeWeekDisplay();
+      if (staffChangeGridState.staffId) loadStaffChangeGridData();
+    }
+
+    function onStaffChangeStaffSelect() {
+      var sel = document.getElementById('staffChangeStaffSelect');
+      staffChangeGridState.staffId = sel.value || null;
+      if (sel.selectedIndex > 0) {
+        staffChangeGridState.staffName = sel.options[sel.selectedIndex].textContent;
+      } else {
+        staffChangeGridState.staffName = '';
+      }
+      if (staffChangeGridState.staffId) {
+        loadStaffChangeGridData();
+      } else {
+        clearStaffChangeGrid();
+      }
+    }
+
+    function clearStaffChangeGrid() {
+      var tbody = document.getElementById('staffChangeGridBody');
+      tbody.innerHTML = '<tr><td colspan="8" style="text-align:center; color:#999; padding:20px;">スタッフを選択してください</td></tr>';
+    }
+
+    function loadStaffChangeGridData() {
+      var errorEl = document.getElementById('staffChangeGridError');
+      errorEl.textContent = '';
+
+      google.script.run
+        .withSuccessHandler(function(data) {
+          if (!data || data.error) {
+            errorEl.textContent = data ? data.error : 'データの取得に失敗しました';
+            return;
+          }
+          staffChangeGridState.normalByDate = data.normalByDate || {};
+          staffChangeGridState.changesByDate = data.changesByDate || {};
+          renderStaffChangeGrid();
+        })
+        .withFailureHandler(function(e) {
+          errorEl.textContent = 'エラー: ' + (e.message || String(e));
+        })
+        .input_getStaffChangeGridData(formatDateJP(staffChangeGridState.weekStart), staffChangeGridState.staffId);
+    }
+
+    function scGetDateStr(dayIdx) {
+      var d = new Date(staffChangeGridState.weekStart);
+      d.setDate(d.getDate() + dayIdx);
+      return formatDateJP(d);
+    }
+
+    function renderStaffChangeGrid() {
+      var tbody = document.getElementById('staffChangeGridBody');
+      tbody.innerHTML = '';
+
+      // Row 0: 通常勤務（読取専用）
+      var trNormal = document.createElement('tr');
+      var thNormal = document.createElement('td');
+      thNormal.className = 'row-header';
+      thNormal.textContent = '通常勤務';
+      trNormal.appendChild(thNormal);
+
+      for (var i = 0; i < 7; i++) {
+        var td = document.createElement('td');
+        td.className = 'cell-normal';
+        var dateStr = scGetDateStr(i);
+        var info = staffChangeGridState.normalByDate[dateStr] || {};
+        if (info.isWorkDay) {
+          td.textContent = info.text || '勤務日';
+        } else {
+          td.textContent = info.text || '休日';
+        }
+        trNormal.appendChild(td);
+      }
+      tbody.appendChild(trNormal);
+
+      // Row 1: 個別変更（編集可）
+      var trEdit = document.createElement('tr');
+      var thEdit = document.createElement('td');
+      thEdit.className = 'row-header';
+      thEdit.textContent = '個別変更';
+      trEdit.appendChild(thEdit);
+
+      for (var dayIdx = 0; dayIdx < 7; dayIdx++) {
+        var td = document.createElement('td');
+        td.className = 'cell-edit';
+        var dateStr = scGetDateStr(dayIdx);
+        var existing = (staffChangeGridState.changesByDate[dateStr] || [])[0] || {};
+
+        var html = '<div style="display:flex;flex-direction:column;gap:3px;">';
+        // 制限タイプselect
+        html += '<select class="scType" data-day="' + dayIdx + '" onchange="onScTypeChange(' + dayIdx + ')">';
+        var types = ['', '休み', '午前休', '午後休', '遅刻', '早退', '時間指定'];
+        types.forEach(function(t) {
+          var sel = (existing.restrictionType === t) ? ' selected' : '';
+          var label = t || '-- 種別 --';
+          html += '<option value="' + t + '"' + sel + '>' + label + '</option>';
+        });
+        html += '</select>';
+
+        // 時間入力エリア（条件付き表示）
+        var rType = existing.restrictionType || '';
+        var showStart = (rType === '遅刻' || rType === '時間指定');
+        var showEnd = (rType === '早退' || rType === '時間指定');
+        var showTimeArea = showStart || showEnd;
+        html += '<div class="scTimeArea" data-day="' + dayIdx + '" style="display:' + (showTimeArea ? 'flex' : 'none') + ';flex-direction:column;gap:2px;">';
+        html += '<div class="scStartWrap" data-day="' + dayIdx + '" style="display:' + (showStart ? 'block' : 'none') + ';"><span style="font-size:10px;">開始:</span>' + timeSelectHtml('scStart', 'data-day="' + dayIdx + '"', existing.start || '') + '</div>';
+        html += '<div class="scEndWrap" data-day="' + dayIdx + '" style="display:' + (showEnd ? 'block' : 'none') + ';"><span style="font-size:10px;">終了:</span>' + timeSelectHtml('scEnd', 'data-day="' + dayIdx + '"', existing.end || '') + '</div>';
+        html += '</div>';
+
+        // 理由
+        html += '<input type="text" class="scReason" data-day="' + dayIdx + '" placeholder="理由" value="' + (existing.reason || '') + '">';
+
+        // ボタン
+        html += '<div style="display:flex;gap:4px;margin-top:2px;">';
+        if (dayIdx < 6) {
+          html += '<button type="button" onclick="copyStaffCellRight(' + dayIdx + ')" style="flex:1;padding:1px 4px;font-size:10px;cursor:pointer;background:#fbe9e7;border:1px solid #ffab91;border-radius:3px;" title="右の日にコピー">→ コピー</button>';
+        }
+        html += '<button type="button" onclick="clearStaffCell(' + dayIdx + ')" style="padding:1px 4px;font-size:10px;cursor:pointer;background:#ffebee;border:1px solid #ef9a9a;border-radius:3px;color:#c62828;" title="この日をクリア">× クリア</button>';
+        html += '</div>';
+        html += '</div>';
+
+        td.innerHTML = html;
+        trEdit.appendChild(td);
+      }
+      tbody.appendChild(trEdit);
+    }
+
+    function onScTypeChange(dayIdx) {
+      var sel = document.querySelector('.scType[data-day="' + dayIdx + '"]');
+      var timeArea = document.querySelector('.scTimeArea[data-day="' + dayIdx + '"]');
+      var startWrap = document.querySelector('.scStartWrap[data-day="' + dayIdx + '"]');
+      var endWrap = document.querySelector('.scEndWrap[data-day="' + dayIdx + '"]');
+      if (!sel || !timeArea || !startWrap || !endWrap) return;
+
+      var t = sel.value;
+      var showStart = (t === '遅刻' || t === '時間指定');
+      var showEnd = (t === '早退' || t === '時間指定');
+      timeArea.style.display = (showStart || showEnd) ? 'flex' : 'none';
+      startWrap.style.display = showStart ? 'block' : 'none';
+      endWrap.style.display = showEnd ? 'block' : 'none';
+    }
+
+    function copyStaffCellRight(srcDay) {
+      if (srcDay >= 6) return;
+      var dstDay = srcDay + 1;
+      var fields = [
+        { cls: 'scType' },
+        { cls: 'scStart' },
+        { cls: 'scEnd' },
+        { cls: 'scReason' }
+      ];
+      fields.forEach(function(f) {
+        var src = document.querySelector('.' + f.cls + '[data-day="' + srcDay + '"]');
+        var dst = document.querySelector('.' + f.cls + '[data-day="' + dstDay + '"]');
+        if (src && dst) dst.value = src.value;
+      });
+      onScTypeChange(dstDay);
+    }
+
+    function clearStaffCell(dayIdx) {
+      var typeEl = document.querySelector('.scType[data-day="' + dayIdx + '"]');
+      var startEl = document.querySelector('.scStart[data-day="' + dayIdx + '"]');
+      var endEl = document.querySelector('.scEnd[data-day="' + dayIdx + '"]');
+      var reasonEl = document.querySelector('.scReason[data-day="' + dayIdx + '"]');
+      if (typeEl) typeEl.value = '';
+      if (startEl) startEl.value = '';
+      if (endEl) endEl.value = '';
+      if (reasonEl) reasonEl.value = '';
+      onScTypeChange(dayIdx);
+    }
+
+    function saveStaffChangeGrid() {
+      var errorEl = document.getElementById('staffChangeGridError');
+      errorEl.textContent = '';
+
+      if (!staffChangeGridState.staffId) {
+        errorEl.textContent = 'スタッフを選択してください';
+        return;
+      }
+
+      var items = [];
+      for (var dayIdx = 0; dayIdx < 7; dayIdx++) {
+        var dateStr = scGetDateStr(dayIdx);
+        var typeEl = document.querySelector('.scType[data-day="' + dayIdx + '"]');
+        var startEl = document.querySelector('.scStart[data-day="' + dayIdx + '"]');
+        var endEl = document.querySelector('.scEnd[data-day="' + dayIdx + '"]');
+        var reasonEl = document.querySelector('.scReason[data-day="' + dayIdx + '"]');
+
+        var restrictionType = typeEl ? typeEl.value : '';
+        if (!restrictionType) continue;
+
+        items.push({
+          dateStr: dateStr,
+          restrictionType: restrictionType,
+          start: startEl ? startEl.value : '',
+          end: endEl ? endEl.value : '',
+          reason: reasonEl ? reasonEl.value : ''
+        });
+      }
+
+      var payload = {
+        weekStartStr: formatDateJP(staffChangeGridState.weekStart),
+        staffId: staffChangeGridState.staffId,
+        staffName: staffChangeGridState.staffName,
+        items: items
+      };
+
+      var saveBtn = document.getElementById('btnSaveStaffChangeGrid');
+      saveBtn.disabled = true;
+      saveBtn.textContent = '保存中...';
+
+      google.script.run
+        .withSuccessHandler(function(result) {
+          saveBtn.disabled = false;
+          saveBtn.textContent = '保存';
+          if (result && (result.success || result.ok)) {
+            showToast('success', result.message || 'スタッフ個別変更を保存しました');
+            closeStaffChangeGrid();
+          } else {
+            errorEl.textContent = (result && result.error) || '保存に失敗しました';
+          }
+        })
+        .withFailureHandler(function(e) {
+          saveBtn.disabled = false;
+          saveBtn.textContent = '保存';
+          errorEl.textContent = 'エラー: ' + (e.message || String(e));
+        })
+        .input_saveStaffChangeGrid(payload);
     }
 
   </script>

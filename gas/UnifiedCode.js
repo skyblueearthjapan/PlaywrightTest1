@@ -53,7 +53,8 @@ const JOB_MAP = {
   'assignResult': '割当結果を作成_',
   'updateWeekView': '週ビューを更新_',
   'routeSummary': 'ルートサマリを作成_',
-  'updateGeo': '位置情報を更新_'
+  'updateGeo': '位置情報を更新_',
+  'rebuildNgSheet': '割当不可を再構築_'
 };
 
 // ============================================================
@@ -228,17 +229,24 @@ function getWeekViewData() {
     const lastCol = 8; // A〜H列（職員名+7日分）
 
     if (lastRow < 1) {
-      return { headerRow: [], bodyRows: [], rowCount: 0 };
+      return { headerRow: [], bodyRows: [], rowCount: 0, weekStartStr: '' };
     }
 
     const values = sheet.getRange(1, 1, lastRow, lastCol).getDisplayValues();
     const headerRow = values[0] || [];
     const bodyRows = values.slice(1).filter(row => row[0] && String(row[0]).trim() !== '');
 
+    // I1セルから週開始日メタデータを読み取り
+    var weekStartStr = '';
+    try {
+      weekStartStr = sheet.getRange(1, 9).getDisplayValue() || '';
+    } catch (ignore) {}
+
     return {
       headerRow: headerRow,
       bodyRows: bodyRows,
-      rowCount: bodyRows.length
+      rowCount: bodyRows.length,
+      weekStartStr: weekStartStr
     };
   } catch (e) {
     console.error('getWeekViewData error:', e);
@@ -889,6 +897,8 @@ function input_createRowFromWizard(formType, answers, insertAfterRow) {
       sheetName = SHEETS.CHANGE_REQUEST;
     } else if (formType === 'スタッフ個別変更') {
       sheetName = SHEETS.STAFF_CHANGE_REQUEST;
+    } else if (formType === 'イベントリクエスト') {
+      sheetName = SHEETS.EVENT_REQUEST;
     } else {
       return { success: false, error: '不明なフォームタイプ: ' + formType };
     }
@@ -1396,6 +1406,467 @@ function input_saveSpecialWeekWizard(payload) {
 }
 
 // ============================================================
+// 患者個別変更グリッド：データ取得（Web UI用）
+// ============================================================
+
+/**
+ * 患者個別変更グリッド用データ取得
+ * @param {string} weekStartStr - 週開始日（yyyy/MM/dd）
+ * @param {string} patientId - 患者ID
+ * @returns {Object} { normalByDate, changesByDate }
+ */
+function input_getPatientChangeGridData(weekStartStr, patientId) {
+  try {
+    var result = api_getSpecialWeekContext_({ weekStartStr: weekStartStr, patient_id: patientId });
+
+    // changesByDate を直接シートから取得（start/end を HH:mm で返す必要がある）
+    var ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+    var tz = ss.getSpreadsheetTimeZone();
+    var weekStart = parseDateLoose_(weekStartStr);
+    var range = getWeekRangeFromMonday_(weekStart);
+    var startStr = Utilities.formatDate(range.start, tz, 'yyyy/MM/dd');
+    var endStr = Utilities.formatDate(range.end, tz, 'yyyy/MM/dd');
+
+    var changesByDate = {};
+    var changeSheet = ss.getSheetByName('個別変更リクエスト');
+    if (changeSheet && changeSheet.getLastRow() > 1) {
+      var cValues = changeSheet.getDataRange().getValues();
+      var cHeader = cValues[0];
+      var cData = cValues.slice(1);
+      var cIdx = {
+        pid: cHeader.indexOf('patient_id'),
+        date: cHeader.indexOf('日付'),
+        op: -1,
+        newStart: cHeader.indexOf('開始時刻(固定)'),
+        newEnd: cHeader.indexOf('終了時刻(固定)'),
+        timeType: cHeader.indexOf('時間タイプ'),
+        earliest: -1,
+        latest: -1,
+        note: cHeader.indexOf('備考')
+      };
+      // 「操作」列を部分一致で検索
+      for (var k = 0; k < cHeader.length; k++) {
+        var hk = String(cHeader[k]).trim();
+        if (hk.indexOf('操作') >= 0 && cIdx.op < 0) cIdx.op = k;
+        if (hk.indexOf('希望最早') >= 0 && cIdx.earliest < 0) cIdx.earliest = k;
+        if (hk.indexOf('希望最遅') >= 0 && cIdx.latest < 0) cIdx.latest = k;
+      }
+
+      cData.forEach(function(r) {
+        if (String(r[cIdx.pid] || '') !== String(patientId)) return;
+        var d = r[cIdx.date];
+        var dObj = (d instanceof Date) ? d : parseDateLoose_(d);
+        if (!dObj) return;
+        var ds = Utilities.formatDate(dObj, tz, 'yyyy/MM/dd');
+        if (ds < startStr || ds > endStr) return;
+
+        var op = cIdx.op >= 0 ? String(r[cIdx.op] || '').trim() : '';
+        if (!op) return;
+
+        var timeType = cIdx.timeType >= 0 ? String(r[cIdx.timeType] || '').trim() : '';
+
+        if (!changesByDate[ds]) changesByDate[ds] = [];
+        changesByDate[ds].push({
+          op: op,
+          timeType: timeType || '固定',
+          start: serialToTimeStr_(r[cIdx.newStart], tz),
+          end: serialToTimeStr_(r[cIdx.newEnd], tz),
+          earliest: cIdx.earliest >= 0 ? serialToTimeStr_(r[cIdx.earliest], tz) : '',
+          latest: cIdx.latest >= 0 ? serialToTimeStr_(r[cIdx.latest], tz) : '',
+          note: String(r[cIdx.note] || '').trim()
+        });
+      });
+    }
+
+    return {
+      normalByDate: result.normalByDate || {},
+      changesByDate: changesByDate
+    };
+  } catch (e) {
+    console.error('input_getPatientChangeGridData error:', e);
+    return { error: e.message || String(e) };
+  }
+}
+
+// ============================================================
+// スタッフ個別変更グリッド：データ取得（Web UI用）
+// ============================================================
+
+/**
+ * スタッフ個別変更グリッド用データ取得
+ * @param {string} weekStartStr - 週開始日（yyyy/MM/dd）
+ * @param {string} staffId - スタッフID
+ * @returns {Object} { normalByDate, changesByDate }
+ */
+function input_getStaffChangeGridData(weekStartStr, staffId) {
+  try {
+    var ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+    var tz = ss.getSpreadsheetTimeZone();
+
+    var weekStart = parseDateLoose_(weekStartStr);
+    if (!weekStart) throw new Error('週開始日が不正です: ' + weekStartStr);
+
+    var range = getWeekRangeFromMonday_(weekStart);
+    var start = range.start;
+    var end = range.end;
+    var startStr = Utilities.formatDate(start, tz, 'yyyy/MM/dd');
+    var endStr   = Utilities.formatDate(end,   tz, 'yyyy/MM/dd');
+
+    // スタッフマスタから勤務情報取得
+    var staffSheet = ss.getSheetByName('スタッフマスタ');
+    if (!staffSheet) throw new Error('スタッフマスタがありません');
+
+    var sValues = staffSheet.getDataRange().getValues();
+    var sHeader = sValues[0];
+    var sData = sValues.slice(1);
+    var sIdx = {
+      id: sHeader.indexOf('staff_id'),
+      name: sHeader.indexOf('スタッフ名'),
+      shiftS: sHeader.indexOf('シフト開始'),
+      shiftE: sHeader.indexOf('シフト終了'),
+      days: sHeader.indexOf('勤務曜日')
+    };
+
+    var staff = null;
+    for (var i = 0; i < sData.length; i++) {
+      if (String(sData[i][sIdx.id] || '') === String(staffId)) {
+        staff = {
+          staff_id: staffId,
+          name: sData[i][sIdx.name] || '',
+          shiftStart: sData[i][sIdx.shiftS],
+          shiftEnd: sData[i][sIdx.shiftE],
+          workDays: sData[i][sIdx.days] || ''
+        };
+        break;
+      }
+    }
+    if (!staff) throw new Error('スタッフが見つかりません: ' + staffId);
+
+    // 勤務曜日をパース
+    var workDayLabels = [];
+    if (staff.workDays) {
+      workDayLabels = String(staff.workDays).split(/[,\u3001\/・\s]+/).map(function(s) { return s.trim(); }).filter(Boolean);
+    }
+    var youbiMap = { '日': 0, '月': 1, '火': 2, '水': 3, '木': 4, '金': 5, '土': 6,
+                     'Sun': 0, 'Mon': 1, 'Tue': 2, 'Wed': 3, 'Thu': 4, 'Fri': 5, 'Sat': 6 };
+    var workDayNums = workDayLabels.map(function(l) { return youbiMap[l]; }).filter(function(n) { return n !== undefined; });
+
+    var shiftStartStr = serialToTimeStr_(staff.shiftStart, tz) || '09:00';
+    var shiftEndStr = serialToTimeStr_(staff.shiftEnd, tz) || '17:00';
+
+    // normalByDate を生成
+    var normalByDate = {};
+    for (var d = 0; d < 7; d++) {
+      var dateObj = new Date(start);
+      dateObj.setDate(start.getDate() + d);
+      var ds = Utilities.formatDate(dateObj, tz, 'yyyy/MM/dd');
+      var dayOfWeek = dateObj.getDay(); // 0=Sun, 1=Mon, ...
+
+      var isWorkDay = false;
+      if (workDayNums.length > 0) {
+        isWorkDay = workDayNums.indexOf(dayOfWeek) >= 0;
+      } else {
+        // デフォルト: 月〜金を勤務日とする
+        isWorkDay = (dayOfWeek >= 1 && dayOfWeek <= 5);
+      }
+
+      normalByDate[ds] = {
+        isWorkDay: isWorkDay,
+        text: isWorkDay ? (shiftStartStr + '〜' + shiftEndStr) : '休日'
+      };
+    }
+
+    // スタッフ個別変更リクエストから既存データ取得
+    var changesByDate = {};
+    var scSheet = ss.getSheetByName('スタッフ個別変更リクエスト');
+    if (scSheet && scSheet.getLastRow() > 1) {
+      var scValues = scSheet.getDataRange().getValues();
+      var scHeader = scValues[0];
+      var scData = scValues.slice(1);
+      var scIdx = {
+        staffId: scHeader.indexOf('staff_id'),
+        date: scHeader.indexOf('日付'),
+        type: scHeader.indexOf('制限タイプ'),
+        start: scHeader.indexOf('開始時刻'),
+        end: scHeader.indexOf('終了時刻'),
+        reason: scHeader.indexOf('理由')
+      };
+
+      scData.forEach(function(r) {
+        var sid = r[scIdx.staffId];
+        if (String(sid || '') !== String(staffId)) return;
+
+        var dateVal = r[scIdx.date];
+        var dObj = (dateVal instanceof Date) ? dateVal : parseDateLoose_(dateVal);
+        if (!dObj) return;
+        var ds = Utilities.formatDate(dObj, tz, 'yyyy/MM/dd');
+        if (ds < startStr || ds > endStr) return;
+
+        if (!changesByDate[ds]) changesByDate[ds] = [];
+        changesByDate[ds].push({
+          restrictionType: String(r[scIdx.type] || '').trim(),
+          start: serialToTimeStr_(r[scIdx.start], tz),
+          end: serialToTimeStr_(r[scIdx.end], tz),
+          reason: String(r[scIdx.reason] || '').trim()
+        });
+      });
+    }
+
+    return {
+      normalByDate: normalByDate,
+      changesByDate: changesByDate
+    };
+  } catch (e) {
+    console.error('input_getStaffChangeGridData error:', e);
+    return { error: e.message || String(e) };
+  }
+}
+
+// ============================================================
+// 患者個別変更グリッド：保存（Web UI用）
+// ============================================================
+
+/**
+ * 患者個別変更グリッドから保存
+ * @param {Object} payload - { weekStartStr, patientId, patientName, items: [{dateStr, op, start, end, note}] }
+ */
+function input_savePatientChangeGrid(payload) {
+  var lock = null;
+  try {
+    requireAdmin_();
+
+    lock = LockService.getScriptLock();
+    if (!lock.tryLock(10000)) {
+      return { success: false, error: '別の処理が実行中です。少し待ってから再実行してください。' };
+    }
+
+    var ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+    var tz = ss.getSpreadsheetTimeZone();
+
+    var weekStart = parseDateLoose_(payload.weekStartStr);
+    if (!weekStart) throw new Error('週開始日が不正です');
+    var weekStartFmt = Utilities.formatDate(weekStart, tz, 'yyyy/MM/dd');
+    var weekEnd = new Date(weekStart);
+    weekEnd.setDate(weekEnd.getDate() + 6);
+    var weekEndFmt = Utilities.formatDate(weekEnd, tz, 'yyyy/MM/dd');
+
+    var pid = payload.patientId;
+    if (!pid) throw new Error('patientIdが空です');
+
+    var sheet = ss.getSheetByName('個別変更リクエスト');
+    if (!sheet) throw new Error('個別変更リクエストシートがありません');
+
+    var values = sheet.getDataRange().getValues();
+    var header = values[0];
+    var data = values.slice(1);
+
+    var hIdx = {
+      pid: header.indexOf('patient_id'),
+      date: header.indexOf('日付'),
+      changeId: header.indexOf('change_id')
+    };
+    if (hIdx.pid < 0 || hIdx.date < 0) throw new Error('ヘッダーが不足しています');
+
+    // 該当患者＋週範囲の既存行を削除（後ろから削除）
+    for (var i = data.length - 1; i >= 0; i--) {
+      if (String(data[i][hIdx.pid] || '') !== String(pid)) continue;
+      var d = data[i][hIdx.date];
+      var dObj = (d instanceof Date) ? d : parseDateLoose_(d);
+      if (!dObj) continue;
+      var ds = Utilities.formatDate(dObj, tz, 'yyyy/MM/dd');
+      if (ds >= weekStartFmt && ds <= weekEndFmt) {
+        sheet.deleteRow(i + 2); // +2 for 1-based + header
+      }
+    }
+
+    // 新規行を追加（setValues でバッチ書き込み — 時刻シリアル値が正しく認識される）
+    var now = new Date();
+    var youbiNames = ['日', '月', '火', '水', '木', '金', '土'];
+    var idxName = header.indexOf('患者名');
+    var idxYoubi = header.indexOf('曜日');
+    var idxOp = -1;
+    for (var k = 0; k < header.length; k++) {
+      if (String(header[k]).indexOf('操作') >= 0) { idxOp = k; break; }
+    }
+    var idxStart = header.indexOf('開始時刻(固定)');
+    var idxEnd = header.indexOf('終了時刻(固定)');
+    var idxTimeType = header.indexOf('時間タイプ');
+    var idxEarliest = -1;
+    var idxLatest = -1;
+    for (var k2 = 0; k2 < header.length; k2++) {
+      var h = String(header[k2]).trim();
+      if (h.indexOf('希望最早') >= 0 && idxEarliest < 0) idxEarliest = k2;
+      if (h.indexOf('希望最遅') >= 0 && idxLatest < 0) idxLatest = k2;
+    }
+    var idxNote = header.indexOf('備考');
+    var idxRegAt = header.indexOf('登録日時');
+
+    var newRows = [];
+    (payload.items || []).forEach(function(item) {
+      if (!item || !item.dateStr || !item.op) return;
+
+      var dateObj = parseDateLoose_(item.dateStr);
+      if (!dateObj) return;
+
+      var newId = generateNextId_(sheet, 'change_id', 'C', 3);
+      var row = new Array(header.length).fill('');
+
+      if (hIdx.changeId >= 0) row[hIdx.changeId] = newId;
+      row[hIdx.pid] = pid;
+      if (idxName >= 0) row[idxName] = payload.patientName || '';
+      row[hIdx.date] = dateObj;
+      if (idxYoubi >= 0) row[idxYoubi] = youbiNames[dateObj.getDay()];
+      if (idxOp >= 0) row[idxOp] = item.op;
+
+      var timeType = item.timeType || '固定';
+      if (idxTimeType >= 0) row[idxTimeType] = timeType;
+
+      if (timeType === '固定') {
+        if (idxStart >= 0 && item.start) row[idxStart] = minutesToSerial_(timeToMinutesLoose_(item.start));
+        if (idxEnd >= 0 && item.end) row[idxEnd] = minutesToSerial_(timeToMinutesLoose_(item.end));
+      } else {
+        // 時間帯: 希望最早/最遅に入力
+        if (idxEarliest >= 0 && item.earliest) row[idxEarliest] = minutesToSerial_(timeToMinutesLoose_(item.earliest));
+        if (idxLatest >= 0 && item.latest) row[idxLatest] = minutesToSerial_(timeToMinutesLoose_(item.latest));
+      }
+
+      if (idxNote >= 0) row[idxNote] = item.note || '';
+      if (idxRegAt >= 0) row[idxRegAt] = now;
+
+      newRows.push(row);
+    });
+
+    if (newRows.length > 0) {
+      var startRow = sheet.getLastRow() + 1;
+      sheet.getRange(startRow, 1, newRows.length, header.length).setValues(newRows);
+      // 時刻列のフォーマットを HH:mm に設定（数値表示を防ぐ）
+      if (idxStart >= 0) sheet.getRange(startRow, idxStart + 1, newRows.length, 1).setNumberFormat('HH:mm');
+      if (idxEnd >= 0) sheet.getRange(startRow, idxEnd + 1, newRows.length, 1).setNumberFormat('HH:mm');
+      if (idxEarliest >= 0) sheet.getRange(startRow, idxEarliest + 1, newRows.length, 1).setNumberFormat('HH:mm');
+      if (idxLatest >= 0) sheet.getRange(startRow, idxLatest + 1, newRows.length, 1).setNumberFormat('HH:mm');
+    }
+
+    return { success: true, ok: true, message: '患者個別変更を保存しました（' + newRows.length + '件）' };
+
+  } catch (e) {
+    console.error('input_savePatientChangeGrid error:', e);
+    return { success: false, error: e.message || String(e) };
+  } finally {
+    if (lock) try { lock.releaseLock(); } catch(ignore) {}
+  }
+}
+
+// ============================================================
+// スタッフ個別変更グリッド：保存（Web UI用）
+// ============================================================
+
+/**
+ * スタッフ個別変更グリッドから保存
+ * @param {Object} payload - { weekStartStr, staffId, staffName, items: [{dateStr, restrictionType, start, end, reason}] }
+ */
+function input_saveStaffChangeGrid(payload) {
+  var lock = null;
+  try {
+    requireAdmin_();
+
+    lock = LockService.getScriptLock();
+    if (!lock.tryLock(10000)) {
+      return { success: false, error: '別の処理が実行中です。少し待ってから再実行してください。' };
+    }
+
+    var ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+    var tz = ss.getSpreadsheetTimeZone();
+
+    var weekStart = parseDateLoose_(payload.weekStartStr);
+    if (!weekStart) throw new Error('週開始日が不正です');
+    var weekStartFmt = Utilities.formatDate(weekStart, tz, 'yyyy/MM/dd');
+    var weekEnd = new Date(weekStart);
+    weekEnd.setDate(weekEnd.getDate() + 6);
+    var weekEndFmt = Utilities.formatDate(weekEnd, tz, 'yyyy/MM/dd');
+
+    var staffId = payload.staffId;
+    if (!staffId) throw new Error('staffIdが空です');
+
+    var sheet = ss.getSheetByName('スタッフ個別変更リクエスト');
+    if (!sheet) throw new Error('スタッフ個別変更リクエストシートがありません');
+
+    var values = sheet.getDataRange().getValues();
+    var header = values[0];
+    var data = values.slice(1);
+
+    var hIdx = {
+      staffId: header.indexOf('staff_id'),
+      date: header.indexOf('日付'),
+      scId: header.indexOf('staff_change_id')
+    };
+    if (hIdx.staffId < 0 || hIdx.date < 0) throw new Error('ヘッダーが不足しています');
+
+    // 該当スタッフ＋週範囲の既存行を削除（後ろから削除）
+    for (var i = data.length - 1; i >= 0; i--) {
+      if (String(data[i][hIdx.staffId] || '') !== String(staffId)) continue;
+      var d = data[i][hIdx.date];
+      var dObj = (d instanceof Date) ? d : parseDateLoose_(d);
+      if (!dObj) continue;
+      var ds = Utilities.formatDate(dObj, tz, 'yyyy/MM/dd');
+      if (ds >= weekStartFmt && ds <= weekEndFmt) {
+        sheet.deleteRow(i + 2);
+      }
+    }
+
+    // 新規行を追加（setValues でバッチ書き込み — 時刻シリアル値が正しく認識される）
+    var now = new Date();
+    var youbiNames = ['日', '月', '火', '水', '木', '金', '土'];
+    var idxName = header.indexOf('スタッフ名');
+    var idxYoubi = header.indexOf('曜日');
+    var idxType = header.indexOf('制限タイプ');
+    var idxStart = header.indexOf('開始時刻');
+    var idxEnd = header.indexOf('終了時刻');
+    var idxReason = header.indexOf('理由');
+    var idxRegAt = header.indexOf('登録日時');
+
+    var newRows = [];
+    (payload.items || []).forEach(function(item) {
+      if (!item || !item.dateStr || !item.restrictionType) return;
+
+      var dateObj = parseDateLoose_(item.dateStr);
+      if (!dateObj) return;
+
+      var newId = generateNextId_(sheet, 'staff_change_id', 'SC', 3);
+      var row = new Array(header.length).fill('');
+
+      if (hIdx.scId >= 0) row[hIdx.scId] = newId;
+      row[hIdx.staffId] = staffId;
+      if (idxName >= 0) row[idxName] = payload.staffName || '';
+      row[hIdx.date] = dateObj;
+      if (idxYoubi >= 0) row[idxYoubi] = youbiNames[dateObj.getDay()];
+      if (idxType >= 0) row[idxType] = item.restrictionType;
+      if (idxStart >= 0 && item.start) row[idxStart] = minutesToSerial_(timeToMinutesLoose_(item.start));
+      if (idxEnd >= 0 && item.end) row[idxEnd] = minutesToSerial_(timeToMinutesLoose_(item.end));
+      if (idxReason >= 0) row[idxReason] = item.reason || '';
+      if (idxRegAt >= 0) row[idxRegAt] = now;
+
+      newRows.push(row);
+    });
+
+    if (newRows.length > 0) {
+      var startRow = sheet.getLastRow() + 1;
+      sheet.getRange(startRow, 1, newRows.length, header.length).setValues(newRows);
+      // 時刻列のフォーマットを HH:mm に設定（数値表示を防ぐ）
+      if (idxStart >= 0) sheet.getRange(startRow, idxStart + 1, newRows.length, 1).setNumberFormat('HH:mm');
+      if (idxEnd >= 0) sheet.getRange(startRow, idxEnd + 1, newRows.length, 1).setNumberFormat('HH:mm');
+    }
+
+    return { success: true, ok: true, message: 'スタッフ個別変更を保存しました（' + newRows.length + '件）' };
+
+  } catch (e) {
+    console.error('input_saveStaffChangeGrid error:', e);
+    return { success: false, error: e.message || String(e) };
+  } finally {
+    if (lock) try { lock.releaseLock(); } catch(ignore) {}
+  }
+}
+
+// ============================================================
 // 実行API（GAS実行ボタン用）
 // ============================================================
 
@@ -1441,6 +1912,9 @@ function runJob(jobKey, weekStartStr) {
         break;
       case 'routeSummary':
         result = ルートサマリを作成_(ss, weekStartStr);
+        break;
+      case 'rebuildNgSheet':
+        result = 割当不可を再構築_(ss);
         break;
       default:
         throw new Error('未実装のジョブ: ' + jobKey);
@@ -1789,6 +2263,9 @@ function 週ビューを更新_(ss, weekStartStr) {
     viewSheet.getRange(1, 2 + i).setValue(label);
   }
 
+  // メタデータ: 週開始日をI1に書き込み（監査オーバーレイで使用）
+  viewSheet.getRange(1, 9).setValue(Utilities.formatDate(start, tz, 'yyyy/MM/dd'));
+
   staffList.forEach((st, idx) => {
     let label = '';
     if (st.id) label += st.id + ' ';
@@ -1916,6 +2393,9 @@ function 週ビューを更新_(ss, weekStartStr) {
       }
     }
   });
+
+  // 監査キャッシュをクリア（割当結果が反映された週ビューに連動して監査データも更新が必要）
+  try { audit_clearCache(startStr); } catch(e) { console.log('audit cache clear skipped: ' + e); }
 
   return { message: '週ビューを更新しました（' + staffList.length + '名、EV行' + eventCount + '件含む）' };
 }
@@ -2480,6 +2960,19 @@ function 割当結果を作成_(ss) {
   function getPatientWeekCount(pid, staffId) { return patientWeekCount[pid + '|' + staffId] || 0; }
   function incPatientWeekCount(pid, staffId) { var k = pid + '|' + staffId; patientWeekCount[k] = (patientWeekCount[k] || 0) + 1; }
 
+  // ★グローバル追跡：同一患者・同一日・同一時間帯に同じスタッフが重複割当されるのを防止
+  // キー: pid|dateStr → { staffId: true, ... }
+  var pidDateStaffMap = {};
+  function isPidDateStaffUsed(pid, dateStr, staffId) {
+    var key = pid + '|' + dateStr;
+    return pidDateStaffMap[key] && pidDateStaffMap[key][staffId];
+  }
+  function markPidDateStaff(pid, dateStr, staffId) {
+    var key = pid + '|' + dateStr;
+    if (!pidDateStaffMap[key]) pidDateStaffMap[key] = {};
+    pidDateStaffMap[key][staffId] = true;
+  }
+
   var weeklyRequests = [];
   wData.forEach(function(row){
     var d = row[wIdx.date];
@@ -2492,6 +2985,10 @@ function 割当結果を作成_(ss) {
 
   weeklyRequests.sort(function(a,b){
     if (a.date.getTime() !== b.date.getTime()) return a.date - b.date;
+    // ★2人訪問を先に処理（needStaff降順）
+    var aNeed = (a.row && a.row[wIdx.needStaff]) ? Number(a.row[wIdx.needStaff]) : 1;
+    var bNeed = (b.row && b.row[wIdx.needStaff]) ? Number(b.row[wIdx.needStaff]) : 1;
+    if (aNeed !== bNeed) return bNeed - aNeed;
     // ★ローテーション優先の患者を先に処理（スタッフ分散のため）
     var aIsRotation = (a.contPref === 'ローテーション優先') ? 0 : 1;
     var bIsRotation = (b.contPref === 'ローテーション優先') ? 0 : 1;
@@ -2727,6 +3224,7 @@ function 割当結果を作成_(ss) {
         for (var si = 0; si < specifiedIdsArr.length; si++) {
           var specId = specifiedIdsArr[si];
           if (usedStaffIds[specId]) continue;
+          if (isPidDateStaffUsed(pid, dateStr, specId)) continue; // ★グローバル重複防止
           var stSpec = staffList.find(function(s){ return s.id === specId; });
           if (stSpec) {
             var objSpec = { flag: false };
@@ -2734,7 +3232,7 @@ function 割当結果を作成_(ss) {
           }
         }
         if (!chosenStaff) note = (note || '') + ' / 指定必須スタッフ割当不可';
-      } else if (contPref === '同じ人希望' && prevSid && !usedStaffIds[prevSid]) {
+      } else if (contPref === '同じ人希望' && prevSid && !usedStaffIds[prevSid] && !isPidDateStaffUsed(pid, dateStr, prevSid)) {
         if (ngIdsArr.indexOf(prevSid) < 0) {
           var stPrev = staffList.find(function(s){ return s.id === prevSid; });
           if (stPrev) {
@@ -2750,6 +3248,7 @@ function 割当結果を作成_(ss) {
         var debugExcludeReasons = {};
         staffList.forEach(function(st){
           if (usedStaffIds[st.id]) { debugExcludeReasons[st.id] = 'usedStaffIds'; return; }
+          if (isPidDateStaffUsed(pid, dateStr, st.id)) { debugExcludeReasons[st.id] = 'pidDateDuplicate'; return; } // ★グローバル重複防止
           if (sexLimit === '女性のみ' && st.gender !== '女性') { debugExcludeReasons[st.id] = 'sexLimit(女性のみ)'; return; }
           if (sexLimit === '男性のみ' && st.gender !== '男性') { debugExcludeReasons[st.id] = 'sexLimit(男性のみ)'; return; }
           if (youbi && st.workDays.length > 0 && st.workDays.indexOf(youbi) === -1) { debugExcludeReasons[st.id] = 'workDays(' + youbi + ')'; return; }
@@ -2874,6 +3373,7 @@ function 割当結果を作成_(ss) {
         var fallback = [];
         staffList.forEach(function(st){
           if (usedStaffIds[st.id]) return;
+          if (isPidDateStaffUsed(pid, dateStr, st.id)) return; // ★グローバル重複防止
           if (ngIdsArr.indexOf(st.id) >= 0) return;
           if (sexLimit === '女性のみ' && st.gender !== '女性') return;
           if (sexLimit === '男性のみ' && st.gender !== '男性') return;
@@ -2956,6 +3456,7 @@ function 割当結果を作成_(ss) {
           staffId = tempStaffId;
           staffName = tempStaffName;
           usedStaffIds[staffId] = true;
+          markPidDateStaff(pid, dateStr, staffId); // ★グローバル重複防止
           incAssignCount(staffId, dateStr);
           incPatientWeekCount(pid, staffId);
           // ★ローテーション優先用：この患者に最後に割り当てたスタッフを記録
@@ -3030,6 +3531,12 @@ function 割当結果を作成_(ss) {
       if (!coupledVisitMap[baseId]) coupledVisitMap[baseId] = [];
       coupledVisitMap[baseId].push(i);
     }
+  });
+
+  // 2名体制の行インデックスセット（Phase D/G でアンカー扱いにするため）
+  var coupledIndexSet = {};
+  Object.keys(coupledVisitMap).forEach(function(baseId) {
+    coupledVisitMap[baseId].forEach(function(idx) { coupledIndexSet[idx] = true; });
   });
 
   // ★移動距離計算専用：患者行のみ（イベントはpid空なので除外）
@@ -3116,6 +3623,7 @@ function 割当結果を作成_(ss) {
   }
 
   // --- 2名体制ペアの時刻同期関数 ---
+  // 両スタッフの共通空き時間を探索して同期する（強化版）
   function syncCoupledVisitTimes_(resultRows, coupledVisitMap, staffDateMap, tz) {
     var EXTRA_BUFFER = 15; // 分
 
@@ -3134,49 +3642,185 @@ function 割当結果を作成_(ss) {
 
       if (s1 === s2 && e1 === e2) return; // 既に同期済み
 
-      // 同期先時刻を決定: 遅い方の開始時刻に合わせる
-      var targetStart = Math.max(s1, s2);
-      var svcMin = (e1 - s1) || (e2 - s2) || 60;
-      var targetEnd = targetStart + svcMin;
+      // サービス時間を計算
+      var svcMin = (e1 != null && s1 != null && e1 > s1) ? (e1 - s1) :
+                   (e2 != null && s2 != null && e2 > s2) ? (e2 - s2) :
+                   (Number(r1[10]) || Number(r2[10]) || 60);
 
-      // 時間窓制約チェック
-      var earliest1 = toMinutes(r1[12]) || 0;
-      var latest1 = toMinutes(r1[13]) || 1440;
-      var earliest2 = toMinutes(r2[12]) || 0;
-      var latest2 = toMinutes(r2[13]) || 1440;
-      var commonEarliest = Math.max(earliest1, earliest2);
-      var commonLatest = Math.min(latest1, latest2);
+      // 時間窓制約（timeType による補完込み）
+      function getTimeWindow(row) {
+        var earliest = toMinutes(row[12]);
+        var latest = toMinutes(row[13]);
+        var tt = String(row[11] || '').trim();
+        if (earliest == null || latest == null) {
+          if (tt === '午前')      { earliest = earliest != null ? earliest : 9 * 60;  latest = latest != null ? latest : 12 * 60; }
+          else if (tt === '午後') { earliest = earliest != null ? earliest : 13 * 60; latest = latest != null ? latest : 17 * 60; }
+          else if (tt === '終日') { earliest = earliest != null ? earliest : 9 * 60;  latest = latest != null ? latest : 18 * 60; }
+        }
+        return { earliest: earliest != null ? earliest : 0, latest: latest != null ? latest : 1440 };
+      }
 
-      if (targetStart < commonEarliest) targetStart = commonEarliest;
-      if (targetStart > commonLatest) targetStart = commonLatest;
-      targetEnd = targetStart + svcMin;
+      var tw1 = getTimeWindow(r1);
+      var tw2 = getTimeWindow(r2);
+      var commonEarliest = Math.max(tw1.earliest, tw2.earliest);
+      var commonLatest = Math.min(tw1.latest, tw2.latest);
 
-      // 両スタッフの当日スケジュールで衝突チェック
-      var canPlace = true;
-      [indices[0], indices[1]].forEach(function(rIdx) {
-        var row = resultRows[rIdx];
+      // 衍突チェック関数
+      function hasConflict(targetS, targetE) {
+        for (var ii = 0; ii < 2; ii++) {
+          var rIdx = indices[ii];
+          var row = resultRows[rIdx];
+          var staffId = row[3];
+          var dateStr = Utilities.formatDate(row[1], tz, 'yyyy/MM/dd');
+          var key = staffId + '|' + dateStr;
+          var dayIndices = staffDateMap[key] || [];
+          for (var j = 0; j < dayIndices.length; j++) {
+            var otherIdx = dayIndices[j];
+            if (otherIdx === indices[0] || otherIdx === indices[1]) continue;
+            var otherS = rowStartMin_(resultRows[otherIdx]);
+            var otherE = rowEndMin_(resultRows[otherIdx]);
+            if (otherS == null || otherE == null || otherE <= otherS) continue;
+            if (overlap_(targetS, targetE + EXTRA_BUFFER, otherS, otherE + EXTRA_BUFFER)) {
+              return true;
+            }
+          }
+        }
+        return false;
+      }
+
+      // --- まず簡単なアプローチ: 遅い方の開始時刻に合わせる ---
+      var simpleTarget = Math.max(s1 || 0, s2 || 0);
+      if (simpleTarget < commonEarliest) simpleTarget = commonEarliest;
+      var simpleEnd = simpleTarget + svcMin;
+      if (simpleEnd > commonLatest) {
+        simpleTarget = commonLatest - svcMin;
+        simpleEnd = commonLatest;
+      }
+
+      if (simpleTarget >= commonEarliest && simpleEnd <= commonLatest && !hasConflict(simpleTarget, simpleEnd)) {
+        setRowTimeByMinutes_(r1, simpleTarget, simpleEnd);
+        setRowTimeByMinutes_(r2, simpleTarget, simpleEnd);
+        return;
+      }
+
+      // --- フォールバック: 両スタッフの共通空き時間を探索 ---
+
+      // 各スタッフの占有区間を収集（EXTRA_BUFFER 込みで拡張、ペア自身は除外）
+      function getExpandedOccupied(staffIdx) {
+        var row = resultRows[staffIdx];
         var staffId = row[3];
         var dateStr = Utilities.formatDate(row[1], tz, 'yyyy/MM/dd');
         var key = staffId + '|' + dateStr;
         var dayIndices = staffDateMap[key] || [];
+        var intervals = [];
 
-        dayIndices.forEach(function(otherIdx) {
-          if (otherIdx === indices[0] || otherIdx === indices[1]) return;
-          var otherS = rowStartMin_(resultRows[otherIdx]);
-          var otherE = rowEndMin_(resultRows[otherIdx]);
-          if (overlap_(targetStart, targetEnd + EXTRA_BUFFER, otherS, otherE + EXTRA_BUFFER)) {
-            canPlace = false;
+        for (var j = 0; j < dayIndices.length; j++) {
+          var otherIdx = dayIndices[j];
+          if (otherIdx === indices[0] || otherIdx === indices[1]) continue;
+          var os = rowStartMin_(resultRows[otherIdx]);
+          var oe = rowEndMin_(resultRows[otherIdx]);
+          if (os != null && oe != null && oe > os) {
+            intervals.push({ start: os - EXTRA_BUFFER, end: oe + EXTRA_BUFFER });
           }
-        });
-      });
+        }
 
-      if (canPlace) {
-        setRowTimeByMinutes_(r1, targetStart, targetEnd);
-        setRowTimeByMinutes_(r2, targetStart, targetEnd);
-      } else {
-        // フォールバック: 備考に警告を追加
-        r1[14] = (r1[14] || '') + ' [時刻同期不可:要手動調整]';
-        r2[14] = (r2[14] || '') + ' [時刻同期不可:要手動調整]';
+        // スタッフ制限（不可区間）も追加
+        var blocked = getStaffBlockedIntervals_(staffId, dateStr);
+        for (var k = 0; k < blocked.length; k++) {
+          intervals.push(blocked[k]);
+        }
+
+        // ソート＆マージ
+        intervals.sort(function(a, b) { return a.start - b.start; });
+        var merged = [];
+        for (var m = 0; m < intervals.length; m++) {
+          if (merged.length > 0 && intervals[m].start <= merged[merged.length - 1].end) {
+            merged[merged.length - 1].end = Math.max(merged[merged.length - 1].end, intervals[m].end);
+          } else {
+            merged.push({ start: intervals[m].start, end: intervals[m].end });
+          }
+        }
+        return merged;
+      }
+
+      // 占有区間の雙間（空き時間）を計算
+      function computeGaps(occupied, windowStart, windowEnd) {
+        var gaps = [];
+        var cursor = windowStart;
+        for (var j = 0; j < occupied.length; j++) {
+          if (occupied[j].end <= cursor) continue;
+          if (occupied[j].start > cursor) {
+            gaps.push({ s: cursor, e: occupied[j].start });
+          }
+          cursor = Math.max(cursor, occupied[j].end);
+        }
+        if (cursor < windowEnd) {
+          gaps.push({ s: cursor, e: windowEnd });
+        }
+        return gaps;
+      }
+
+      // 2つのgapリストの共通部分（交差）を計算
+      function intersectGaps(gaps1, gaps2) {
+        var result = [];
+        var i = 0, j = 0;
+        while (i < gaps1.length && j < gaps2.length) {
+          var s = Math.max(gaps1[i].s, gaps2[j].s);
+          var e = Math.min(gaps1[i].e, gaps2[j].e);
+          if (s < e) result.push({ s: s, e: e });
+          if (gaps1[i].e < gaps2[j].e) i++;
+          else j++;
+        }
+        return result;
+      }
+
+      // スタッフのシフト時間帯を取得
+      var shift1 = getStaffShift_(r1[3]);
+      var shift2 = getStaffShift_(r2[3]);
+      var windowStart = Math.max(commonEarliest, shift1.shiftStartMin || 0, shift2.shiftStartMin || 0);
+      var windowEnd = Math.min(commonLatest, shift1.shiftEndMin || 1440, shift2.shiftEndMin || 1440);
+
+      if (windowEnd - windowStart < svcMin) {
+        // 時間窓が狭すぎて配置不可
+        r1[14] = (r1[14] || '') + ' [時刻同期不可:時間窓不足]';
+        r2[14] = (r2[14] || '') + ' [時刻同期不可:時間窓不足]';
+        return;
+      }
+
+      var occ1 = getExpandedOccupied(indices[0]);
+      var occ2 = getExpandedOccupied(indices[1]);
+      var gaps1 = computeGaps(occ1, windowStart, windowEnd);
+      var gaps2 = computeGaps(occ2, windowStart, windowEnd);
+      var commonGaps = intersectGaps(gaps1, gaps2);
+
+      // 共通空き時間から配置可能な最初のスロットを探す
+      var placed = false;
+      for (var g = 0; g < commonGaps.length; g++) {
+        var gap = commonGaps[g];
+        var candidateStart = Math.max(gap.s, commonEarliest);
+        var candidateEnd = candidateStart + svcMin;
+        if (candidateEnd <= gap.e && candidateEnd <= commonLatest) {
+          setRowTimeByMinutes_(r1, candidateStart, candidateEnd);
+          setRowTimeByMinutes_(r2, candidateStart, candidateEnd);
+          placed = true;
+          break;
+        }
+      }
+
+      if (!placed) {
+        // 強制同期: 早い方の開始時刻に合わせる
+        var fallbackS1 = toMinutes(r1[8]), fallbackS2 = toMinutes(r2[8]);
+        var fallbackStart = Math.min(fallbackS1 || 9999, fallbackS2 || 9999);
+        if (fallbackStart < 9999 && svcMin) {
+          var fallbackEnd = fallbackStart + svcMin;
+          setRowTimeByMinutes_(r1, fallbackStart, fallbackEnd);
+          setRowTimeByMinutes_(r2, fallbackStart, fallbackEnd);
+          r1[14] = (r1[14] || '') + ' [時刻同期:強制]';
+          r2[14] = (r2[14] || '') + ' [時刻同期:強制]';
+        } else {
+          r1[14] = (r1[14] || '') + ' [時刻同期不可:要手動調整]';
+          r2[14] = (r2[14] || '') + ' [時刻同期不可:要手動調整]';
+        }
       }
     });
   }
@@ -3212,6 +3856,15 @@ function 割当結果を作成_(ss) {
 
       if (timeType === '固定' && s != null && e != null && e > s) {
         anchors.push({ idx: rIdx, s: s, e: e, kind: 'FIX' });
+        return;
+      }
+
+      // 2名体制の訪問はアンカーとして扱う（ペアの時刻同期を保護）
+      if (coupledIndexSet[rIdx]) {
+        if (s != null && e != null && e > s) {
+          anchors.push({ idx: rIdx, s: s, e: e, kind: 'COUPLED' });
+        }
+        // coupled行は時刻未確定でもflexesに入れない（初期割当時の同一時刻を保持）
         return;
       }
 
@@ -3266,6 +3919,50 @@ function 割当結果を作成_(ss) {
             rowF[4] = '未割当';
             rowF[14] = (rowF[14] || '') + ' / 固定同士衝突で未割当';
             unassignedList.push({ date: rowF[1], youbi: rowF[2], pid: rowF[5], pname: rowF[6], needStaff: 1, slot: 1, reason: '固定同士が衝突' });
+            continue;
+          }
+
+          // EV vs COUPLED: EV優先（COUPLEDを落とす）
+          if (prev.kind === 'EV' && cur.kind === 'COUPLED') {
+            var rowCC = resultRows[cur.idx];
+            rowCC[3] = '';
+            rowCC[4] = '未割当';
+            rowCC[14] = (rowCC[14] || '') + ' / アンカー衝突(EV優先で2名体制未割当)';
+            unassignedList.push({ date: rowCC[1], youbi: rowCC[2], pid: rowCC[5], pname: rowCC[6], needStaff: 1, slot: 1, reason: 'アンカー衝突(EV優先)' });
+            continue;
+          }
+          if (prev.kind === 'COUPLED' && cur.kind === 'EV') {
+            var rowCP = resultRows[prev.idx];
+            rowCP[3] = '';
+            rowCP[4] = '未割当';
+            rowCP[14] = (rowCP[14] || '') + ' / アンカー衝突(EV優先で2名体制未割当)';
+            unassignedList.push({ date: rowCP[1], youbi: rowCP[2], pid: rowCP[5], pname: rowCP[6], needStaff: 1, slot: 1, reason: 'アンカー衝突(EV優先)' });
+            cleaned[cleaned.length - 1] = cur;
+            continue;
+          }
+
+          // COUPLED vs FIX: COUPLED優先（FIXを落とす）
+          if (prev.kind === 'COUPLED' && cur.kind === 'FIX') {
+            var rowCF = resultRows[cur.idx];
+            rowCF[3] = '';
+            rowCF[4] = '未割当';
+            rowCF[14] = (rowCF[14] || '') + ' / 2名体制優先で未割当';
+            unassignedList.push({ date: rowCF[1], youbi: rowCF[2], pid: rowCF[5], pname: rowCF[6], needStaff: 1, slot: 1, reason: '2名体制と固定が衝突' });
+            continue;
+          }
+          if (prev.kind === 'FIX' && cur.kind === 'COUPLED') {
+            var rowFC = resultRows[prev.idx];
+            rowFC[3] = '';
+            rowFC[4] = '未割当';
+            rowFC[14] = (rowFC[14] || '') + ' / 2名体制優先で未割当';
+            unassignedList.push({ date: rowFC[1], youbi: rowFC[2], pid: rowFC[5], pname: rowFC[6], needStaff: 1, slot: 1, reason: '2名体制と固定が衝突' });
+            cleaned[cleaned.length - 1] = cur;
+            continue;
+          }
+
+          // COUPLED同士: 両方残す（同じ患者のペアは別スタッフなので正常）
+          if (prev.kind === 'COUPLED' && cur.kind === 'COUPLED') {
+            cleaned.push(cur);
             continue;
           }
 
@@ -3750,11 +4447,7 @@ function 割当結果を作成_(ss) {
       return route;
     }
 
-    // 2名体制の行はルート最適化の並べ替え対象外（アンカー化用セット）
-    var coupledPlacedSet = {};
-    Object.keys(coupledVisitMap).forEach(function(baseId) {
-      coupledVisitMap[baseId].forEach(function(idx) { coupledPlacedSet[idx] = true; });
-    });
+    // 2名体制の行はルート最適化の並べ替え対象外（coupledIndexSet を使用）
 
     // staffDateMap を使って「スタッフ×日」ごとに処理
     Object.keys(staffDateMap).forEach(function(key){
@@ -3800,7 +4493,7 @@ function 割当結果を作成_(ss) {
         }
 
         // 2名体制の行はアンカーとして扱う（ルート最適化で並べ替えない）
-        if (coupledPlacedSet[rIdx]) {
+        if (coupledIndexSet[rIdx]) {
           if (s != null && e != null && e > s) anchors.push({ idx: rIdx, s: s, e: e });
           return;
         }
@@ -3926,6 +4619,37 @@ function 割当結果を作成_(ss) {
   var res同行 = applyStaff同行_(ss, resultRows);
   console.log(res同行.message);
 
+  // ★最終セーフガード：同一患者・同一日に同じスタッフが複数割当されていたら2つ目以降を未割当に
+  (function fixDuplicateStaffAssignment() {
+    var pidDateStaff = {}; // pid|dateStr -> { staffId: visitIdx }
+    var fixCount = 0;
+    for (var i = 0; i < resultRows.length; i++) {
+      var r = resultRows[i];
+      var vid = String(r[0] || '');
+      // _T_ (同行) 行はスキップ
+      if (vid.indexOf('_T_') >= 0) continue;
+      var sId = r[3], pid = r[5];
+      if (!sId || !pid || r[4] === '未割当') continue;
+      var d = r[1];
+      if (!(d instanceof Date)) continue;
+      var ds = Utilities.formatDate(d, tz, 'yyyy/MM/dd');
+      var key = pid + '|' + ds;
+      if (!pidDateStaff[key]) pidDateStaff[key] = {};
+      if (pidDateStaff[key][sId]) {
+        // 同一スタッフが既に割当済み → この行を未割当に
+        console.log('[DupFix] 同一スタッフ重複検出: vid=' + vid + ' staff=' + sId + ' pid=' + pid + ' date=' + ds + ' → 未割当に変更');
+        r[3] = '';
+        r[4] = '未割当';
+        r[14] = (r[14] || '') + ' / 同一スタッフ重複修正';
+        unassignedList.push({ date: d, youbi: r[2], pid: pid, pname: r[6], needStaff: 1, slot: 1, reason: '同一スタッフ重複(' + sId + ')' });
+        fixCount++;
+      } else {
+        pidDateStaff[key][sId] = i;
+      }
+    }
+    if (fixCount > 0) console.log('[DupFix] 同一スタッフ重複を ' + fixCount + ' 件修正しました');
+  })();
+
   // 割当結果シートに書き込み
   resultSheet.clear();
   var header = ['visit_id','日付','曜日','staff_id','スタッフ名','patient_id','患者名','エリア',
@@ -3945,17 +4669,67 @@ function 割当結果を作成_(ss) {
     historySheet.getRange(lastRow + 1, 1, histRows.length, 12).setValues(histRows);
   }
 
+  // ★割当不可リストを resultRows の最終状態から再構築（Level1再挿入・DupFix後の正確な状態を反映）
+  var finalUnassignedList = [];
+  for (var fui = 0; fui < resultRows.length; fui++) {
+    var fuRow = resultRows[fui];
+    // 未割当の行のみ（EV行・_T_行は除外）
+    var fuVid = String(fuRow[0] || '');
+    if (fuVid.indexOf('EV_') === 0) continue;
+    if (fuVid.indexOf('_T_') >= 0) continue;
+    if (!fuRow[5]) continue; // patient_idなし
+    if (fuRow[3] && fuRow[4] !== '未割当') continue; // 割当済み
+    // 備考から理由を抽出
+    var fuNote = String(fuRow[14] || '');
+    var fuReason = '条件を満たすスタッフなし';
+    if (fuNote.indexOf('アンカー衝突') >= 0) fuReason = 'アンカー衝突';
+    else if (fuNote.indexOf('EV優先') >= 0) fuReason = 'イベント優先で隙間に入らない';
+    else if (fuNote.indexOf('2名体制') >= 0) fuReason = '2名体制と固定が衝突';
+    else if (fuNote.indexOf('固定同士') >= 0) fuReason = '固定同士が衝突';
+    else if (fuNote.indexOf('同一スタッフ重複') >= 0) {
+      var dupMatch = fuNote.match(/同一スタッフ重複修正/);
+      fuReason = '同一スタッフ重複';
+    }
+    else if (fuNote.indexOf('maxPerDay') >= 0) fuReason = 'maxPerDay上限超過';
+    else if (fuNote.indexOf('ペア未確保') >= 0) fuReason = '2名体制ペア未確保';
+    else if (fuNote.indexOf('指定必須スタッフ割当不可') >= 0) fuReason = '指定必須スタッフ割当不可';
+    // needStaff判定（visit_idに"-"があればneedStaff=2由来）
+    var fuNeedStaff = 1;
+    var fuSlot = 1;
+    var fuVidMatch = fuVid.match(/^V\d+-(\d+)$/);
+    if (fuVidMatch) {
+      fuNeedStaff = 2;
+      fuSlot = parseInt(fuVidMatch[1], 10);
+    }
+    finalUnassignedList.push({
+      date: fuRow[1], youbi: fuRow[2], pid: fuRow[5], pname: fuRow[6],
+      needStaff: fuNeedStaff, slot: fuSlot, reason: fuReason
+    });
+  }
+
   // 割当不可シートへ出力
   var ngSheet = ss.getSheetByName('割当不可');
   if (!ngSheet) ngSheet = ss.insertSheet('割当不可');
   ngSheet.clear();
   ngSheet.getRange(1, 1, 1, 7).setValues([['日付', '曜日', 'patient_id', '患者名', '必要スタッフ数', '未割当枠', '理由']]);
-  if (unassignedList.length > 0) {
-    var ngOut = unassignedList.map(function(x){ return [x.date, x.youbi, x.pid, x.pname, x.needStaff, x.slot, x.reason]; });
+  if (finalUnassignedList.length > 0) {
+    var ngOut = finalUnassignedList.map(function(x){ return [x.date, x.youbi, x.pid, x.pname, x.needStaff, x.slot, x.reason]; });
     ngSheet.getRange(2, 1, ngOut.length, 7).setValues(ngOut);
   }
 
-  return { message: '割当結果を ' + resultRows.length + ' 件作成しました。割当不可: ' + unassignedList.length + ' 件' };
+  // 監査キャッシュをクリア（割当結果が変わったため）
+  try {
+    if (weeklyRequests.length > 0) {
+      var firstDate = new Date(weeklyRequests[0].date);
+      var dayOfWeek = firstDate.getDay();
+      var diffToMon = (dayOfWeek + 6) % 7;
+      firstDate.setDate(firstDate.getDate() - diffToMon);
+      var cacheWeekStr = Utilities.formatDate(firstDate, tz, 'yyyy/MM/dd');
+      audit_clearCache(cacheWeekStr);
+    }
+  } catch(e) { console.log('audit cache clear skipped: ' + e); }
+
+  return { message: '割当結果を ' + resultRows.length + ' 件作成しました。割当不可: ' + finalUnassignedList.length + ' 件' };
 }
 
 // ============================================================
@@ -4365,13 +5139,13 @@ function 週間リクエストを生成_(ss, weekStartStr) {
 
     function makeTimeWindow(timeTypeRaw, startPref, endPref, svcMin) {
       const t = inferTimeType(timeTypeRaw, startPref, endPref, svcMin);
-      let start = startPref, end = endPref, earliest = null, latest = null;
-      if (t === '固定') { if (!end && start && svcMin) end = calcEndTime(start, svcMin); earliest = start; latest = end; }
-      else if (t === '時間帯') { earliest = startPref; latest = endPref; if (!start && earliest) start = earliest; if (!end && start && svcMin) end = calcEndTime(start, svcMin); }
-      else if (t === '午前') { earliest = makeTimeValue(9, 0); latest = makeTimeValue(12, 0); if (!start) start = earliest; if (!end && start && svcMin) end = calcEndTime(start, svcMin); }
-      else if (t === '午後') { earliest = makeTimeValue(13, 0); latest = makeTimeValue(17, 0); if (!start) start = earliest; if (!end && start && svcMin) end = calcEndTime(start, svcMin); }
-      else if (t === '終日') { earliest = makeTimeValue(9, 0); latest = makeTimeValue(18, 0); if (!start) start = earliest; if (!end && start && svcMin) end = calcEndTime(start, svcMin); }
-      else { if (!end && start && svcMin) end = calcEndTime(start, svcMin); earliest = start; latest = end; }
+      let start = startPref, end = null, earliest = null, latest = null;
+      if (t === '固定') { earliest = start; latest = (start && svcMin) ? calcEndTime(start, svcMin) : endPref; end = latest; }
+      else if (t === '時間帯') { earliest = startPref; latest = endPref; if (!start && earliest) start = earliest; end = (start && svcMin) ? calcEndTime(start, svcMin) : null; }
+      else if (t === '午前') { earliest = makeTimeValue(9, 0); latest = makeTimeValue(12, 0); if (!start) start = earliest; end = (start && svcMin) ? calcEndTime(start, svcMin) : null; }
+      else if (t === '午後') { earliest = makeTimeValue(13, 0); latest = makeTimeValue(17, 0); if (!start) start = earliest; end = (start && svcMin) ? calcEndTime(start, svcMin) : null; }
+      else if (t === '終日') { earliest = makeTimeValue(9, 0); latest = makeTimeValue(18, 0); if (!start) start = earliest; end = (start && svcMin) ? calcEndTime(start, svcMin) : null; }
+      else { end = (start && svcMin) ? calcEndTime(start, svcMin) : endPref; earliest = start; latest = end; }
       return { start, end, earliest, latest, timeType: t };
     }
 
@@ -4713,6 +5487,75 @@ function 週間リクエストを生成_(ss, weekStartStr) {
   } finally {
     lock.releaseLock();
   }
+}
+
+// ============================================================
+// 割当不可シートを割当結果シートから再構築（独立実行可能）
+// ============================================================
+
+function 割当不可を再構築_(ss) {
+  var tz = ss.getSpreadsheetTimeZone();
+  var resultSheet = ss.getSheetByName('割当結果');
+  if (!resultSheet || resultSheet.getLastRow() <= 1) {
+    throw new Error('「割当結果」シートにデータがありません。');
+  }
+
+  var values = resultSheet.getDataRange().getValues();
+  var header = values[0];
+  var data = values.slice(1);
+
+  var idxVid     = header.indexOf('visit_id');
+  var idxDate    = header.indexOf('日付');
+  var idxYoubi   = header.indexOf('曜日');
+  var idxStaffId = header.indexOf('staff_id');
+  var idxStaffNm = header.indexOf('スタッフ名');
+  var idxPid     = header.indexOf('patient_id');
+  var idxPname   = header.indexOf('患者名');
+  var idxNote    = header.indexOf('備考');
+
+  var ngList = [];
+  data.forEach(function(row) {
+    var vid = String(row[idxVid] || '');
+    // EV行・同行行は除外
+    if (vid.indexOf('EV_') === 0) return;
+    if (vid.indexOf('_T_') >= 0) return;
+    var pid = row[idxPid];
+    if (!pid) return;
+    var staffId = String(row[idxStaffId] || '').trim();
+    var staffNm = String(row[idxStaffNm] || '').trim();
+    // 割当済みはスキップ
+    if (staffId && staffNm !== '未割当') return;
+
+    // 備考から理由を抽出
+    var note = String(row[idxNote] || '');
+    var reason = '条件を満たすスタッフなし';
+    if (note.indexOf('アンカー衝突') >= 0 && note.indexOf('EV優先') >= 0) reason = 'アンカー衝突(EV優先)';
+    else if (note.indexOf('EV優先') >= 0 && note.indexOf('隙間') >= 0) reason = 'イベント優先で隙間に入らない';
+    else if (note.indexOf('2名体制優先') >= 0) reason = '2名体制と固定が衝突';
+    else if (note.indexOf('2名体制') >= 0 && note.indexOf('衝突') >= 0) reason = '2名体制と固定が衝突';
+    else if (note.indexOf('固定同士') >= 0) reason = '固定同士が衝突';
+    else if (note.indexOf('同一スタッフ重複') >= 0) reason = '同一スタッフ重複';
+    else if (note.indexOf('maxPerDay') >= 0) reason = 'maxPerDay上限超過';
+    else if (note.indexOf('ペア未確保') >= 0) reason = '2名体制ペア未確保';
+    else if (note.indexOf('指定必須') >= 0) reason = '指定必須スタッフ割当不可';
+    else if (note.indexOf('再挿入') >= 0) reason = '再挿入失敗';
+
+    var needStaff = 1, slot = 1;
+    var m = vid.match(/^V\d+-(\d+)$/);
+    if (m) { needStaff = 2; slot = parseInt(m[1], 10); }
+
+    ngList.push([row[idxDate], row[idxYoubi], pid, row[idxPname], needStaff, slot, reason]);
+  });
+
+  var ngSheet = ss.getSheetByName('割当不可');
+  if (!ngSheet) ngSheet = ss.insertSheet('割当不可');
+  ngSheet.clear();
+  ngSheet.getRange(1, 1, 1, 7).setValues([['日付', '曜日', 'patient_id', '患者名', '必要スタッフ数', '未割当枠', '理由']]);
+  if (ngList.length > 0) {
+    ngSheet.getRange(2, 1, ngList.length, 7).setValues(ngList);
+  }
+
+  return { message: '割当不可シートを再構築しました（' + ngList.length + '件）' };
 }
 
 // ============================================================

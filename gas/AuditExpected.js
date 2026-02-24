@@ -79,8 +79,12 @@ function audit_buildExpected_(dataset) {
       } else {
         // === (2) MASTER（通常期待）を作る ===
         if (master && audit_isMasterVisitDay_(master, youbi)) {
-          var exp = audit_buildExpectedFromMaster_(pid, dateStr, master);
-          dayExpected.visits.push(exp);
+          var staffCount = master.needStaff || 1;
+          for (var si = 0; si < staffCount; si++) {
+            var exp = audit_buildExpectedFromMaster_(pid, dateStr, master);
+            exp.staffSlot = si + 1;  // 1-indexed スタッフ枠番号
+            dayExpected.visits.push(exp);
+          }
         }
       }
 
