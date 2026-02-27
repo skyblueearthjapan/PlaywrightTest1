@@ -408,11 +408,21 @@ def click_schedule_entry(page, day: int, start_time: str) -> bool:
             page.wait_for_timeout(2000)
             return True
 
-        # 複数件 → 時間で絞り込み
+        # 複数件 → 時間で絞り込み（正規表現で完全一致優先）
         print(f"    {day}日に{len(candidate_links)}件のエントリを発見 → 時間 '{start_time}' で絞り込み")
+        # 完全一致: "HH:MM" が time_text の先頭または "～" の後に出現
+        pattern = r'(?:^|\s)' + re.escape(start_time) + r'(?:\s|～|$)'
+        for c in candidate_links:
+            if re.search(pattern, c["time_text"]):
+                print(f"    時間一致: {c['time_text'].strip()}")
+                _click_with_scroll(page, c["link"])
+                page.wait_for_timeout(2000)
+                return True
+
+        # 正規表現でマッチしなかった場合、部分一致にフォールバック
         for c in candidate_links:
             if start_time in c["time_text"]:
-                print(f"    時間一致: {c['time_text'].strip()}")
+                print(f"    時間一致(部分): {c['time_text'].strip()}")
                 _click_with_scroll(page, c["link"])
                 page.wait_for_timeout(2000)
                 return True
@@ -1088,12 +1098,26 @@ def click_register_button(page) -> bool:
             pass
         page.wait_for_timeout(2000)
 
-        # モーダルが閉じたか確認
+        # エラーメッセージチェック
+        error_msgs = page.evaluate("""() => {
+            const msgs = [];
+            document.querySelectorAll('.error, .alert-danger, .text-danger, .err_msg, .message_error').forEach(el => {
+                const text = el.textContent.trim();
+                if (text && text.length > 2 && text !== '*') msgs.push(text.substring(0, 200));
+            });
+            return msgs;
+        }""")
+        if error_msgs:
+            print(f"    登録エラー検出: {error_msgs}")
+            close_edit_dialog(page)
+            return False
+
+        # モーダルが閉じたか確認（閉じていなければ失敗）
         try:
             if register_button.is_visible(timeout=2000):
-                print("    警告: 登録後もモーダルが開いたままです。閉じます...")
+                print("    警告: 登録後もモーダルが開いたままです → 登録失敗と判定")
                 close_edit_dialog(page)
-                page.wait_for_timeout(1000)
+                return False
         except Exception:
             pass
 
@@ -1568,14 +1592,14 @@ def fill_nursing_insurance_fields(page, start_time: str, end_time: str) -> bool:
                 page.wait_for_load_state("networkidle", timeout=5000)
             except Exception:
                 pass
-            page.wait_for_timeout(2000)
+            page.wait_for_timeout(3000)
             print("    保険区分: 介護保険 を選択")
 
         # サービス種類: 訪問看護（AJAX後にオプションが読み込まれる）
         service_kind = page.locator("select#inPopupServiceKindId")
         if service_kind.is_visible(timeout=5000):
             # オプションが読み込まれるまで待つ（空optionのみの場合がある）
-            for _ in range(10):
+            for _ in range(15):
                 options = service_kind.locator("option").all()
                 if len(options) > 1:
                     break
@@ -1594,6 +1618,9 @@ def fill_nursing_insurance_fields(page, start_time: str, end_time: str) -> bool:
                     _select_and_wait(page, service_kind, text, "サービス種類")
                     selected = True
                     break
+            # サービス種類選択後、次のselectオプション読み込み待機
+            if selected:
+                page.wait_for_timeout(1000)
             if not selected:
                 # フォールバック: "訪問看護" を含む最初のオプションを選択
                 for opt in options:
@@ -1601,6 +1628,7 @@ def fill_nursing_insurance_fields(page, start_time: str, end_time: str) -> bool:
                     if "訪問看護" in text:
                         _select_and_wait(page, service_kind, text, "サービス種類(fallback)")
                         selected = True
+                        page.wait_for_timeout(1000)
                         break
             if not selected:
                 print("    警告: '訪問看護' オプションが見つかりません")
@@ -1609,7 +1637,7 @@ def fill_nursing_insurance_fields(page, start_time: str, end_time: str) -> bool:
         estimate1 = page.locator("select#inPopupEstimate1")
         if estimate1.is_visible(timeout=5000):
             # オプションが読み込まれるまで待つ
-            for _ in range(10):
+            for _ in range(15):
                 options = estimate1.locator("option").all()
                 if len(options) > 1:
                     break
@@ -1625,7 +1653,7 @@ def fill_nursing_insurance_fields(page, start_time: str, end_time: str) -> bool:
         estimate4 = page.locator("select#inPopupEstimate4")
         if estimate4.is_visible(timeout=5000):
             # オプションが読み込まれるまで待つ
-            for _ in range(10):
+            for _ in range(15):
                 options = estimate4.locator("option").all()
                 if len(options) > 1:
                     break
@@ -2196,7 +2224,11 @@ def apply_correction(page, correction: Correction, dry_run: bool = False, month_
         day = int(correction.date_from) if correction.date_from.isdigit() else 1
         if not delete_schedule_entry(page, day, correction.start_time_from, dry_run):
             return False
-        # 削除後のページ安定待機（カレンダー再描画完了まで）
+        # 削除後: networkidle待機 + カレンダー再描画待機
+        try:
+            page.wait_for_load_state("networkidle", timeout=10000)
+        except Exception:
+            pass
         page.wait_for_timeout(3000)
         result = add_schedule_entry(page, correction, dry_run)
         if not result:
@@ -2214,7 +2246,11 @@ def apply_correction(page, correction: Correction, dry_run: bool = False, month_
             day = int(correction.date_from) if correction.date_from.isdigit() else 1
             if not delete_schedule_entry(page, day, correction.start_time_from, dry_run):
                 return False
-            # 削除後のページ安定待機（カレンダー再描画完了まで）
+            # 削除後: networkidle待機 + カレンダー再描画待機
+            try:
+                page.wait_for_load_state("networkidle", timeout=10000)
+            except Exception:
+                pass
             page.wait_for_timeout(3000)
             result = add_schedule_entry(page, correction, dry_run)
             if not result:
@@ -2404,6 +2440,21 @@ def run_auto_apply(
                     if c.user_name not in users:
                         users[c.user_name] = []
                     users[c.user_name].append(c)
+
+                # 同日correction順序の確定: 日付→アクション優先度でソート
+                # delete→date_change→edit→addの順で処理することで、
+                # editの「削除→再追加」がaddのエントリを誤って削除しない
+                ACTION_ORDER = {"delete": 0, "date_change": 1, "edit": 2, "add": 3}
+                for user_name in users:
+                    users[user_name].sort(key=lambda c: (
+                        int(c.date_from) if c.date_from and c.date_from.isdigit() else
+                        int(c.date_to) if c.date_to and c.date_to.isdigit() else 99,
+                        ACTION_ORDER.get(c.action, 9)
+                    ))
+                    # ソート結果をログ出力
+                    for c in users[user_name]:
+                        day = c.date_from or c.date_to
+                        print(f"  [ソート済] {user_name} {day}日 {c.action} ({c.business_type})")
 
                 for user_name, user_corrections in users.items():
                     if is_stop_requested():
