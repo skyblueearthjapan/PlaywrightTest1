@@ -10,8 +10,10 @@ VNC/noVNC経由でブラウザ画面をリアルタイム配信します。
 
 エンドポイント:
     POST /api/expand  - 月間スケジュール展開
-    POST /api/export  - CSV出力
+    POST /api/export  - CSV出力（async対応）
+    GET  /api/export/result - CSV出力結果取得（ポーリング用）
     POST /api/apply   - 差分適用
+    GET  /api/apply/result  - 差分適用結果取得（ポーリング用）
     GET  /api/status  - サーバー状態確認
 
     # VNC/ジョブ管理API
@@ -180,6 +182,13 @@ apply_progress = {
     "updated_at": None,
 }
 
+# export結果を保存（非同期完了後にGASが取得可能）
+export_result_store = {
+    "result": None,
+    "completed_at": None,
+    "error": None,
+}
+
 
 @app.route('/api/status', methods=['GET'])
 def api_status():
@@ -275,10 +284,90 @@ def api_expand():
             current_task = {"running": False, "command": None, "started_at": None}
 
 
+def _run_export_core(data):
+    """export処理の共通ロジック。結果dictを返す。"""
+    month = data.get("month", "2026-04")
+    out_path = data.get("out_path")
+    auto_drive_upload = data.get("auto_drive_upload", False)
+    week_start = data.get("week_start")  # "2026-04-06" or "20260406"
+    week_end = data.get("week_end")       # "2026-04-12" or "20260412"
+
+    headless = data.get("headless", False)
+    result = run_export(
+        month=month,
+        out_path=out_path,
+        headless=headless,
+    )
+
+    # CSV内容をレスポンスに含める
+    csv_path = Path(result.get("file_path", ""))
+    if csv_path.exists():
+        csv_content = None
+        for enc in ["cp932", "utf-8-sig", "utf-8"]:
+            try:
+                csv_content = csv_path.read_text(encoding=enc)
+                break
+            except UnicodeDecodeError:
+                continue
+        if csv_content:
+            result["csv_content"] = csv_content
+            result["row_count"] = csv_content.count("\n")
+            result["file_size_bytes"] = csv_path.stat().st_size
+
+    # export_timestamp を追加
+    result["export_timestamp"] = datetime.now().isoformat()
+
+    # drive_file 情報を追加（GAS側でDriveアップロードする際に使用）
+    try:
+        config = load_drive_config()
+        folder_id = config.get("folder_id")
+        if folder_id:
+            month_str = month.replace("-", "")
+            drive_filename = config.get("current_csv_name", "kaipoke_export_{month}.csv")
+            drive_filename = drive_filename.replace("{month}", month_str)
+            result["drive_file"] = {
+                "filename": drive_filename,
+                "folder_id": folder_id,
+            }
+            # week_start/week_end が指定された場合、検証用ファイル名も追加
+            if week_start and week_end:
+                ws = week_start.replace("-", "")
+                we = week_end.replace("-", "")
+                result["drive_file"]["verification_filename"] = f"kaipoke_current_{ws}_{we}_post_apply.csv"
+    except Exception:
+        pass
+
+    # Google Driveに自動アップロード（Shared Drive使用時のみ有効）
+    if auto_drive_upload and result.get("success"):
+        try:
+            config = load_drive_config()
+            folder_id = config.get("folder_id")
+            if folder_id:
+                month_str = month.replace("-", "")
+                drive_filename = config.get("current_csv_name", "kaipoke_export_{month}.csv")
+                drive_filename = drive_filename.replace("{month}", month_str)
+                file_id = upload_to_drive(
+                    str(csv_path), folder_id, filename=drive_filename
+                )
+                if file_id:
+                    result["drive_file_id"] = file_id
+                    result["drive_filename"] = drive_filename
+                    add_log(f"Driveアップロード完了: {drive_filename}")
+                else:
+                    add_log("Driveアップロードに失敗（サービスアカウント未設定の可能性）")
+            else:
+                add_log("Drive folder_idが未設定です")
+        except Exception as e:
+            add_log(f"Driveアップロードエラー: {e}")
+            result["drive_error"] = str(e)
+
+    return result
+
+
 @app.route('/api/export', methods=['POST'])
 def api_export():
-    """CSV出力 API（Drive自動保存対応）"""
-    global current_task
+    """CSV出力 API（Drive自動保存対応・非同期モード対応）"""
+    global current_task, export_result_store
 
     with job_state_lock:
         if current_task["running"]:
@@ -293,104 +382,131 @@ def api_export():
             "started_at": datetime.now().isoformat(),
         }
 
+    async_mode = False
     try:
         data = request.get_json() or {}
         month = data.get("month", "2026-04")
-        out_path = data.get("out_path")
-        auto_drive_upload = data.get("auto_drive_upload", False)
-        week_start = data.get("week_start")  # "2026-04-06" or "20260406"
-        week_end = data.get("week_end")       # "2026-04-12" or "20260412"
+        async_mode = data.get("async", False)
 
         clear_stop()  # 非常停止フラグをクリア
-        add_log(f"export 開始 (month={month})")
-        print(f"\n=== API: export 開始 (month={month}) ===")
+        add_log(f"export 開始 (month={month}, async={async_mode})")
+        print(f"\n=== API: export 開始 (month={month}, async={async_mode}) ===")
 
-        headless = data.get("headless", False)
-        result = run_export(
-            month=month,
-            out_path=out_path,
-            headless=headless,
-        )
+        if async_mode:
+            # 非同期モード: バックグラウンドスレッドで実行し即座にレスポンス
+            export_result_store = {"result": None, "completed_at": None, "error": None}
 
-        # CSV内容をレスポンスに含める
-        csv_path = Path(result.get("file_path", ""))
-        if csv_path.exists():
-            csv_content = None
-            for enc in ["cp932", "utf-8-sig", "utf-8"]:
+            # リクエストデータをコピー（Flaskリクエストコンテキスト外で使用するため）
+            request_data = dict(data)
+
+            def run_export_async():
+                global current_task, export_result_store
                 try:
-                    csv_content = csv_path.read_text(encoding=enc)
-                    break
-                except UnicodeDecodeError:
-                    continue
-            if csv_content:
-                result["csv_content"] = csv_content
-                result["row_count"] = csv_content.count("\n")
-                result["file_size_bytes"] = csv_path.stat().st_size
+                    result = _run_export_core(request_data)
+                    add_log(f"export 完了: success={result.get('success')}")
+                    with job_state_lock:
+                        export_result_store = {
+                            "result": result,
+                            "completed_at": datetime.now().isoformat(),
+                            "error": None,
+                        }
+                except Exception as e:
+                    add_log(f"export エラー: {e}")
+                    print(f"エラー: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    with job_state_lock:
+                        export_result_store = {
+                            "result": None,
+                            "completed_at": datetime.now().isoformat(),
+                            "error": str(e),
+                        }
+                finally:
+                    with job_state_lock:
+                        current_task = {"running": False, "command": None, "started_at": None}
 
-        # export_timestamp を追加
-        result["export_timestamp"] = datetime.now().isoformat()
+            thread = threading.Thread(target=run_export_async, daemon=True)
+            thread.start()
 
-        # drive_file 情報を追加（GAS側でDriveアップロードする際に使用）
-        try:
-            config = load_drive_config()
-            folder_id = config.get("folder_id")
-            if folder_id:
-                month_str = month.replace("-", "")
-                drive_filename = config.get("current_csv_name", "kaipoke_export_{month}.csv")
-                drive_filename = drive_filename.replace("{month}", month_str)
-                result["drive_file"] = {
-                    "filename": drive_filename,
-                    "folder_id": folder_id,
-                }
-                # week_start/week_end が指定された場合、検証用ファイル名も追加
-                if week_start and week_end:
-                    ws = week_start.replace("-", "")
-                    we = week_end.replace("-", "")
-                    result["drive_file"]["verification_filename"] = f"kaipoke_current_{ws}_{we}_post_apply.csv"
-        except Exception:
-            pass
+            return jsonify({
+                "success": True,
+                "async": True,
+                "message": "CSV出力を開始しました。/api/export/result でポーリングしてください。",
+            })
 
-        # Google Driveに自動アップロード（Shared Drive使用時のみ有効）
-        if auto_drive_upload and result.get("success"):
-            try:
-                config = load_drive_config()
-                folder_id = config.get("folder_id")
-                if folder_id:
-                    month_str = month.replace("-", "")
-                    drive_filename = config.get("current_csv_name", "kaipoke_export_{month}.csv")
-                    drive_filename = drive_filename.replace("{month}", month_str)
-                    file_id = upload_to_drive(
-                        str(csv_path), folder_id, filename=drive_filename
-                    )
-                    if file_id:
-                        result["drive_file_id"] = file_id
-                        result["drive_filename"] = drive_filename
-                        add_log(f"Driveアップロード完了: {drive_filename}")
-                    else:
-                        add_log("Driveアップロードに失敗（サービスアカウント未設定の可能性）")
-                else:
-                    add_log("Drive folder_idが未設定です")
-            except Exception as e:
-                add_log(f"Driveアップロードエラー: {e}")
-                result["drive_error"] = str(e)
-
-        add_log(f"export 完了: success={result.get('success')}")
-        return jsonify({
-            "success": True,
-            "result": result,
-        })
+        else:
+            # 同期モード: 従来どおり結果を直接返す
+            result = _run_export_core(data)
+            add_log(f"export 完了: success={result.get('success')}")
+            return jsonify({
+                "success": True,
+                "result": result,
+            })
 
     except Exception as e:
         add_log(f"export エラー: {e}")
         print(f"エラー: {e}")
+        with job_state_lock:
+            current_task = {"running": False, "command": None, "started_at": None}
         return jsonify({
             "success": False,
             "error": str(e),
         }), 500
 
     finally:
-        with job_state_lock:
-            current_task = {"running": False, "command": None, "started_at": None}
+        # 同期モードの場合のみここでリセット（非同期はスレッド内でリセット）
+        if not async_mode:
+            with job_state_lock:
+                current_task = {"running": False, "command": None, "started_at": None}
+
+
+@app.route('/api/export/result', methods=['GET'])
+def api_export_result():
+    """CSV出力の結果を取得（ポーリング用）
+
+    GASから定期的に呼び出し、exportが完了したかを確認する。
+    - status=running: まだ実行中
+    - status=completed: 完了（結果あり、csv_content含む）
+    - status=error: エラーで終了
+    - status=no_result: まだ一度も実行されていない
+    """
+    with job_state_lock:
+        running = current_task.get("running", False) and current_task.get("command") == "export"
+
+    if running:
+        return jsonify({
+            "success": True,
+            "status": "running",
+            "message": "CSV出力中...",
+            "started_at": current_task.get("started_at"),
+        })
+
+    # 完了済み
+    with job_state_lock:
+        store = dict(export_result_store)
+
+    if store.get("error"):
+        return jsonify({
+            "success": False,
+            "status": "error",
+            "error": store["error"],
+            "completed_at": store.get("completed_at"),
+        })
+
+    if store.get("result"):
+        return jsonify({
+            "success": True,
+            "status": "completed",
+            "result": store["result"],
+            "completed_at": store.get("completed_at"),
+        })
+
+    # まだ一度も実行されていない
+    return jsonify({
+        "success": False,
+        "status": "no_result",
+        "message": "export結果がありません。先に /api/export を呼び出してください。",
+    })
 
 
 @app.route('/api/apply', methods=['POST'])
@@ -964,7 +1080,8 @@ def api_test():
             "GET  /api/status        - サーバー状態確認",
             "GET  /api/test          - 接続テスト",
             "POST /api/expand        - 月間スケジュール展開",
-            "POST /api/export        - CSV出力（Drive自動保存）",
+            "POST /api/export        - CSV出力（async対応・Drive自動保存）",
+            "GET  /api/export/result - CSV出力結果取得（ポーリング用）",
             "POST /api/diff          - 差分確認（CSV内容/Drive/ファイルパス対応）",
             "POST /api/diff/validate - 差分データ検証",
             "POST /api/apply         - 差分適用（インラインデータ対応）",
@@ -1226,7 +1343,8 @@ if __name__ == '__main__':
     print("  GET/POST /api/test   - 接続テスト")
     print("  GET  /api/status     - サーバー状態確認")
     print("  POST /api/expand     - 月間スケジュール展開")
-    print("  POST /api/export     - CSV出力")
+    print("  POST /api/export     - CSV出力（async対応）")
+    print("  GET  /api/export/result - CSV出力結果取得")
     print("  POST /api/diff       - 差分確認")
     print("  POST /api/apply      - 差分適用")
     print("  GET/POST /api/config - 設定取得/更新")
