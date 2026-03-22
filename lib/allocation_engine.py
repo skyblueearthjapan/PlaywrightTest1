@@ -113,6 +113,8 @@ class AllocationEngine:
         self.staff_day_visits: Dict[str, List[int]] = {}  # "staffId|dateStr" -> [result idx]
         self.pid_date_staff: Dict[str, Set[str]] = {}     # "pid|dateStr" -> {staffId}
         self.last_assigned_by_patient: Dict[str, str] = {}  # pid -> staffId (dynamic)
+        # Level1用: 結果indexからリクエスト制約情報を引くマップ
+        self._request_constraints: Dict[int, Dict] = {}  # result_idx -> {ng_staff_ids, sex_limit}
 
     # ==================================================================
     # Public entry point
@@ -131,6 +133,15 @@ class AllocationEngine:
         # Filter cancelled
         active_requests = [r for r in requests if r.change_type != "キャンセル"]
 
+        # Step 0.1 - apply special week (REPLACE/ADD)
+        active_requests = self._apply_special_week(active_requests)
+
+        # Step 0.2 - apply patient changes (キャンセル/追加/時間変更/スタッフ変更)
+        active_requests = self._apply_patient_changes(active_requests)
+
+        # Step 0.3 - enrich from weekly patterns (時間窓補完)
+        active_requests = self._enrich_from_patterns(active_requests)
+
         # Step 1 - events
         self._insert_events()
 
@@ -140,6 +151,9 @@ class AllocationEngine:
         # Step 3 - initial allocation
         logger.info("Level 0: Allocating %d requests...", len(sorted_requests))
         self._level0_allocate(sorted_requests)
+
+        # Step 3.5 - enforce coupled atomicity after Level 0
+        self._enforce_coupled_atomicity()
 
         # Step 4 - sync coupled
         self._sync_coupled_times()
@@ -172,6 +186,9 @@ class AllocationEngine:
         # Step 9 - overlap fix
         self._fix_cross_patient_overlaps()
         self._sync_coupled_times()
+
+        # Step 10 - mentor pair expansion (post-processing)
+        self._apply_mentor_pairs()
 
         # Summary
         assigned_count = sum(
@@ -333,6 +350,10 @@ class AllocationEngine:
                     idx = len(self.results)
                     self.results.append(result)
                     self._register_assignment(chosen.sid, req.date_str, idx, pid=req.pid)
+                    self._request_constraints[idx] = {
+                        "ng_staff_ids": req.ng_staff_ids,
+                        "sex_limit": req.sex_limit,
+                    }
 
                     # Track movement distance
                     patient = self.patient_map.get(req.pid)
@@ -342,7 +363,12 @@ class AllocationEngine:
                         )
                 else:
                     result.note += " [未割当: 条件を満たすスタッフなし]"
+                    uidx = len(self.results)
                     self.results.append(result)
+                    self._request_constraints[uidx] = {
+                        "ng_staff_ids": req.ng_staff_ids,
+                        "sex_limit": req.sex_limit,
+                    }
                     self.unassigned.append({
                         "date_str": req.date_str,
                         "pid": req.pid,
@@ -379,13 +405,26 @@ class AllocationEngine:
             return None  # required staff unavailable
 
         # ---- Same-person preference ----
-        if cont_pref == "同じ人希望" and req.prev_staff_id:
-            staff = self.staff_map.get(req.prev_staff_id)
-            if (staff
-                    and req.prev_staff_id not in used_staff_ids
-                    and req.prev_staff_id not in req.ng_staff_ids
-                    and self._is_staff_available(staff, req)):
-                return staff
+        if cont_pref == "同じ人希望":
+            # 1. prev_staff_idが指定されていればそれを優先
+            if req.prev_staff_id:
+                staff = self.staff_map.get(req.prev_staff_id)
+                if (staff
+                        and req.prev_staff_id not in used_staff_ids
+                        and req.prev_staff_id not in req.ng_staff_ids
+                        and self._is_staff_available(staff, req)):
+                    return staff
+            # 2. confirmed_historyから最頻担当スタッフを検索
+            history_records = self.rotation_history.get(req.pid, [])
+            if history_records:
+                from collections import Counter
+                staff_counts = Counter(h.staff_id for h in history_records)
+                for sid, _ in staff_counts.most_common():
+                    if sid in used_staff_ids or sid in req.ng_staff_ids:
+                        continue
+                    staff = self.staff_map.get(sid)
+                    if staff and self._is_staff_available(staff, req):
+                        return staff
 
         # ---- Build scored candidate list ----
         candidates = self._build_candidate_list(req, used_staff_ids, cont_pref, dynamic_prev)
@@ -464,16 +503,17 @@ class AllocationEngine:
 
         return candidates
 
-    @staticmethod
     def _apply_rotation_ranking(
+        self,
         candidates: List[dict],
         req: VisitRequest,
         dynamic_prev: Optional[str],
     ) -> List[dict]:
         """Filter and rank candidates for rotation preference.
 
-        Prefers staff who have not yet visited this patient this week and
-        applies a weekday-based shift to distribute evenly.
+        Prefers staff who have not yet visited this patient this week,
+        excludes recently assigned staff from confirmed_history,
+        and applies a weekday-based shift to distribute evenly.
         """
         # Prefer staff not yet assigned to this patient this week
         unassigned_this_week = [c for c in candidates if c["patient_count"] == 0]
@@ -485,6 +525,15 @@ class AllocationEngine:
             non_prev = [c for c in candidates if not c["is_dynamic_prev"]]
             if non_prev:
                 candidates = non_prev
+
+        # Exclude recent staff from confirmed_history (past 2 assignments)
+        history_records = self.rotation_history.get(req.pid, [])
+        if history_records and len(candidates) > 1:
+            sorted_hist = sorted(history_records, key=lambda h: h.date_str, reverse=True)
+            recent_sids = set(h.staff_id for h in sorted_hist[:2])
+            non_recent = [c for c in candidates if c["staff"].sid not in recent_sids]
+            if non_recent:
+                candidates = non_recent
 
         # Weekday rotation shift
         day_idx = weekday_index(req.weekday)
@@ -750,6 +799,8 @@ class AllocationEngine:
                     logger.debug(
                         "GapPack: visit %s could not fit, unassigning", r.visit_id,
                     )
+                    if r.staff_id:
+                        self._unregister_assignment(r.staff_id, r.date_str, idx)
                     r.staff_id = ""
                     r.staff_name = ""
                     r.note += " [GapPack: 隙間に入らず未割当]"
@@ -771,9 +822,14 @@ class AllocationEngine:
                 continue
 
             # Build distance-sorted candidates (top 10)
+            constraints = self._request_constraints.get(idx, {})
+            ng_ids = constraints.get("ng_staff_ids", [])
+            sex_lim = constraints.get("sex_limit", "")
             candidates: List[Tuple[Staff, float]] = []
             for staff in self.staff_list:
-                if not self._is_staff_available_for_reinsertion(staff, r):
+                if not self._is_staff_available_for_reinsertion(
+                    staff, r, ng_staff_ids=ng_ids, sex_limit=sex_lim
+                ):
                     continue
                 dist = calc_distance_km(staff.lat, staff.lng, patient.lat, patient.lng)
                 candidates.append((staff, dist if dist is not None else 99999.0))
@@ -799,13 +855,29 @@ class AllocationEngine:
 
     def _is_staff_available_for_reinsertion(
         self, staff: Staff, r: AssignmentResult,
+        ng_staff_ids: Optional[List[str]] = None,
+        sex_limit: str = "",
     ) -> bool:
-        """Quick eligibility check for Level-1 reinsertion."""
+        """Quick eligibility check for Level-1 reinsertion.
+
+        Now includes NG staff and gender checks (previously missing).
+        """
+        # H1: NGスタッフ除外
+        if ng_staff_ids and staff.sid in ng_staff_ids:
+            return False
+        # H2: 性別制限
+        if sex_limit == "女性のみ" and staff.gender != "女性":
+            return False
+        if sex_limit == "男性のみ" and staff.gender != "男性":
+            return False
+        # H3: 勤務曜日
         if staff.work_days and r.weekday not in staff.work_days:
             return False
+        # H6: maxPerDay (soft_capで統一)
         key = f"{staff.sid}|{r.date_str}"
-        if self.assign_count.get(key, 0) >= staff.max_per_day:
+        if self.assign_count.get(key, 0) >= staff.soft_cap():
             return False
+        # H5: スタッフ個別変更（終日不可チェック）
         blocked = self._get_blocked_intervals(staff.sid, r.date_str)
         for iv in blocked:
             if iv.start <= 0 and iv.end >= 1440:
@@ -954,10 +1026,18 @@ class AllocationEngine:
                     svc = node["svc_min"]
                     if t + svc <= gap.end:
                         r = self.results[node["idx"]]
-                        r.start_min = t
-                        r.end_min = t + svc
-                        t += svc + EXTRA_BUFFER_MIN
-                        opt_idx += 1
+                        # 時間窓制約チェック
+                        eff_earliest, eff_latest = get_effective_window(
+                            r.time_type, r.earliest_min, r.latest_min
+                        )
+                        if t >= eff_earliest and (eff_latest is None or t + svc <= eff_latest):
+                            r.start_min = t
+                            r.end_min = t + svc
+                            t += svc + EXTRA_BUFFER_MIN
+                            opt_idx += 1
+                        else:
+                            # 時間窓外: スキップして次の訪問を試す
+                            opt_idx += 1
                     else:
                         break
 
@@ -1024,3 +1104,194 @@ class AllocationEngine:
                     r.staff_id = ""
                     r.staff_name = ""
                     r.note += " [重複解消不可: 未割当]"
+
+    # ==================================================================
+    # Pre-processing: patient_changes, special_week, weekly_patterns
+    # ==================================================================
+
+    def _apply_patient_changes(self, requests: List[VisitRequest]) -> List[VisitRequest]:
+        """Apply patient_changes to weekly requests."""
+        if not self.patient_changes:
+            return requests
+        result = list(requests)
+        for pc in self.patient_changes:
+            if pc.operation == "キャンセル":
+                result = [r for r in result
+                          if not (r.pid == pc.pid and r.date_str == pc.date_str)]
+                logger.debug("PatientChange: cancelled %s on %s", pc.pid, pc.date_str)
+            elif pc.operation == "追加":
+                new_req = VisitRequest(
+                    request_id=f"PC_ADD_{pc.pid}_{pc.date_str}",
+                    date_str=pc.date_str,
+                    pid=pc.pid,
+                    service_min=pc.service_min or 60,
+                    need_staff=pc.need_staff or 1,
+                    time_type=pc.time_type or "",
+                    start_min=pc.start_min,
+                    end_min=pc.end_min,
+                    earliest_min=pc.earliest_min,
+                    latest_min=pc.latest_min,
+                    specified_staff_ids=pc.specified_staff_ids or [],
+                    specified_type=pc.specified_type or "",
+                    ng_staff_ids=pc.ng_staff_ids or [],
+                    note=pc.note or "個別変更:追加",
+                )
+                patient = self.patient_map.get(pc.pid)
+                if patient:
+                    new_req.pname = patient.name
+                    new_req.area = patient.area
+                result.append(new_req)
+                logger.debug("PatientChange: added %s on %s", pc.pid, pc.date_str)
+            elif pc.operation in ("時間変更", "スタッフ変更"):
+                for r in result:
+                    if r.pid == pc.pid and r.date_str == pc.date_str:
+                        if pc.operation == "時間変更":
+                            if pc.start_min is not None:
+                                r.start_min = pc.start_min
+                            if pc.end_min is not None:
+                                r.end_min = pc.end_min
+                            if pc.earliest_min is not None:
+                                r.earliest_min = pc.earliest_min
+                            if pc.latest_min is not None:
+                                r.latest_min = pc.latest_min
+                            if pc.time_type:
+                                r.time_type = pc.time_type
+                            if pc.service_min is not None:
+                                r.service_min = pc.service_min
+                        elif pc.operation == "スタッフ変更":
+                            if pc.specified_staff_ids:
+                                r.specified_staff_ids = pc.specified_staff_ids
+                            if pc.specified_type:
+                                r.specified_type = pc.specified_type
+                            if pc.ng_staff_ids:
+                                r.ng_staff_ids = pc.ng_staff_ids
+                        r.note += f" [個別変更:{pc.operation}]"
+        return result
+
+    def _apply_special_week(self, requests: List[VisitRequest]) -> List[VisitRequest]:
+        """Apply special_week headers/details to requests."""
+        if not self.special_week_headers:
+            return requests
+        result = list(requests)
+        for header in self.special_week_headers:
+            details = [d for d in self.special_week_details
+                       if d.special_week_id == header.special_week_id]
+            if header.mode == "REPLACE":
+                result = [r for r in result if r.pid != header.pid]
+                logger.debug("SpecialWeek REPLACE: removed requests for %s", header.pid)
+            for i, detail in enumerate(details):
+                new_req = VisitRequest(
+                    request_id=f"SW_{header.special_week_id}_{i}",
+                    date_str=detail.date_str,
+                    pid=detail.pid or header.pid,
+                    pname=header.pname,
+                    service_min=detail.service_min,
+                    need_staff=detail.need_staff,
+                    time_type=detail.time_type,
+                    start_min=detail.start_min,
+                    end_min=detail.end_min,
+                    earliest_min=detail.earliest_min,
+                    latest_min=detail.latest_min,
+                    note=f"特別訪問週間:{header.reason}" if header.reason else "特別訪問週間",
+                )
+                patient = self.patient_map.get(new_req.pid)
+                if patient:
+                    new_req.area = patient.area
+                result.append(new_req)
+            logger.debug("SpecialWeek %s: added %d details for %s",
+                         header.mode, len(details), header.pid)
+        return result
+
+    def _enrich_from_patterns(self, requests: List[VisitRequest]) -> List[VisitRequest]:
+        """Enrich requests with time window info from weekly_patterns."""
+        if not self.weekly_patterns:
+            return requests
+        pattern_map: Dict[str, List] = {}
+        for wp in self.weekly_patterns:
+            key = f"{wp.pid}|{wp.day_code}"
+            pattern_map.setdefault(key, []).append(wp)
+        for req in requests:
+            key = f"{req.pid}|{req.weekday}"
+            patterns = pattern_map.get(key)
+            if not patterns:
+                continue
+            pat = patterns[0]
+            if req.start_min is None and pat.start_min is not None:
+                req.start_min = pat.start_min
+            if req.end_min is None and pat.end_min is not None:
+                req.end_min = pat.end_min
+            if not req.time_type and pat.start_min is not None:
+                req.time_type = "固定"
+        return requests
+
+    # ==================================================================
+    # Post-processing: mentor pairs
+    # ==================================================================
+
+    def _apply_mentor_pairs(self) -> None:
+        """Generate trainee shadowing visits from mentor_pairs."""
+        if not self.mentor_pairs:
+            return
+        new_results = []
+        for mp in self.mentor_pairs:
+            if not mp.trainee_staff_id or not mp.mentor_staff_id:
+                continue
+            mentor_visits = [r for r in self.results
+                             if r.staff_id == mp.mentor_staff_id
+                             and not r.is_event
+                             and r.start_min is not None]
+            if mp.start_date:
+                mentor_visits = [v for v in mentor_visits if v.date_str >= mp.start_date]
+            if mp.end_date:
+                mentor_visits = [v for v in mentor_visits if v.date_str <= mp.end_date]
+            if mp.band == "午前":
+                mentor_visits = [v for v in mentor_visits if v.start_min < 720]
+            elif mp.band == "午後":
+                mentor_visits = [v for v in mentor_visits if v.start_min >= 720]
+            if mp.day_condition:
+                day_map = {"月": "Mon", "火": "Tue", "水": "Wed", "木": "Thu",
+                           "金": "Fri", "土": "Sat", "日": "Sun"}
+                allowed = set()
+                for ch in mp.day_condition.replace(",", "").replace("、", ""):
+                    if ch in day_map:
+                        allowed.add(day_map[ch])
+                if allowed:
+                    mentor_visits = [v for v in mentor_visits if v.weekday in allowed]
+            trainee_times: Dict[str, List[Tuple[int, int]]] = {}
+            for r in self.results:
+                if r.staff_id == mp.trainee_staff_id and r.start_min is not None:
+                    trainee_times.setdefault(r.date_str, []).append(
+                        (r.start_min, r.end_min))
+            for mv in mentor_visits:
+                existing = trainee_times.get(mv.date_str, [])
+                has_conflict = any(
+                    mv.start_min < e and mv.end_min > s for s, e in existing
+                )
+                if has_conflict:
+                    continue
+                copy = AssignmentResult(
+                    visit_id=f"{mv.visit_id}_T_{mp.trainee_staff_id}",
+                    date_str=mv.date_str,
+                    weekday=mv.weekday,
+                    staff_id=mp.trainee_staff_id,
+                    staff_name="",
+                    pid=mv.pid,
+                    pname=mv.pname,
+                    area=mv.area,
+                    start_min=mv.start_min,
+                    end_min=mv.end_min,
+                    service_min=mv.service_min,
+                    time_type=mv.time_type,
+                    note=f"同行({mp.mentor_staff_id})",
+                    is_event=False,
+                    is_coupled=False,
+                )
+                trainee_staff = self.staff_map.get(mp.trainee_staff_id)
+                if trainee_staff:
+                    copy.staff_name = trainee_staff.name
+                new_results.append(copy)
+                trainee_times.setdefault(mv.date_str, []).append(
+                    (mv.start_min, mv.end_min))
+        self.results.extend(new_results)
+        if new_results:
+            logger.info("MentorPairs: %d shadowing visits added", len(new_results))
