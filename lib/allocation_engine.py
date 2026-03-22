@@ -1,0 +1,1018 @@
+"""
+allocation_engine.py - Core visit allocation engine for the careflow scheduler.
+
+Mirrors and improves upon the GAS UnifiedCode.js allocation logic.
+Allocates visit requests to staff members considering events, 2-staff paired
+visits, staff constraints, patient preferences, and distance optimization.
+
+Allocation pipeline:
+  1. Insert events as fixed time anchors
+  2. Sort requests by priority (date, need_staff, rotation, time)
+  3. Level 0 - Initial greedy allocation with scoring
+  4. Sync coupled (2-staff) visit times
+  5. GapPack - Pack flexible visits into gaps between anchors
+  6. Level 1 - Reinsertion of unassigned visits with relaxed criteria
+  7. Level 3 - Route optimization via nearest-neighbor + 2-opt
+  8. Fix cross-patient time overlaps for the same staff
+"""
+from __future__ import annotations
+
+import re
+import logging
+from typing import List, Dict, Optional, Tuple, Set
+
+from .allocation_models import (
+    Patient, Staff, VisitRequest, Event, StaffChange,
+    WeeklyPattern, ConfirmedHistory, AssignmentResult, Interval
+)
+from .allocation_utils import (
+    EXTRA_BUFFER_MIN, ASSIGN_BUFFER_MIN,
+    calc_distance_km, dist_to_score, intervals_overlap, merge_intervals,
+    compute_gaps, intersect_gaps, get_effective_window,
+    nearest_neighbor_route, two_opt, route_length,
+    normalize_cont_pref, weekday_index, fmt_min
+)
+
+logger = logging.getLogger(__name__)
+
+# Regex compiled once for coupled visit ID parsing
+_COUPLED_RE = re.compile(r'^(V\d+)-(\d+)$')
+
+
+class AllocationEngine:
+    """Careflow visit allocation engine.
+
+    Allocates visit requests to staff members considering:
+    - Events (highest priority, block time slots)
+    - 2-staff paired visits (allocated first, synchronized times)
+    - Staff constraints (shift, days off, maxPerDay, gender)
+    - Patient preferences (time, staff, rotation)
+    - Distance optimization (route planning)
+
+    Usage::
+
+        engine = AllocationEngine(
+            staff_list=staff_list,
+            patient_map=patient_map,
+            events=events,
+            staff_changes=staff_changes,
+        )
+        result = engine.allocate(requests)
+        print(result["summary"]["message"])
+    """
+
+    # ------------------------------------------------------------------
+    # Initialization
+    # ------------------------------------------------------------------
+    def __init__(
+        self,
+        staff_list: List[Staff],
+        patient_map: Dict[str, Patient],
+        events: List[Event],
+        staff_changes: List[StaffChange],
+        weekly_patterns: Optional[List[WeeklyPattern]] = None,
+        confirmed_history: Optional[List[ConfirmedHistory]] = None,
+    ):
+        self.staff_list = staff_list
+        self.staff_map: Dict[str, Staff] = {s.sid: s for s in staff_list}
+        self.patient_map = patient_map
+        self.events = events
+        self.staff_changes = staff_changes
+        self.weekly_patterns = weekly_patterns or []
+        self.confirmed_history = confirmed_history or []
+
+        # Build staff-change lookup: "staffId|dateStr" -> [StaffChange]
+        self.staff_change_map: Dict[str, List[StaffChange]] = {}
+        for sc in staff_changes:
+            key = f"{sc.staff_id}|{sc.date_str}"
+            self.staff_change_map.setdefault(key, []).append(sc)
+
+        # Build event lookup: "staffId|dateStr" -> [Event]
+        self.event_map: Dict[str, List[Event]] = {}
+        for ev in events:
+            key = f"{ev.staff_id}|{ev.date_str}"
+            self.event_map.setdefault(key, []).append(ev)
+
+        # Build rotation history: pid -> [ConfirmedHistory]
+        self.rotation_history: Dict[str, List[ConfirmedHistory]] = {}
+        for ch in self.confirmed_history:
+            self.rotation_history.setdefault(ch.pid, []).append(ch)
+
+        # ---- Mutable state (reset on every allocate() call) ----
+        self.results: List[AssignmentResult] = []
+        self.unassigned: List[dict] = []
+        self.assign_count: Dict[str, int] = {}          # "staffId|dateStr" -> count
+        self.staff_day_visits: Dict[str, List[int]] = {}  # "staffId|dateStr" -> [result idx]
+        self.pid_date_staff: Dict[str, Set[str]] = {}     # "pid|dateStr" -> {staffId}
+        self.last_assigned_by_patient: Dict[str, str] = {}  # pid -> staffId (dynamic)
+
+    # ==================================================================
+    # Public entry point
+    # ==================================================================
+    def allocate(self, requests: List[VisitRequest]) -> dict:
+        """Run the full allocation pipeline.
+
+        Args:
+            requests: Visit requests for the scheduling period.
+
+        Returns:
+            Dictionary with keys ``results``, ``unassigned``, and ``summary``.
+        """
+        self._reset_state()
+
+        # Filter cancelled
+        active_requests = [r for r in requests if r.change_type != "キャンセル"]
+
+        # Step 1 - events
+        self._insert_events()
+
+        # Step 2 - sort
+        sorted_requests = self._sort_requests(active_requests)
+
+        # Step 3 - initial allocation
+        logger.info("Level 0: Allocating %d requests...", len(sorted_requests))
+        self._level0_allocate(sorted_requests)
+
+        # Step 4 - sync coupled
+        self._sync_coupled_times()
+
+        # Step 5 - gap pack
+        logger.info("GapPack: Refining time assignments...")
+        self._gap_pack()
+
+        # Step 6 - sync again
+        self._sync_coupled_times()
+
+        # Step 7 - reinsertion
+        unassigned_indices = [
+            i for i, r in enumerate(self.results)
+            if not r.staff_id and not r.is_event
+        ]
+        if unassigned_indices:
+            logger.info(
+                "Level 1: Attempting reinsertion of %d unassigned visits...",
+                len(unassigned_indices),
+            )
+            self._level1_reinsertion(unassigned_indices)
+            self._sync_coupled_times()
+
+        # Step 8 - route optimisation
+        logger.info("Level 3: Optimizing routes...")
+        self._level3_route_optimize()
+        self._sync_coupled_times()
+
+        # Step 9 - overlap fix
+        self._fix_cross_patient_overlaps()
+        self._sync_coupled_times()
+
+        # Summary
+        assigned_count = sum(
+            1 for r in self.results if r.staff_id and not r.is_event
+        )
+        unassigned_count = sum(
+            1 for r in self.results if not r.staff_id and not r.is_event
+        )
+        logger.info(
+            "Allocation complete: %d assigned, %d unassigned out of %d total",
+            assigned_count, unassigned_count, len(active_requests),
+        )
+
+        return {
+            "results": self.results,
+            "unassigned": self.unassigned,
+            "summary": {
+                "total": len(active_requests),
+                "assigned": assigned_count,
+                "unassigned": unassigned_count,
+                "message": (
+                    f"割当結果を {assigned_count} 件作成しました。"
+                    f"割当不可: {unassigned_count} 件"
+                ),
+            },
+        }
+
+    # ------------------------------------------------------------------
+    # Internal helpers - state management
+    # ------------------------------------------------------------------
+    def _reset_state(self) -> None:
+        """Clear mutable state before a fresh allocation run."""
+        self.results = []
+        self.unassigned = []
+        self.assign_count = {}
+        self.staff_day_visits = {}
+        self.pid_date_staff = {}
+        self.last_assigned_by_patient = {}
+
+    def _register_assignment(
+        self, staff_id: str, date_str: str, result_idx: int,
+        pid: Optional[str] = None,
+    ) -> None:
+        """Update internal tracking maps after an assignment."""
+        key = f"{staff_id}|{date_str}"
+        self.assign_count[key] = self.assign_count.get(key, 0) + 1
+        self.staff_day_visits.setdefault(key, []).append(result_idx)
+        if pid:
+            pd_key = f"{pid}|{date_str}"
+            self.pid_date_staff.setdefault(pd_key, set()).add(staff_id)
+            self.last_assigned_by_patient[pid] = staff_id
+
+    def _unregister_assignment(
+        self, staff_id: str, date_str: str, result_idx: int,
+    ) -> None:
+        """Remove tracking for a previously-registered assignment."""
+        key = f"{staff_id}|{date_str}"
+        visits = self.staff_day_visits.get(key, [])
+        if result_idx in visits:
+            visits.remove(result_idx)
+        self.assign_count[key] = max(0, self.assign_count.get(key, 0) - 1)
+
+    # ==================================================================
+    # Step 1 - Insert Events
+    # ==================================================================
+    def _insert_events(self) -> None:
+        """Insert events as fixed time anchors in the result list."""
+        for ev in self.events:
+            start = ev.start_min
+            end = ev.end_min
+
+            if start is None and end is None:
+                staff = self.staff_map.get(ev.staff_id)
+                shift_s = staff.shift_start_min if staff else 540
+                shift_e = staff.shift_end_min if staff else 1080
+                start = shift_s
+                end = min(start + ev.duration_min, shift_e)
+            elif start is not None and end is None:
+                end = start + ev.duration_min
+
+            svc = (end - start) if (start is not None and end is not None) else ev.duration_min
+            staff = self.staff_map.get(ev.staff_id)
+
+            result = AssignmentResult(
+                visit_id=f"EV_{ev.event_id}",
+                date_str=ev.date_str,
+                staff_id=ev.staff_id,
+                staff_name=staff.name if staff else "",
+                area="EV",
+                start_min=start,
+                end_min=end,
+                service_min=svc,
+                time_type="固定",
+                earliest_min=start,
+                latest_min=end,
+                note=ev.title or f"[EV] {ev.event_type}",
+                is_event=True,
+            )
+            idx = len(self.results)
+            self.results.append(result)
+            self._register_assignment(ev.staff_id, ev.date_str, idx)
+
+    # ==================================================================
+    # Step 2 - Sort Requests
+    # ==================================================================
+    @staticmethod
+    def _sort_requests(requests: List[VisitRequest]) -> List[VisitRequest]:
+        """Sort requests: date ASC, needStaff DESC, rotation first, time ASC."""
+        def _key(r: VisitRequest) -> tuple:
+            cont = normalize_cont_pref(r.cont_pref)
+            rotation_priority = 0 if cont == "ローテーション優先" else 1
+            return (r.date_str, -r.need_staff, rotation_priority, r.start_min or 9999)
+        return sorted(requests, key=_key)
+
+    # ==================================================================
+    # Step 3 - Level 0 Initial Allocation
+    # ==================================================================
+    def _level0_allocate(self, requests: List[VisitRequest]) -> None:
+        """Process each request and assign the best-scoring staff."""
+        visit_counter = 0
+
+        for req in requests:
+            used_staff_ids: Set[str] = set()
+
+            for slot in range(1, req.need_staff + 1):
+                visit_counter += 1
+                visit_id = f"V{visit_counter:03d}"
+                if req.need_staff > 1:
+                    visit_id += f"-{slot}"
+
+                chosen = self._find_best_staff(req, used_staff_ids)
+
+                end_min = req.end_min
+                if end_min is None and req.start_min is not None:
+                    end_min = req.start_min + req.service_min
+
+                result = AssignmentResult(
+                    visit_id=visit_id,
+                    date_str=req.date_str,
+                    weekday=req.weekday,
+                    pid=req.pid,
+                    pname=req.pname,
+                    area=req.area,
+                    start_min=req.start_min,
+                    end_min=end_min,
+                    service_min=req.service_min,
+                    time_type=req.time_type,
+                    earliest_min=req.earliest_min,
+                    latest_min=req.latest_min,
+                    note=req.note,
+                    is_coupled=(req.need_staff > 1),
+                )
+
+                if chosen:
+                    result.staff_id = chosen.sid
+                    result.staff_name = chosen.name
+                    used_staff_ids.add(chosen.sid)
+
+                    idx = len(self.results)
+                    self.results.append(result)
+                    self._register_assignment(chosen.sid, req.date_str, idx, pid=req.pid)
+
+                    # Track movement distance
+                    patient = self.patient_map.get(req.pid)
+                    if patient:
+                        result.movement_km = calc_distance_km(
+                            chosen.lat, chosen.lng, patient.lat, patient.lng
+                        )
+                else:
+                    result.note += " [未割当: 条件を満たすスタッフなし]"
+                    self.results.append(result)
+                    self.unassigned.append({
+                        "date_str": req.date_str,
+                        "pid": req.pid,
+                        "pname": req.pname,
+                        "need_staff": req.need_staff,
+                        "slot": slot,
+                        "reason": "条件を満たすスタッフなし",
+                    })
+
+    # ==================================================================
+    # Staff Selection
+    # ==================================================================
+    def _find_best_staff(
+        self, req: VisitRequest, used_staff_ids: Set[str],
+    ) -> Optional[Staff]:
+        """Find the best staff member for a visit request.
+
+        Selection order:
+          1. Required designated staff (``specified_type == "必須"``)
+          2. Same-person preference (``cont_pref == "同じ人希望"``)
+          3. Scored candidate list (preference, rotation, load, distance)
+        """
+        cont_pref = normalize_cont_pref(req.cont_pref)
+        dynamic_prev = self.last_assigned_by_patient.get(req.pid)
+
+        # ---- Required designated staff ----
+        if req.specified_type == "必須" and req.specified_staff_ids:
+            for sid in req.specified_staff_ids:
+                if sid in used_staff_ids:
+                    continue
+                staff = self.staff_map.get(sid)
+                if staff and self._is_staff_available(staff, req):
+                    return staff
+            return None  # required staff unavailable
+
+        # ---- Same-person preference ----
+        if cont_pref == "同じ人希望" and req.prev_staff_id:
+            staff = self.staff_map.get(req.prev_staff_id)
+            if (staff
+                    and req.prev_staff_id not in used_staff_ids
+                    and req.prev_staff_id not in req.ng_staff_ids
+                    and self._is_staff_available(staff, req)):
+                return staff
+
+        # ---- Build scored candidate list ----
+        candidates = self._build_candidate_list(req, used_staff_ids, cont_pref, dynamic_prev)
+        if not candidates:
+            return None
+
+        # ---- Rotation adjustments ----
+        if cont_pref == "ローテーション優先" and len(candidates) > 1:
+            candidates = self._apply_rotation_ranking(candidates, req, dynamic_prev)
+
+        # ---- Final sort by composite score ----
+        candidates.sort(key=self._candidate_sort_key)
+        return candidates[0]["staff"]
+
+    def _build_candidate_list(
+        self,
+        req: VisitRequest,
+        used_staff_ids: Set[str],
+        cont_pref: str,
+        dynamic_prev: Optional[str],
+    ) -> List[dict]:
+        """Return a list of candidate dicts for the given request."""
+        pd_key = f"{req.pid}|{req.date_str}"
+        candidates: List[dict] = []
+
+        for staff in self.staff_list:
+            if staff.sid in used_staff_ids:
+                continue
+            if staff.sid in req.ng_staff_ids:
+                continue
+            if not self._is_staff_available(staff, req):
+                continue
+
+            # Capacity check
+            key = f"{staff.sid}|{req.date_str}"
+            day_count = self.assign_count.get(key, 0)
+            if day_count >= staff.soft_cap():
+                continue
+
+            # Gender restriction
+            if req.sex_limit == "女性のみ" and staff.gender != "女性":
+                continue
+            if req.sex_limit == "男性のみ" and staff.gender != "男性":
+                continue
+
+            # Avoid same patient + same day + same staff (for multi-visit days)
+            already_today = self.pid_date_staff.get(pd_key, set())
+            if staff.sid in already_today:
+                continue
+
+            # Distance
+            patient = self.patient_map.get(req.pid)
+            dist_km: Optional[float] = None
+            if patient:
+                dist_km = calc_distance_km(
+                    staff.lat, staff.lng, patient.lat, patient.lng,
+                )
+
+            # How many times this staff already visited this patient this week
+            patient_count = sum(
+                1 for r in self.results
+                if r.pid == req.pid and r.staff_id == staff.sid and not r.is_event
+            )
+
+            candidates.append({
+                "staff": staff,
+                "day_count": day_count,
+                "patient_count": patient_count,
+                "dist_km": dist_km,
+                "dist_score": dist_to_score(dist_km),
+                "same_patient_today": staff.sid in already_today,
+                "is_dynamic_prev": (staff.sid == dynamic_prev) if dynamic_prev else False,
+                "is_pref": 1 if staff.sid in req.specified_staff_ids else 0,
+                "rotation_rank": 0,
+            })
+
+        return candidates
+
+    @staticmethod
+    def _apply_rotation_ranking(
+        candidates: List[dict],
+        req: VisitRequest,
+        dynamic_prev: Optional[str],
+    ) -> List[dict]:
+        """Filter and rank candidates for rotation preference.
+
+        Prefers staff who have not yet visited this patient this week and
+        applies a weekday-based shift to distribute evenly.
+        """
+        # Prefer staff not yet assigned to this patient this week
+        unassigned_this_week = [c for c in candidates if c["patient_count"] == 0]
+        if unassigned_this_week:
+            candidates = unassigned_this_week
+
+        # Exclude dynamic previous if alternatives exist
+        if dynamic_prev and len(candidates) > 1:
+            non_prev = [c for c in candidates if not c["is_dynamic_prev"]]
+            if non_prev:
+                candidates = non_prev
+
+        # Weekday rotation shift
+        day_idx = weekday_index(req.weekday)
+        candidates.sort(key=lambda c: c["staff"].sid)
+        shift = day_idx % len(candidates) if candidates else 0
+        candidates = candidates[shift:] + candidates[:shift]
+        for i, c in enumerate(candidates):
+            c["rotation_rank"] = i
+
+        return candidates
+
+    @staticmethod
+    def _candidate_sort_key(c: dict) -> tuple:
+        """Composite sort key for candidate ranking (lower is better)."""
+        return (
+            -c["is_pref"],                                  # 1. preferred staff first
+            1 if c["same_patient_today"] else 0,            # 2. avoid same patient today
+            1 if c["is_dynamic_prev"] else 0,               # 3. avoid dynamic prev
+            c["patient_count"],                              # 4. fewer patient visits
+            c["rotation_rank"],                              # 5. rotation rank
+            c["day_count"],                                  # 6. fewer day assignments
+            c["dist_score"],                                 # 7. closer distance
+        )
+
+    # ==================================================================
+    # Staff Availability
+    # ==================================================================
+    def _is_staff_available(self, staff: Staff, req: VisitRequest) -> bool:
+        """Determine whether *staff* can handle *req* on that date.
+
+        Checks work days, blocked intervals, shift bounds, and existing
+        visit overlap.
+        """
+        # Work-day check
+        if staff.work_days and req.weekday not in staff.work_days:
+            return False
+
+        blocked = self._get_blocked_intervals(staff.sid, req.date_str)
+
+        # Full day off
+        for iv in blocked:
+            if iv.start <= 0 and iv.end >= 1440:
+                return False
+
+        # Fixed-time visit: check direct overlap
+        if req.time_type == "固定" and req.start_min is not None and req.end_min is not None:
+            for iv in blocked:
+                if intervals_overlap(req.start_min, req.end_min, iv.start, iv.end):
+                    return False
+            if req.start_min < staff.shift_start_min or req.end_min > staff.shift_end_min:
+                return False
+            return not self._has_overlap(staff.sid, req.date_str, req.start_min, req.end_min)
+
+        # No blocked intervals and not fixed-time -> available
+        if not blocked:
+            return True
+
+        # Flexible time: check if service fits in any available gap
+        eff_earliest, eff_latest = get_effective_window(
+            req.time_type, req.earliest_min, req.latest_min,
+        )
+        eff_earliest = max(eff_earliest, staff.shift_start_min)
+        eff_latest = min(eff_latest, staff.shift_end_min)
+
+        all_blocked = list(blocked)
+        # Include existing visit times as blocked
+        key = f"{staff.sid}|{req.date_str}"
+        for idx in self.staff_day_visits.get(key, []):
+            r = self.results[idx]
+            if r.start_min is not None and r.end_min is not None:
+                all_blocked.append(Interval(r.start_min, r.end_min))
+
+        gaps = compute_gaps(all_blocked, eff_earliest, eff_latest)
+        svc = req.service_min or 30
+        return any(gap.end - gap.start >= svc for gap in gaps)
+
+    def _get_blocked_intervals(self, staff_id: str, date_str: str) -> List[Interval]:
+        """Return merged blocked-time intervals for a staff member on a date."""
+        key = f"{staff_id}|{date_str}"
+        changes = self.staff_change_map.get(key, [])
+        if not changes:
+            return []
+
+        staff = self.staff_map.get(staff_id)
+        shift_s = staff.shift_start_min if staff else 540
+        shift_e = staff.shift_end_min if staff else 1080
+
+        intervals: List[Interval] = []
+        for sc in changes:
+            rt = sc.restriction_type
+            if rt in ("休み", "終日不可", "終日"):
+                intervals.append(Interval(0, 1440))
+            elif rt == "午前休":
+                intervals.append(Interval(shift_s, 720))
+            elif rt == "午後休":
+                intervals.append(Interval(720, shift_e))
+            elif rt == "遅刻" and sc.start_min is not None:
+                intervals.append(Interval(shift_s, sc.start_min))
+            elif rt == "早退" and sc.end_min is not None:
+                intervals.append(Interval(sc.end_min, shift_e))
+            elif rt in ("時間指定", "時間指定制限") and sc.start_min is not None and sc.end_min is not None:
+                intervals.append(Interval(sc.start_min, sc.end_min))
+
+        return merge_intervals(intervals)
+
+    def _has_overlap(self, staff_id: str, date_str: str, start: int, end: int) -> bool:
+        """Return True if ``[start, end)`` overlaps any existing visit for the staff."""
+        key = f"{staff_id}|{date_str}"
+        for idx in self.staff_day_visits.get(key, []):
+            r = self.results[idx]
+            if r.start_min is not None and r.end_min is not None:
+                if intervals_overlap(start, end, r.start_min, r.end_min):
+                    return True
+        return False
+
+    # ==================================================================
+    # Coupled Visit Time Sync
+    # ==================================================================
+    def _sync_coupled_times(self) -> None:
+        """Synchronize start/end times for 2-staff paired visits."""
+        coupled_map: Dict[str, List[int]] = {}
+        for i, r in enumerate(self.results):
+            if not r.visit_id or r.is_event:
+                continue
+            m = _COUPLED_RE.match(r.visit_id)
+            if m:
+                coupled_map.setdefault(m.group(1), []).append(i)
+
+        for base_id, indices in coupled_map.items():
+            if len(indices) != 2:
+                continue
+            r1 = self.results[indices[0]]
+            r2 = self.results[indices[1]]
+
+            if not r1.staff_id or not r2.staff_id:
+                continue
+
+            # Already in sync
+            if (r1.start_min == r2.start_min
+                    and r1.end_min == r2.end_min
+                    and r1.start_min is not None):
+                continue
+
+            svc = r1.service_min or r2.service_min or 60
+
+            w1 = get_effective_window(r1.time_type, r1.earliest_min, r1.latest_min)
+            w2 = get_effective_window(r2.time_type, r2.earliest_min, r2.latest_min)
+            common_earliest = max(w1[0], w2[0])
+            common_latest = min(w1[1], w2[1])
+
+            s1 = r1.start_min if r1.start_min is not None else common_earliest
+            s2 = r2.start_min if r2.start_min is not None else common_earliest
+            target = max(s1, s2, common_earliest)
+            target_end = target + svc
+
+            if target_end <= common_latest:
+                no_overlap_1 = not self._has_overlap(
+                    r1.staff_id, r1.date_str, target, target_end,
+                )
+                no_overlap_2 = not self._has_overlap(
+                    r2.staff_id, r2.date_str, target, target_end,
+                )
+                if no_overlap_1 and no_overlap_2:
+                    r1.start_min = r2.start_min = target
+                    r1.end_min = r2.end_min = target_end
+                    continue
+
+            # Fallback: force to common earliest
+            r1.start_min = r2.start_min = common_earliest
+            r1.end_min = r2.end_min = common_earliest + svc
+            r1.note += " [時刻同期]"
+            r2.note += " [時刻同期]"
+
+    # ==================================================================
+    # GapPack - Time Refinement
+    # ==================================================================
+    def _gap_pack(self) -> None:
+        """Pack flexible visits into the gaps between fixed anchors."""
+        groups: Dict[str, List[int]] = {}
+        for i, r in enumerate(self.results):
+            if not r.staff_id:
+                continue
+            key = f"{r.staff_id}|{r.date_str}"
+            groups.setdefault(key, []).append(i)
+
+        for key, indices in groups.items():
+            staff_id = key.split("|")[0]
+            staff = self.staff_map.get(staff_id)
+            if not staff:
+                continue
+
+            anchors: List[Tuple[int, int, int]] = []   # (idx, start, end)
+            flexes: List[int] = []
+
+            for idx in indices:
+                r = self.results[idx]
+                has_time = r.start_min is not None and r.end_min is not None
+                is_anchor = (
+                    r.is_event
+                    or (r.time_type == "固定" and has_time)
+                    or (r.is_coupled and has_time)
+                )
+                if is_anchor:
+                    anchors.append((idx, r.start_min, r.end_min))  # type: ignore[arg-type]
+                else:
+                    flexes.append(idx)
+
+            if not flexes:
+                continue
+
+            anchors.sort(key=lambda x: x[1])
+            day_start = max(staff.shift_start_min, 540)
+            day_end = staff.shift_end_min
+
+            # Compute gaps between anchors
+            gaps: List[Interval] = []
+            cursor = day_start
+            for _, a_start, a_end in anchors:
+                gap_end = a_start - EXTRA_BUFFER_MIN
+                if cursor < gap_end:
+                    gaps.append(Interval(cursor, gap_end))
+                cursor = max(cursor, a_end + EXTRA_BUFFER_MIN)
+            if cursor < day_end:
+                gaps.append(Interval(cursor, day_end))
+
+            # Sort flexes by earliest preference, then start time
+            flexes.sort(
+                key=lambda idx: (
+                    self.results[idx].earliest_min
+                    or self.results[idx].start_min
+                    or 9999
+                ),
+            )
+
+            # Place each flex into the first fitting gap
+            gap_cursors = [g.start for g in gaps]
+            for f_idx in flexes:
+                r = self.results[f_idx]
+                if not r.staff_id:
+                    continue
+                svc = r.service_min or 30
+                eff_earliest, eff_latest = get_effective_window(
+                    r.time_type, r.earliest_min, r.latest_min,
+                )
+                eff_earliest = max(eff_earliest, day_start)
+
+                placed = False
+                for gi, gap in enumerate(gaps):
+                    start_cand = max(gap_cursors[gi], eff_earliest)
+                    end_cand = start_cand + svc
+
+                    if eff_latest is not None and end_cand > eff_latest:
+                        continue
+
+                    if start_cand >= gap.start and end_cand <= gap.end:
+                        r.start_min = start_cand
+                        r.end_min = end_cand
+                        gap_cursors[gi] = end_cand + EXTRA_BUFFER_MIN
+                        placed = True
+                        break
+
+                if not placed:
+                    logger.debug(
+                        "GapPack: visit %s could not fit, unassigning", r.visit_id,
+                    )
+                    r.staff_id = ""
+                    r.staff_name = ""
+                    r.note += " [GapPack: 隙間に入らず未割当]"
+
+    # ==================================================================
+    # Level 1 - Reinsertion
+    # ==================================================================
+    def _level1_reinsertion(self, unassigned_indices: List[int]) -> None:
+        """Attempt to place unassigned visits with alternative staff."""
+        self._enforce_coupled_atomicity()
+
+        for idx in unassigned_indices:
+            r = self.results[idx]
+            if r.staff_id or r.is_event:
+                continue
+
+            patient = self.patient_map.get(r.pid)
+            if not patient:
+                continue
+
+            # Build distance-sorted candidates (top 10)
+            candidates: List[Tuple[Staff, float]] = []
+            for staff in self.staff_list:
+                if not self._is_staff_available_for_reinsertion(staff, r):
+                    continue
+                dist = calc_distance_km(staff.lat, staff.lng, patient.lat, patient.lng)
+                candidates.append((staff, dist if dist is not None else 99999.0))
+
+            candidates.sort(key=lambda x: x[1])
+            candidates = candidates[:10]
+
+            for staff, _ in candidates:
+                fit_start = self._can_insert(staff, r)
+                if fit_start is not None:
+                    svc = r.service_min or 30
+                    r.staff_id = staff.sid
+                    r.staff_name = staff.name
+                    r.start_min = fit_start
+                    r.end_min = fit_start + svc
+                    self._register_assignment(staff.sid, r.date_str, idx, pid=r.pid)
+                    r.note += f" [Level1再挿入: {staff.name}]"
+                    logger.debug(
+                        "Level1: reinserted visit %s -> %s at %s",
+                        r.visit_id, staff.name, fmt_min(fit_start),
+                    )
+                    break
+
+    def _is_staff_available_for_reinsertion(
+        self, staff: Staff, r: AssignmentResult,
+    ) -> bool:
+        """Quick eligibility check for Level-1 reinsertion."""
+        if staff.work_days and r.weekday not in staff.work_days:
+            return False
+        key = f"{staff.sid}|{r.date_str}"
+        if self.assign_count.get(key, 0) >= staff.max_per_day:
+            return False
+        blocked = self._get_blocked_intervals(staff.sid, r.date_str)
+        for iv in blocked:
+            if iv.start <= 0 and iv.end >= 1440:
+                return False
+        return True
+
+    def _can_insert(self, staff: Staff, r: AssignmentResult) -> Optional[int]:
+        """Find the earliest start minute where *r* fits in *staff*'s day.
+
+        Returns:
+            The start minute, or ``None`` if no slot is available.
+        """
+        svc = r.service_min or 30
+        eff_earliest, eff_latest = get_effective_window(
+            r.time_type, r.earliest_min, r.latest_min,
+        )
+        eff_earliest = max(eff_earliest, staff.shift_start_min, 540)
+        eff_latest = min(eff_latest, staff.shift_end_min)
+
+        # Aggregate all blocked intervals
+        blocked = list(self._get_blocked_intervals(staff.sid, r.date_str))
+        key = f"{staff.sid}|{r.date_str}"
+        for idx in self.staff_day_visits.get(key, []):
+            existing = self.results[idx]
+            if existing.start_min is not None and existing.end_min is not None:
+                blocked.append(Interval(
+                    existing.start_min - EXTRA_BUFFER_MIN,
+                    existing.end_min + EXTRA_BUFFER_MIN,
+                ))
+
+        gaps = compute_gaps(blocked, eff_earliest, eff_latest)
+        for gap in gaps:
+            gap_start = max(gap.start, eff_earliest)
+            if gap.end - gap_start >= svc:
+                return gap_start
+        return None
+
+    def _enforce_coupled_atomicity(self) -> None:
+        """If one half of a 2-staff pair is unassigned, unassign both."""
+        coupled_map: Dict[str, List[int]] = {}
+        for i, r in enumerate(self.results):
+            if not r.visit_id:
+                continue
+            m = _COUPLED_RE.match(r.visit_id)
+            if m:
+                coupled_map.setdefault(m.group(1), []).append(i)
+
+        for base_id, indices in coupled_map.items():
+            if len(indices) != 2:
+                continue
+            r1 = self.results[indices[0]]
+            r2 = self.results[indices[1]]
+            assigned1 = bool(r1.staff_id)
+            assigned2 = bool(r2.staff_id)
+
+            if assigned1 != assigned2:
+                for idx in indices:
+                    r = self.results[idx]
+                    if r.staff_id:
+                        self._unregister_assignment(r.staff_id, r.date_str, idx)
+                    r.staff_id = ""
+                    r.staff_name = ""
+                    r.note += " [2名体制:ペア未確保]"
+
+    # ==================================================================
+    # Level 3 - Route Optimization
+    # ==================================================================
+    def _level3_route_optimize(self) -> None:
+        """Reorder flexible visits using nearest-neighbor + 2-opt."""
+        groups: Dict[str, List[int]] = {}
+        for i, r in enumerate(self.results):
+            if not r.staff_id:
+                continue
+            key = f"{r.staff_id}|{r.date_str}"
+            groups.setdefault(key, []).append(i)
+
+        for key, indices in groups.items():
+            staff_id = key.split("|")[0]
+            staff = self.staff_map.get(staff_id)
+            if not staff:
+                continue
+
+            anchors: List[int] = []
+            flexes: List[int] = []
+
+            for idx in indices:
+                r = self.results[idx]
+                is_anchor = (
+                    r.is_event
+                    or r.time_type == "固定"
+                    or r.is_coupled
+                    or r.earliest_min is not None
+                    or r.latest_min is not None
+                )
+                if is_anchor and r.start_min is not None:
+                    anchors.append(idx)
+                elif r.start_min is not None:
+                    flexes.append(idx)
+
+            if len(flexes) < 2:
+                continue
+
+            # Build node list for the optimizer
+            nodes: List[dict] = []
+            for idx in flexes:
+                r = self.results[idx]
+                patient = self.patient_map.get(r.pid)
+                nodes.append({
+                    "idx": idx,
+                    "lat": patient.lat if patient else None,
+                    "lng": patient.lng if patient else None,
+                    "svc_min": r.service_min or 30,
+                })
+
+            optimized = two_opt(nearest_neighbor_route(nodes, staff.lat, staff.lng))
+
+            # Compute gap intervals between anchors
+            anchor_times = sorted(
+                [
+                    (self.results[i].start_min, self.results[i].end_min)
+                    for i in anchors
+                    if self.results[i].start_min is not None and self.results[i].end_min is not None
+                ],
+                key=lambda x: x[0],
+            )
+
+            day_start = max(staff.shift_start_min, 540)
+            day_end = staff.shift_end_min
+
+            gaps: List[Interval] = []
+            cursor = day_start
+            for a_s, a_e in anchor_times:
+                gap_end = a_s - EXTRA_BUFFER_MIN
+                if cursor < gap_end:
+                    gaps.append(Interval(cursor, gap_end))
+                cursor = max(cursor, a_e + EXTRA_BUFFER_MIN)
+            if cursor < day_end:
+                gaps.append(Interval(cursor, day_end))
+
+            # Place optimised nodes into gaps
+            opt_idx = 0
+            for gap in gaps:
+                t = gap.start
+                while opt_idx < len(optimized) and t < gap.end:
+                    node = optimized[opt_idx]
+                    svc = node["svc_min"]
+                    if t + svc <= gap.end:
+                        r = self.results[node["idx"]]
+                        r.start_min = t
+                        r.end_min = t + svc
+                        t += svc + EXTRA_BUFFER_MIN
+                        opt_idx += 1
+                    else:
+                        break
+
+    # ==================================================================
+    # Fix Cross-Patient Overlaps
+    # ==================================================================
+    def _fix_cross_patient_overlaps(self) -> None:
+        """Resolve time conflicts between different patients for the same staff."""
+        groups: Dict[str, List[int]] = {}
+        for i, r in enumerate(self.results):
+            if not r.staff_id or r.is_event:
+                continue
+            key = f"{r.staff_id}|{r.date_str}"
+            groups.setdefault(key, []).append(i)
+
+        for key, indices in groups.items():
+            staff_id = key.split("|")[0]
+            staff = self.staff_map.get(staff_id)
+            if not staff or len(indices) < 2:
+                continue
+
+            sorted_idx = sorted(
+                indices, key=lambda i: self.results[i].start_min or 0,
+            )
+            placed: List[Tuple[int, int]] = []
+
+            for idx in sorted_idx:
+                r = self.results[idx]
+                if r.start_min is None or r.end_min is None:
+                    continue
+
+                has_conflict = any(
+                    intervals_overlap(r.start_min, r.end_min, p_s, p_e)
+                    for p_s, p_e in placed
+                )
+
+                if not has_conflict:
+                    placed.append((r.start_min, r.end_min))
+                    continue
+
+                # Don't shift coupled visits (they are synced separately)
+                if r.is_coupled:
+                    continue
+
+                # Attempt to shift after each conflicting placement
+                svc = r.service_min or 30
+                new_start = r.start_min
+                for p_s, p_e in sorted(placed):
+                    if intervals_overlap(new_start, new_start + svc, p_s, p_e):
+                        new_start = p_e + ASSIGN_BUFFER_MIN
+
+                eff_latest = r.latest_min if r.latest_min is not None else staff.shift_end_min
+                if new_start + svc <= eff_latest:
+                    old = r.start_min
+                    r.start_min = new_start
+                    r.end_min = new_start + svc
+                    r.note += f" [重複修正: {fmt_min(old)}->{fmt_min(new_start)}]"
+                    placed.append((new_start, new_start + svc))
+                else:
+                    logger.warning(
+                        "Could not resolve overlap for visit %s on %s; unassigning",
+                        r.visit_id, r.date_str,
+                    )
+                    r.staff_id = ""
+                    r.staff_name = ""
+                    r.note += " [重複解消不可: 未割当]"

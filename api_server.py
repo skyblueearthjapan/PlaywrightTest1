@@ -14,6 +14,7 @@ VNC/noVNC経由でブラウザ画面をリアルタイム配信します。
     GET  /api/export/result - CSV出力結果取得（ポーリング用）
     POST /api/apply   - 差分適用
     GET  /api/apply/result  - 差分適用結果取得（ポーリング用）
+    POST /api/allocate - 配置エンジン実行
     GET  /api/status  - サーバー状態確認
 
     # VNC/ジョブ管理API
@@ -1096,6 +1097,186 @@ def api_test():
         result["message"] = "接続テスト成功 - POSTデータを受信しました"
 
     return jsonify(result)
+
+
+# ====== 配置エンジンAPI ======
+
+@app.route('/api/allocate', methods=['POST'])
+def api_allocate():
+    """Run the allocation engine with provided data."""
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"success": False, "error": "No JSON data"}), 400
+
+        # Lazy imports to avoid startup issues
+        from lib.allocation_models import (
+            Patient, Staff, VisitRequest, Event, StaffChange,
+            WeeklyPattern, ConfirmedHistory
+        )
+        from lib.allocation_engine import AllocationEngine
+
+        add_log("allocate 開始")
+        print("\n=== API: allocate 開始 ===")
+
+        # Parse staff masters
+        staff_list = []
+        for s in data.get("staff_masters", []):
+            staff_list.append(Staff(
+                sid=s["staff_id"],
+                name=s.get("staff_name", ""),
+                gender=s.get("gender", ""),
+                lat=s.get("latitude"),
+                lng=s.get("longitude"),
+                shift_start_min=s.get("shift_start_minutes", 540),
+                shift_end_min=s.get("shift_end_minutes", 1080),
+                work_days=s.get("work_days", []),
+                areas=s.get("areas", []),
+                max_per_day=s.get("max_per_day", 999),
+                alloc_pref=s.get("alloc_pref", "均等"),
+            ))
+
+        # Parse patient masters
+        patient_map = {}
+        for p in data.get("patient_masters", []):
+            patient_map[p["patient_id"]] = Patient(
+                pid=p["patient_id"],
+                name=p.get("patient_name", ""),
+                area=p.get("area", ""),
+                lat=p.get("latitude"),
+                lng=p.get("longitude"),
+                service_minutes=p.get("service_minutes", 60),
+            )
+
+        # Parse events
+        events = []
+        for e in data.get("events", []):
+            events.append(Event(
+                event_id=e["event_id"],
+                staff_id=e["staff_id"],
+                date_str=e["date"],
+                event_type=e.get("event_type", ""),
+                title=e.get("title", ""),
+                start_min=e.get("start_time_minutes"),
+                end_min=e.get("end_time_minutes"),
+                duration_min=e.get("duration_minutes", 60),
+                fixed_slot=e.get("fixed_slot", True),
+            ))
+
+        # Parse staff changes
+        staff_changes = []
+        for sc in data.get("staff_changes", []):
+            staff_changes.append(StaffChange(
+                staff_id=sc["staff_id"],
+                date_str=sc["date"],
+                restriction_type=sc["restriction_type"],
+                start_min=sc.get("start_time_minutes"),
+                end_min=sc.get("end_time_minutes"),
+            ))
+
+        # Parse weekly patterns (optional)
+        weekly_patterns = []
+        for wp in data.get("weekly_patterns", []):
+            weekly_patterns.append(WeeklyPattern(
+                pid=wp["patient_id"],
+                pname=wp.get("patient_name", ""),
+                day_code=wp.get("day_code", ""),
+                start_min=wp.get("start_time_minutes"),
+                end_min=wp.get("end_time_minutes"),
+                service_min=wp.get("service_minutes", 60),
+                need_staff=wp.get("need_staff", 1),
+                note=wp.get("note", ""),
+            ))
+
+        # Parse confirmed history (optional)
+        confirmed_history = []
+        for ch in data.get("confirmed_history", []):
+            confirmed_history.append(ConfirmedHistory(
+                week_start=ch.get("week_start", ""),
+                date_str=ch.get("date", ""),
+                pid=ch.get("patient_id", ""),
+                staff_id=ch.get("staff_id", ""),
+                staff_name=ch.get("staff_name", ""),
+            ))
+
+        # Parse weekly requests
+        requests = []
+        for r in data.get("weekly_requests", []):
+            requests.append(VisitRequest(
+                request_id=r.get("request_id", ""),
+                date_str=r["date"],
+                weekday=r.get("weekday", ""),
+                pid=r["patient_id"],
+                pname=r.get("patient_name", ""),
+                area=r.get("area", ""),
+                start_min=r.get("start_time_minutes"),
+                end_min=r.get("end_time_minutes"),
+                service_min=r.get("service_minutes", 60),
+                need_staff=r.get("need_staff", 1),
+                specified_staff_ids=r.get("specified_staff_ids", []),
+                specified_type=r.get("specified_type", ""),
+                ng_staff_ids=r.get("ng_staff_ids", []),
+                sex_limit=r.get("sex_limit", ""),
+                cont_pref=r.get("continuation_pref", ""),
+                time_type=r.get("time_type", ""),
+                earliest_min=r.get("earliest_time_minutes"),
+                latest_min=r.get("latest_time_minutes"),
+                prev_staff_id=r.get("prev_staff_id", ""),
+                prev_staff_name=r.get("prev_staff_name", ""),
+                change_type=r.get("change_type", "通常"),
+                note=r.get("notes", ""),
+            ))
+
+        # Run engine
+        engine = AllocationEngine(
+            staff_list=staff_list,
+            patient_map=patient_map,
+            events=events,
+            staff_changes=staff_changes,
+            weekly_patterns=weekly_patterns,
+            confirmed_history=confirmed_history,
+        )
+        result = engine.allocate(requests)
+
+        # Convert results to JSON-serializable format
+        assignment_results = []
+        for r in result["results"]:
+            assignment_results.append({
+                "visit_id": r.visit_id,
+                "date": r.date_str,
+                "weekday": r.weekday,
+                "staff_id": r.staff_id,
+                "staff_name": r.staff_name,
+                "patient_id": r.pid,
+                "patient_name": r.pname,
+                "area": r.area,
+                "start_time_minutes": r.start_min,
+                "end_time_minutes": r.end_min,
+                "service_minutes": r.service_min,
+                "time_type": r.time_type,
+                "earliest_time_minutes": r.earliest_min,
+                "latest_time_minutes": r.latest_min,
+                "notes": r.note,
+                "is_event": r.is_event,
+                "movement_km": round(r.movement_km, 2) if r.movement_km else None,
+            })
+
+        add_log(f"allocate 完了: {len(assignment_results)}件割当")
+        return jsonify({
+            "success": True,
+            "result": {
+                "assignment_results": assignment_results,
+                "unassigned": result["unassigned"],
+                "summary": result["summary"],
+            }
+        })
+
+    except Exception as e:
+        add_log(f"allocate エラー: {e}")
+        print(f"エラー: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
 # ====== VNC/ジョブ管理API ======
