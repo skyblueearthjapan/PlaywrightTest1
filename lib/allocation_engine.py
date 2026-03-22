@@ -72,6 +72,10 @@ class AllocationEngine:
         staff_changes: List[StaffChange],
         weekly_patterns: Optional[List[WeeklyPattern]] = None,
         confirmed_history: Optional[List[ConfirmedHistory]] = None,
+        patient_changes=None,
+        special_week_headers=None,
+        special_week_details=None,
+        mentor_pairs=None,
     ):
         self.staff_list = staff_list
         self.staff_map: Dict[str, Staff] = {s.sid: s for s in staff_list}
@@ -80,6 +84,10 @@ class AllocationEngine:
         self.staff_changes = staff_changes
         self.weekly_patterns = weekly_patterns or []
         self.confirmed_history = confirmed_history or []
+        self.patient_changes = patient_changes or []
+        self.special_week_headers = special_week_headers or []
+        self.special_week_details = special_week_details or []
+        self.mentor_pairs = mentor_pairs or []
 
         # Build staff-change lookup: "staffId|dateStr" -> [StaffChange]
         self.staff_change_map: Dict[str, List[StaffChange]] = {}

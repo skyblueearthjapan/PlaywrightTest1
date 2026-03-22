@@ -1112,6 +1112,7 @@ def api_allocate():
         # Lazy imports to avoid startup issues
         from lib.allocation_models import (
             Patient, Staff, VisitRequest, Event, StaffChange,
+            PatientChange, SpecialWeekHeader, SpecialWeekDetail, MentorPair,
             WeeklyPattern, ConfirmedHistory
         )
         from lib.allocation_engine import AllocationEngine
@@ -1227,6 +1228,70 @@ def api_allocate():
                 note=r.get("notes", ""),
             ))
 
+        # Parse patient changes (個別変更リクエスト)
+        patient_changes = []
+        for pc in data.get("patient_changes", []):
+            patient_changes.append(PatientChange(
+                pid=pc["patient_id"],
+                date_str=pc["date"],
+                operation=pc.get("operation", ""),
+                time_type=pc.get("time_type", ""),
+                start_min=pc.get("start_time_minutes"),
+                end_min=pc.get("end_time_minutes"),
+                earliest_min=pc.get("earliest_time_minutes"),
+                latest_min=pc.get("latest_time_minutes"),
+                service_min=pc.get("service_minutes"),
+                need_staff=pc.get("need_staff"),
+                specified_staff_ids=pc.get("specified_staff_ids", []),
+                specified_type=pc.get("specified_type", ""),
+                ng_staff_ids=pc.get("ng_staff_ids", []),
+                note=pc.get("note", ""),
+            ))
+
+        # Parse special week (特別訪問週間)
+        special_week_data = data.get("special_week", {})
+        special_week_headers = []
+        for sh in special_week_data.get("headers", []):
+            special_week_headers.append(SpecialWeekHeader(
+                special_week_id=sh["special_week_id"],
+                pid=sh.get("patient_id", ""),
+                pname=sh.get("patient_name", ""),
+                week_start=sh.get("week_start", ""),
+                mode=sh.get("mode", "ADD"),
+                reason=sh.get("reason", ""),
+            ))
+        special_week_details = []
+        for sd in special_week_data.get("details", []):
+            special_week_details.append(SpecialWeekDetail(
+                special_week_id=sd["special_week_id"],
+                pid=sd.get("patient_id", ""),
+                date_str=sd.get("date", ""),
+                time_type=sd.get("time_type", ""),
+                start_min=sd.get("start_time_minutes"),
+                end_min=sd.get("end_time_minutes"),
+                earliest_min=sd.get("earliest_time_minutes"),
+                latest_min=sd.get("latest_time_minutes"),
+                service_min=sd.get("service_minutes", 60),
+                need_staff=sd.get("need_staff", 1),
+                note=sd.get("note", ""),
+                change_policy=sd.get("change_policy", ""),
+            ))
+
+        # Parse mentor pairs (スタッフ同行割付)
+        mentor_pairs = []
+        for mp in data.get("mentor_pairs", []):
+            mentor_pairs.append(MentorPair(
+                trainee_staff_id=mp["trainee_staff_id"],
+                mentor_staff_id=mp.get("mentor_staff_id", ""),
+                start_date=mp.get("start_date", ""),
+                end_date=mp.get("end_date", ""),
+                band=mp.get("band", ""),
+                start_min=mp.get("start_time_minutes"),
+                end_min=mp.get("end_time_minutes"),
+                day_condition=mp.get("day_condition", ""),
+                priority=mp.get("priority", ""),
+            ))
+
         # Run engine
         engine = AllocationEngine(
             staff_list=staff_list,
@@ -1235,6 +1300,10 @@ def api_allocate():
             staff_changes=staff_changes,
             weekly_patterns=weekly_patterns,
             confirmed_history=confirmed_history,
+            patient_changes=patient_changes,
+            special_week_headers=special_week_headers,
+            special_week_details=special_week_details,
+            mentor_pairs=mentor_pairs,
         )
         result = engine.allocate(requests)
 
@@ -1278,6 +1347,51 @@ def api_allocate():
         traceback.print_exc()
         return jsonify({"success": False, "error": str(e)}), 500
 
+
+
+@app.route("/api/allocate/debug", methods=["POST"])
+def api_allocate_debug():
+    """受信データの件数・サンプルを返す検証用エンドポイント"""
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"success": False, "error": "No JSON data"}), 400
+
+        sw = data.get("special_week", {})
+        summary = {
+            "week_start": data.get("week_start", ""),
+            "staff_masters": len(data.get("staff_masters", [])),
+            "patient_masters": len(data.get("patient_masters", [])),
+            "weekly_requests": len(data.get("weekly_requests", [])),
+            "events": len(data.get("events", [])),
+            "staff_changes": len(data.get("staff_changes", [])),
+            "weekly_patterns": len(data.get("weekly_patterns", [])),
+            "confirmed_history": len(data.get("confirmed_history", [])),
+            "patient_changes": len(data.get("patient_changes", [])),
+            "special_week_headers": len(sw.get("headers", [])),
+            "special_week_details": len(sw.get("details", [])),
+            "mentor_pairs": len(data.get("mentor_pairs", [])),
+        }
+
+        samples = {}
+        for key in ["staff_masters", "patient_masters", "weekly_requests",
+                    "events", "staff_changes", "weekly_patterns",
+                    "confirmed_history", "patient_changes", "mentor_pairs"]:
+            arr = data.get(key, [])
+            if arr:
+                samples[key + "_sample"] = arr[0]
+        if sw.get("headers"):
+            samples["special_week_headers_sample"] = sw["headers"][0]
+        if sw.get("details"):
+            samples["special_week_details_sample"] = sw["details"][0]
+
+        add_log("allocate/debug: " + str(summary))
+        return jsonify({"success": True, "counts": summary, "samples": samples})
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"success": False, "error": str(e)}), 500
 
 # ====== VNC/ジョブ管理API ======
 

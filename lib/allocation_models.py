@@ -154,3 +154,64 @@ class Interval:
     """Time interval in minutes."""
     start: int
     end: int
+
+
+@dataclass
+class PatientChange:
+    """Patient-specific visit change for a specific date."""
+    pid: str
+    date_str: str
+    operation: str = ""           # "追加","キャンセル","時間変更","スタッフ変更"
+    time_type: str = ""
+    start_min: Optional[int] = None
+    end_min: Optional[int] = None
+    earliest_min: Optional[int] = None
+    latest_min: Optional[int] = None
+    service_min: Optional[int] = None
+    need_staff: Optional[int] = None
+    specified_staff_ids: List[str] = field(default_factory=list)
+    specified_type: str = ""
+    ng_staff_ids: List[str] = field(default_factory=list)
+    note: str = ""
+
+
+@dataclass
+class SpecialWeekHeader:
+    """Special week header (one per patient per week)."""
+    special_week_id: str
+    pid: str
+    pname: str = ""
+    week_start: str = ""
+    mode: str = "ADD"             # "ADD" or "REPLACE"
+    reason: str = ""
+
+
+@dataclass
+class SpecialWeekDetail:
+    """Special week detail row (specific visit override)."""
+    special_week_id: str
+    pid: str = ""
+    date_str: str = ""
+    time_type: str = ""
+    start_min: Optional[int] = None
+    end_min: Optional[int] = None
+    earliest_min: Optional[int] = None
+    latest_min: Optional[int] = None
+    service_min: int = 60
+    need_staff: int = 1
+    note: str = ""
+    change_policy: str = ""
+
+
+@dataclass
+class MentorPair:
+    """Staff accompaniment (trainee-mentor pair)."""
+    trainee_staff_id: str
+    mentor_staff_id: str = ""
+    start_date: str = ""
+    end_date: str = ""
+    band: str = ""                # "午前","午後","終日"
+    start_min: Optional[int] = None
+    end_min: Optional[int] = None
+    day_condition: str = ""
+    priority: str = ""
