@@ -30,12 +30,21 @@ import secrets
 import subprocess
 import threading
 import time
+import logging
 from pathlib import Path
 from datetime import datetime
 from functools import wraps
 from collections import deque
 from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
+
+# エンジンログをstdoutに出力（docker logsで確認可能に）
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(name)s %(levelname)s %(message)s",
+    stream=sys.stdout,
+)
+logging.getLogger("lib.allocation_engine").setLevel(logging.INFO)
 
 # プロジェクトルートをパスに追加
 sys.path.insert(0, str(Path(__file__).parent))
