@@ -1534,14 +1534,33 @@ class AllocationEngine:
             except (ValueError, IndexError):
                 pass
 
-        # Group unassigned by patient+date (for coupled pair handling)
+        # Group unassigned by patient+date
+        # For coupled visits, include ALL slots (even if one was assigned)
         pid_date_unassigned: Dict[str, List[int]] = {}
+        unassigned_set = set()
         for idx in unassigned_indices:
             r = self.results[idx]
             if r.staff_id or r.is_event:
                 continue
+            unassigned_set.add(idx)
             key = f"{r.pid}|{r.date_str}"
             pid_date_unassigned.setdefault(key, []).append(idx)
+
+        # For coupled visits with partial assignment, gather ALL slots
+        for pd_key in list(pid_date_unassigned.keys()):
+            pid_part = pd_key.split("|")[0]
+            date_part = pd_key.split("|")[1]
+            # Find coupled partner slots that ARE assigned on same date
+            for i, r in enumerate(self.results):
+                if r.pid == pid_part and r.date_str == date_part and r.is_coupled and i not in unassigned_set:
+                    if r.staff_id:
+                        # This is the assigned half - include it for day shift
+                        pid_date_unassigned[pd_key].append(i)
+                        # Unassign it (will be re-assigned on new date)
+                        self._unregister_assignment(r.staff_id, r.date_str, i)
+                        r.staff_id = ""
+                        r.staff_name = ""
+                        r.note += " [曜日シフト準備: 一時解除]"
 
         # Sort dates by load (least crowded first)
         sorted_dates = sorted(date_load.keys(), key=lambda d: date_load.get(d, 0))
@@ -1575,6 +1594,12 @@ class AllocationEngine:
             ng_ids = constraints.get("ng_staff_ids", [])
             sex_lim = constraints.get("sex_limit", "")
 
+            logger.info(
+                "DayShift: trying %s (orig=%s, %d slots, priority=%s)",
+                pid, orig_date, len(indices),
+                getattr(patient, "day_priority", "?"),
+            )
+
             # Try each date from least crowded
             for alt_date in sorted_dates:
                 if alt_date == orig_date:
@@ -1583,14 +1608,16 @@ class AllocationEngine:
                 if not alt_weekday:
                     continue
 
-                # Skip weekends (Sat/Sun) unless patient has visits on those days
+                # Skip weekends (Sat/Sun)
                 if alt_weekday in ("Sat", "Sun"):
                     continue
 
                 # Check if this patient already has a visit on this date
+                # (割当済み OR 曜日シフト済みの両方をチェック)
                 already_on_date = any(
-                    r.pid == pid and r.date_str == alt_date and r.staff_id
+                    r.pid == pid and r.date_str == alt_date
                     for r in self.results
+                    if r.staff_id  # 割当済みのみ
                 )
                 if already_on_date:
                     continue
