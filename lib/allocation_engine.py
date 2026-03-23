@@ -692,10 +692,19 @@ class AllocationEngine:
 
         return merge_intervals(intervals)
 
-    def _has_overlap(self, staff_id: str, date_str: str, start: int, end: int) -> bool:
-        """Return True if ``[start, end)`` overlaps any existing visit for the staff."""
+    def _has_overlap(
+        self, staff_id: str, date_str: str, start: int, end: int,
+        exclude_indices: Optional[Set[int]] = None,
+    ) -> bool:
+        """Return True if ``[start, end)`` overlaps any existing visit for the staff.
+
+        Args:
+            exclude_indices: result indices to skip (e.g. the visit being moved).
+        """
         key = f"{staff_id}|{date_str}"
         for idx in self.staff_day_visits.get(key, []):
+            if exclude_indices and idx in exclude_indices:
+                continue
             r = self.results[idx]
             if r.start_min is not None and r.end_min is not None:
                 if intervals_overlap(start, end, r.start_min, r.end_min):
@@ -742,22 +751,43 @@ class AllocationEngine:
             target = max(s1, s2, common_earliest)
             target_end = target + svc
 
+            # 自分自身のペアindexを除外して重複チェック
+            pair_indices = set(indices)
+
             if target_end <= common_latest:
                 no_overlap_1 = not self._has_overlap(
                     r1.staff_id, r1.date_str, target, target_end,
+                    exclude_indices=pair_indices,
                 )
                 no_overlap_2 = not self._has_overlap(
                     r2.staff_id, r2.date_str, target, target_end,
+                    exclude_indices=pair_indices,
                 )
                 if no_overlap_1 and no_overlap_2:
                     r1.start_min = r2.start_min = target
                     r1.end_min = r2.end_min = target_end
                     continue
 
-            # Fallback: force to common earliest
-            r1.start_min = r2.start_min = common_earliest
-            r1.end_min = r2.end_min = common_earliest + svc
-            r1.note += " [時刻同期]"
+            # Fallback: force to common earliest (重複チェック付き)
+            fb_end = common_earliest + svc
+            fb_ok_1 = not self._has_overlap(
+                r1.staff_id, r1.date_str, common_earliest, fb_end,
+                exclude_indices=pair_indices,
+            )
+            fb_ok_2 = not self._has_overlap(
+                r2.staff_id, r2.date_str, common_earliest, fb_end,
+                exclude_indices=pair_indices,
+            )
+            if fb_ok_1 and fb_ok_2:
+                r1.start_min = r2.start_min = common_earliest
+                r1.end_min = r2.end_min = fb_end
+                r1.note += " [時刻同期]"
+            else:
+                # 重複回避不可 → 時刻を変えず警告のみ
+                logger.warning(
+                    "CoupledSync: could not sync %s without overlap, skipping",
+                    base_id,
+                )
             r2.note += " [時刻同期]"
 
     # ==================================================================
