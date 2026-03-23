@@ -823,8 +823,20 @@ class AllocationEngine:
 
             # Build distance-sorted candidates (top 10)
             constraints = self._request_constraints.get(idx, {})
-            ng_ids = constraints.get("ng_staff_ids", [])
+            ng_ids = list(constraints.get("ng_staff_ids", []))
             sex_lim = constraints.get("sex_limit", "")
+
+            # Coupled pair: exclude the staff already assigned to the other slot
+            if r.is_coupled and r.visit_id:
+                m = _COUPLED_RE.match(r.visit_id)
+                if m:
+                    base_id = m.group(1)
+                    for other_r in self.results:
+                        if (other_r.visit_id and other_r.visit_id != r.visit_id
+                                and other_r.visit_id.startswith(base_id + "-")
+                                and other_r.staff_id):
+                            ng_ids.append(other_r.staff_id)
+
             candidates: List[Tuple[Staff, float]] = []
             for staff in self.staff_list:
                 if not self._is_staff_available_for_reinsertion(
@@ -838,7 +850,15 @@ class AllocationEngine:
             candidates = candidates[:10]
 
             for staff, _ in candidates:
-                fit_start = self._can_insert(staff, r)
+                # 固定時刻の場合はその時刻を尊重
+                if r.time_type == "固定" and r.earliest_min is not None:
+                    fit_start = r.earliest_min
+                    svc = r.service_min or 30
+                    # この時刻でスタッフが空いているか確認
+                    if self._has_overlap(staff.sid, r.date_str, fit_start, fit_start + svc):
+                        continue
+                else:
+                    fit_start = self._can_insert(staff, r)
                 if fit_start is not None:
                     svc = r.service_min or 30
                     r.staff_id = staff.sid
