@@ -671,11 +671,8 @@ class AllocationEngine:
                 return False
             return not self._has_overlap(staff.sid, req.date_str, req.start_min, req.end_min)
 
-        # No blocked intervals and not fixed-time -> available
-        if not blocked:
-            return True
-
         # Flexible time: check if service fits in any available gap
+        # (既存訪問との重複も必ずチェック)
         eff_earliest, eff_latest = get_effective_window(
             req.time_type, req.earliest_min, req.latest_min,
         )
@@ -683,7 +680,7 @@ class AllocationEngine:
         eff_latest = min(eff_latest, staff.shift_end_min)
 
         all_blocked = list(blocked)
-        # Include existing visit times as blocked
+        # Include existing visit times as blocked (重複防止の核心)
         key = f"{staff.sid}|{req.date_str}"
         for idx in self.staff_day_visits.get(key, []):
             r = self.results[idx]
