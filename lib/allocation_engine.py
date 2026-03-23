@@ -1759,6 +1759,26 @@ class AllocationEngine:
                             r.note += f" [曜日シフト: {date_weekday.get(orig_date, '?')}→{alt_weekday}]"
                             resolved += 1
 
+                    # 元の日に未割当エントリを追加（2名体制の片方が移動した記録）
+                    if is_coupled:
+                        for slot_idx in all_slots:
+                            orig_r = self.results[slot_idx]
+                            placeholder = AssignmentResult(
+                                visit_id=f"{orig_r.visit_id}_UA",
+                                date_str=orig_date,
+                                weekday=date_weekday.get(orig_date, ""),
+                                pid=pid,
+                                pname=orig_r.pname,
+                                area=orig_r.area,
+                                service_min=orig_r.service_min,
+                                time_type=orig_r.time_type,
+                                earliest_min=orig_r.earliest_min,
+                                latest_min=orig_r.latest_min,
+                                is_coupled=True,
+                                note=f"[曜日シフト済→{alt_weekday}: 元日の未割当枠]",
+                            )
+                            self.results.append(placeholder)
+
                     # Update date_load
                     date_load[alt_date] = date_load.get(alt_date, 0) + need_staff
                     logger.info("DayShift: SUCCESS %s %s→%s (%d staff)", pid, orig_date, alt_date, need_staff)
