@@ -312,9 +312,9 @@ class AllocationEngine:
 
         for req in requests:
             used_staff_ids: Set[str] = set()
+            visit_counter += 1
 
             for slot in range(1, req.need_staff + 1):
-                visit_counter += 1
                 visit_id = f"V{visit_counter:03d}"
                 if req.need_staff > 1:
                     visit_id += f"-{slot}"
