@@ -1811,8 +1811,9 @@ class AllocationEngine:
                 key = f"{req.pid}|{req.date_str}"
                 need_staff_map[key] = req.need_staff
 
-        # Count assigned per patient+date
+        # Count assigned and unassigned per patient+date
         assigned_count_map: Dict[str, int] = {}
+        unassigned_coupled: Dict[str, List[AssignmentResult]] = {}
         assigned_info: Dict[str, AssignmentResult] = {}
         for r in self.results:
             if r.is_event or not r.is_coupled:
@@ -1821,6 +1822,8 @@ class AllocationEngine:
             if r.staff_id:
                 assigned_count_map[key] = assigned_count_map.get(key, 0) + 1
                 assigned_info[key] = r
+            else:
+                unassigned_coupled.setdefault(key, []).append(r)
 
         # Also check day-shifted visits (they have different dates from original)
         for r in self.results:
@@ -1831,16 +1834,29 @@ class AllocationEngine:
                 # This visit was day-shifted to a date not in original requests
                 need_staff_map[key] = 2  # Assume 2-staff need
 
-        # Add missing entries
+        # Fix missing entries: set time on existing unassigned OR add new
         added = 0
         for key, need in need_staff_map.items():
             actual = assigned_count_map.get(key, 0)
             if 0 < actual < need:
-                # Has some assigned but not enough
                 ref = assigned_info.get(key)
                 if not ref:
                     continue
-                for _ in range(need - actual):
+                missing = need - actual
+                # まず既存の未割当スロットに時刻を設定
+                existing_unassigned = unassigned_coupled.get(key, [])
+                for i, ua in enumerate(existing_unassigned):
+                    if i >= missing:
+                        break
+                    # 割当済みスロットと同じ時刻を設定
+                    ua.start_min = ref.start_min
+                    ua.end_min = ref.end_min
+                    if "[2名体制:2人目未割当]" not in (ua.note or ""):
+                        ua.note = (ua.note or "") + " [2名体制:2人目未割当]"
+                    added += 1
+                # 既存の未割当が足りなければ新規追加
+                remaining = missing - len(existing_unassigned)
+                for _ in range(remaining):
                     placeholder = AssignmentResult(
                         visit_id=f"{ref.visit_id}_NEED",
                         date_str=ref.date_str,
