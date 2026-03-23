@@ -636,13 +636,21 @@ class AllocationEngine:
                 return False
 
         # Fixed-time visit: check direct overlap
-        if req.time_type == "固定" and req.start_min is not None and req.end_min is not None:
+        # GASはstart_time_minutesではなくearliest_time_minutesに固定時刻を送る場合がある
+        fixed_start = req.start_min
+        if fixed_start is None and req.time_type == "固定" and req.earliest_min is not None:
+            fixed_start = req.earliest_min
+        fixed_end = req.end_min
+        if fixed_end is None and fixed_start is not None:
+            fixed_end = fixed_start + (req.service_min or 30)
+
+        if req.time_type == "固定" and fixed_start is not None and fixed_end is not None:
             for iv in blocked:
-                if intervals_overlap(req.start_min, req.end_min, iv.start, iv.end):
+                if intervals_overlap(fixed_start, fixed_end, iv.start, iv.end):
                     return False
-            if req.start_min < staff.shift_start_min or req.end_min > staff.shift_end_min:
+            if fixed_start < staff.shift_start_min or fixed_end > staff.shift_end_min:
                 return False
-            return not self._has_overlap(staff.sid, req.date_str, req.start_min, req.end_min)
+            return not self._has_overlap(staff.sid, req.date_str, fixed_start, fixed_end)
 
         # Flexible time: check if service fits in any available gap
         # (既存訪問との重複も必ずチェック)
@@ -1028,6 +1036,21 @@ class AllocationEngine:
             The start minute, or ``None`` if no slot is available.
         """
         svc = r.service_min or 30
+
+        # 固定時刻: earliest_minからの直接配置を試みる
+        fixed_start = None
+        if r.time_type == "固定" and r.earliest_min is not None:
+            fixed_start = r.earliest_min
+        elif r.time_type == "固定" and r.start_min is not None:
+            fixed_start = r.start_min
+        if fixed_start is not None:
+            fixed_end = fixed_start + svc
+            if fixed_start >= staff.shift_start_min and fixed_end <= staff.shift_end_min:
+                if not self._has_overlap(staff.sid, r.date_str, fixed_start, fixed_end):
+                    blocked = self._get_blocked_intervals(staff.sid, r.date_str)
+                    if not any(intervals_overlap(fixed_start, fixed_end, b.start, b.end) for b in blocked):
+                        return fixed_start
+            return None  # 固定時刻で入れなければ他の時間は試さない
         eff_earliest, eff_latest = get_effective_window(
             r.time_type, r.earliest_min, r.latest_min,
         )
