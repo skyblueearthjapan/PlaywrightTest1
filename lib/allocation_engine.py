@@ -201,9 +201,6 @@ class AllocationEngine:
                 self._sync_coupled_times()
                 logger.info("Relaxed Pass: resolved %d visits", relaxed)
 
-        # Step 8 - 最終重複チェック＆修正
-        self._final_overlap_sweep()
-
         # Step 8 - route optimisation
         logger.info("Level 3: Optimizing routes...")
         self._level3_route_optimize()
@@ -215,6 +212,10 @@ class AllocationEngine:
 
         # Step 10 - mentor pair expansion (post-processing)
         self._apply_mentor_pairs()
+
+        # Step 11 - 最終安全ネット（必ずパイプライン最後に実行）
+        self._final_overlap_sweep()
+        self._enforce_coupled_atomicity()  # coupled片割れ保護
 
         # Summary
         assigned_count = sum(
@@ -648,7 +649,7 @@ class AllocationEngine:
         eff_earliest, eff_latest = get_effective_window(
             req.time_type, req.earliest_min, req.latest_min,
         )
-        eff_earliest = max(eff_earliest, staff.shift_start_min)
+        eff_earliest = max(eff_earliest, staff.shift_start_min, 540)
         eff_latest = min(eff_latest, staff.shift_end_min)
 
         all_blocked = list(blocked)
@@ -786,13 +787,13 @@ class AllocationEngine:
                 r1.start_min = r2.start_min = common_earliest
                 r1.end_min = r2.end_min = fb_end
                 r1.note += " [時刻同期]"
+                r2.note += " [時刻同期]"
             else:
                 # 重複回避不可 → 時刻を変えず警告のみ
                 logger.warning(
                     "CoupledSync: could not sync %s without overlap, skipping",
                     base_id,
                 )
-            r2.note += " [時刻同期]"
 
     # ==================================================================
     # GapPack - Time Refinement
@@ -963,7 +964,14 @@ class AllocationEngine:
                 if r.time_type == "固定" and r.earliest_min is not None:
                     fit_start = r.earliest_min
                     svc = r.service_min or 30
-                    # この時刻でスタッフが空いているか確認
+                    # シフト境界チェック
+                    if fit_start < staff.shift_start_min or fit_start + svc > staff.shift_end_min:
+                        continue
+                    # blocked区間チェック（休み/午前休等）
+                    blocked = self._get_blocked_intervals(staff.sid, r.date_str)
+                    if any(intervals_overlap(fit_start, fit_start + svc, b.start, b.end) for b in blocked):
+                        continue
+                    # 重複チェック
                     if self._has_overlap(staff.sid, r.date_str, fit_start, fit_start + svc):
                         continue
                 else:
