@@ -1571,21 +1571,15 @@ class AllocationEngine:
             key = f"{r.pid}|{r.date_str}"
             pid_date_unassigned.setdefault(key, []).append(idx)
 
-        # For coupled visits with partial assignment, gather ALL slots
+        # For coupled visits, note the partner indices (don't unassign yet)
+        coupled_partners: Dict[str, List[int]] = {}  # pd_key -> [assigned partner indices]
         for pd_key in list(pid_date_unassigned.keys()):
             pid_part = pd_key.split("|")[0]
             date_part = pd_key.split("|")[1]
-            # Find coupled partner slots that ARE assigned on same date
             for i, r in enumerate(self.results):
                 if r.pid == pid_part and r.date_str == date_part and r.is_coupled and i not in unassigned_set:
                     if r.staff_id:
-                        # This is the assigned half - include it for day shift
-                        pid_date_unassigned[pd_key].append(i)
-                        # Unassign it (will be re-assigned on new date)
-                        self._unregister_assignment(r.staff_id, r.date_str, i)
-                        r.staff_id = ""
-                        r.staff_name = ""
-                        r.note += " [曜日シフト準備: 一時解除]"
+                        coupled_partners.setdefault(pd_key, []).append(i)
 
         # Sort dates by load (least crowded first)
         sorted_dates = sorted(date_load.keys(), key=lambda d: date_load.get(d, 0))
@@ -1647,15 +1641,19 @@ class AllocationEngine:
                 if already_on_date:
                     continue
 
-                # For coupled visits, need to handle all slots together
+                # For coupled visits, include partner slots
                 is_coupled = orig_r.is_coupled
-                need_staff = len(indices)  # 2名体制なら2件
+                all_slots = list(indices)
+                partner_slots = coupled_partners.get(pd_key, [])
+                if partner_slots:
+                    all_slots.extend(partner_slots)
+                need_staff = len(all_slots)
 
                 # Find eligible staff for this date
                 placed_staff = []
                 all_placed = True
 
-                for slot_idx in indices:
+                for slot_idx in all_slots:
                     r = self.results[slot_idx]
                     found_staff = False
 
@@ -1697,8 +1695,16 @@ class AllocationEngine:
                         break
 
                 if all_placed and len(placed_staff) >= need_staff:
+                    # Unassign partner slots first (they were still assigned)
+                    for pi in partner_slots:
+                        pr = self.results[pi]
+                        if pr.staff_id:
+                            self._unregister_assignment(pr.staff_id, pr.date_str, pi)
+                            pr.staff_id = ""
+                            pr.staff_name = ""
+
                     # Assign all slots
-                    for si, slot_idx in enumerate(indices):
+                    for si, slot_idx in enumerate(all_slots):
                         r = self.results[slot_idx]
                         staff = placed_staff[si]
                         svc = r.service_min or 30
