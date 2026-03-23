@@ -431,6 +431,14 @@ class AllocationEngine:
                     result.staff_name = chosen.name
                     used_staff_ids.add(chosen.sid)
 
+                    # 即座に配置時間を確定（GapPack任せにしない）
+                    if result.start_min is None:
+                        fit = self._can_insert(chosen, result)
+                        if fit is not None:
+                            svc = result.service_min or 30
+                            result.start_min = fit
+                            result.end_min = fit + svc
+
                     idx = len(self.results)
                     self.results.append(result)
                     self._register_assignment(chosen.sid, req.date_str, idx, pid=req.pid)
