@@ -201,6 +201,20 @@ class AllocationEngine:
                 self._sync_coupled_times()
                 logger.info("Relaxed Pass: resolved %d visits", relaxed)
 
+        # Step 7.5 - 曜日シフト戦略（希望日以外への振替）
+        day_shift_unassigned = [
+            i for i, r in enumerate(self.results)
+            if not r.staff_id and not r.is_event
+        ]
+        if day_shift_unassigned:
+            logger.info("Day Shift: Attempting day redistribution for %d visits...",
+                        len(day_shift_unassigned))
+            shifted = self._day_shift_strategy(day_shift_unassigned, active_requests)
+            if shifted > 0:
+                self._enforce_coupled_atomicity()
+                self._sync_coupled_times()
+                logger.info("Day Shift: resolved %d visits", shifted)
+
         # Step 8 - route optimisation
         logger.info("Level 3: Optimizing routes...")
         self._level3_route_optimize()
@@ -1455,6 +1469,185 @@ class AllocationEngine:
         self.results.extend(new_results)
         if new_results:
             logger.info("MentorPairs: %d shadowing visits added", len(new_results))
+
+    # ==================================================================
+    # Day Shift Strategy (曜日シフト戦略)
+    # ==================================================================
+    def _day_shift_strategy(
+        self, unassigned_indices: List[int], all_requests: List[VisitRequest],
+    ) -> int:
+        """Shift unassigned visits to less crowded days of the week.
+
+        The patient's preferred days are soft constraints. When a visit
+        can't be placed on the preferred day, try other weekdays that:
+        - Are within the same week
+        - Have lower staff load
+        - Don't violate NG days or other hard constraints
+        """
+        from datetime import datetime, timedelta
+
+        resolved = 0
+
+        # Build a map of dates in this week
+        week_dates = set()
+        for r in self.results:
+            if r.date_str:
+                week_dates.add(r.date_str)
+        for r in all_requests:
+            if r.date_str:
+                week_dates.add(r.date_str)
+
+        if not week_dates:
+            return 0
+
+        # Calculate load per date (how many visits are already assigned)
+        date_load: Dict[str, int] = {}
+        for d in sorted(week_dates):
+            date_load[d] = sum(
+                1 for r in self.results
+                if r.staff_id and r.date_str == d and not r.is_event
+            )
+
+        # Parse dates for weekday calculation
+        date_weekday: Dict[str, str] = {}
+        weekday_names = {0: "Mon", 1: "Tue", 2: "Wed", 3: "Thu", 4: "Fri", 5: "Sat", 6: "Sun"}
+        for d in week_dates:
+            try:
+                parts = d.split("/")
+                dt = datetime(int(parts[0]), int(parts[1]), int(parts[2]))
+                date_weekday[d] = weekday_names[dt.weekday()]
+            except (ValueError, IndexError):
+                pass
+
+        # Group unassigned by patient (for coupled pair handling)
+        patient_unassigned: Dict[str, List[int]] = {}
+        for idx in unassigned_indices:
+            r = self.results[idx]
+            if r.staff_id or r.is_event:
+                continue
+            patient_unassigned.setdefault(r.pid, []).append(idx)
+
+        # Sort dates by load (least crowded first)
+        sorted_dates = sorted(date_load.keys(), key=lambda d: date_load.get(d, 0))
+
+        for pid, indices in patient_unassigned.items():
+            if not indices:
+                continue
+
+            # Get patient info
+            patient = self.patient_map.get(pid)
+            if not patient:
+                continue
+
+            # Get the original date of the unassigned visit
+            orig_r = self.results[indices[0]]
+            orig_date = orig_r.date_str
+
+            # Get constraints for this visit
+            constraints = self._request_constraints.get(indices[0], {})
+            ng_ids = constraints.get("ng_staff_ids", [])
+            sex_lim = constraints.get("sex_limit", "")
+
+            # Try each date from least crowded
+            for alt_date in sorted_dates:
+                if alt_date == orig_date:
+                    continue  # Already tried this date
+                alt_weekday = date_weekday.get(alt_date, "")
+                if not alt_weekday:
+                    continue
+
+                # Check if this patient already has a visit on this date
+                already_on_date = any(
+                    r.pid == pid and r.date_str == alt_date and r.staff_id
+                    for r in self.results
+                )
+                if already_on_date:
+                    continue
+
+                # For coupled visits, need to handle all slots together
+                is_coupled = orig_r.is_coupled
+                need_staff = 2 if is_coupled else 1
+
+                # Find eligible staff for this date
+                placed_staff = []
+                all_placed = True
+
+                for slot_idx in indices[:need_staff]:
+                    r = self.results[slot_idx]
+                    found_staff = False
+
+                    for staff in self.staff_list:
+                        if staff.sid in ng_ids or staff.sid in [s.sid for s in placed_staff]:
+                            continue
+                        if sex_lim == "女性のみ" and staff.gender != "女性":
+                            continue
+                        if sex_lim == "男性のみ" and staff.gender != "男性":
+                            continue
+                        if staff.work_days and alt_weekday not in staff.work_days:
+                            continue
+                        # Check maxPerDay
+                        key = f"{staff.sid}|{alt_date}"
+                        if self.assign_count.get(key, 0) >= staff.soft_cap():
+                            continue
+                        # Check blocked (day off etc)
+                        blocked = self._get_blocked_intervals(staff.sid, alt_date)
+                        if any(iv.start <= 0 and iv.end >= 1440 for iv in blocked):
+                            continue
+
+                        # Create a temporary result for _can_insert
+                        temp_r = AssignmentResult(
+                            date_str=alt_date,
+                            weekday=alt_weekday,
+                            service_min=r.service_min,
+                            time_type=r.time_type,
+                            earliest_min=r.earliest_min,
+                            latest_min=r.latest_min,
+                        )
+                        fit = self._can_insert(staff, temp_r)
+                        if fit is not None:
+                            placed_staff.append(staff)
+                            found_staff = True
+                            break
+
+                    if not found_staff:
+                        all_placed = False
+                        break
+
+                if all_placed and len(placed_staff) >= need_staff:
+                    # Assign all slots
+                    for si, slot_idx in enumerate(indices[:need_staff]):
+                        r = self.results[slot_idx]
+                        staff = placed_staff[si]
+                        svc = r.service_min or 30
+
+                        # Update date
+                        r.date_str = alt_date
+                        r.weekday = alt_weekday
+
+                        # Find time slot
+                        temp_r = AssignmentResult(
+                            date_str=alt_date,
+                            weekday=alt_weekday,
+                            service_min=r.service_min,
+                            time_type=r.time_type,
+                            earliest_min=r.earliest_min,
+                            latest_min=r.latest_min,
+                        )
+                        fit = self._can_insert(staff, temp_r)
+                        if fit is not None:
+                            r.staff_id = staff.sid
+                            r.staff_name = staff.name
+                            r.start_min = fit
+                            r.end_min = fit + svc
+                            self._register_assignment(staff.sid, alt_date, slot_idx, pid=pid)
+                            r.note += f" [曜日シフト: {date_weekday.get(orig_date, '?')}→{alt_weekday}]"
+                            resolved += 1
+
+                    # Update date_load
+                    date_load[alt_date] = date_load.get(alt_date, 0) + need_staff
+                    break  # Move to next patient
+
+        return resolved
 
     # ==================================================================
     # Final Overlap Sweep (最終重複チェック＆修正)
