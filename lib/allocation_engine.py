@@ -142,41 +142,121 @@ class AllocationEngine:
         # Step 0.3 - enrich from weekly patterns (時間窓補完)
         active_requests = self._enrich_from_patterns(active_requests)
 
+        # ==============================================================
+        # Smart Multi-Strategy Allocation Engine
+        # 戦略1: 複数の処理順序で最良結果を選択
+        # 戦略2: 全スタッフ探索 + Ejection Chain
+        # 戦略3: 段階的制約緩和で未割当をゼロに近づける
+        # ==============================================================
+
+        import copy
+        import random
+
         # Step 1 - events
         self._insert_events()
 
-        # Step 2 - sort
-        sorted_requests = self._sort_requests(active_requests)
+        # ----------------------------------------------------------
+        # 戦略1: Multi-Order Trial（3つの異なる順序で割当し最良を採用）
+        # ----------------------------------------------------------
+        orderings = self._generate_orderings(active_requests)
+        best_result = None
+        best_unassigned = 99999
 
-        # Step 3 - initial allocation
-        logger.info("Level 0: Allocating %d requests...", len(sorted_requests))
-        self._level0_allocate(sorted_requests)
+        for trial_idx, ordered_reqs in enumerate(orderings):
+            # 各トライアルで状態をリセット（イベントは保持）
+            saved_events = [r for r in self.results if r.is_event]
+            self._reset_state()
+            self.results = list(saved_events)
+            # イベントをstaffDateMapに再登録
+            for ei, ev in enumerate(saved_events):
+                if ev.staff_id:
+                    self._register_assignment(ev.staff_id, ev.date_str, ei)
 
-        # Step 3.5 - enforce coupled atomicity after Level 0
-        self._enforce_coupled_atomicity()
+            # Level 0
+            self._level0_allocate(ordered_reqs)
+            self._enforce_coupled_atomicity()
+            self._sync_coupled_times()
 
-        # Step 4 - sync coupled
-        self._sync_coupled_times()
+            # GapPack
+            self._gap_pack()
+            self._sync_coupled_times()
 
-        # Step 5 - gap pack
-        logger.info("GapPack: Refining time assignments...")
-        self._gap_pack()
+            # Level 1 (enhanced: 全スタッフ探索)
+            unassigned_indices = [
+                i for i, r in enumerate(self.results)
+                if not r.staff_id and not r.is_event
+            ]
+            if unassigned_indices:
+                self._level1_reinsertion(unassigned_indices)
+                self._sync_coupled_times()
 
-        # Step 6 - sync again
-        self._sync_coupled_times()
+            # スコア計算
+            trial_unassigned = sum(
+                1 for r in self.results if not r.staff_id and not r.is_event
+            )
+            logger.info(
+                "Trial %d/%d: %d unassigned (order: %s)",
+                trial_idx + 1, len(orderings), trial_unassigned,
+                ordered_reqs[0].date_str if ordered_reqs else "empty",
+            )
 
-        # Step 7 - reinsertion
-        unassigned_indices = [
+            if trial_unassigned < best_unassigned:
+                best_unassigned = trial_unassigned
+                best_result = {
+                    "results": list(self.results),
+                    "unassigned": list(self.unassigned),
+                    "assign_count": dict(self.assign_count),
+                    "staff_day_visits": {k: list(v) for k, v in self.staff_day_visits.items()},
+                    "pid_date_staff": {k: set(v) for k, v in self.pid_date_staff.items()},
+                    "last_assigned": dict(self.last_assigned_by_patient),
+                    "request_constraints": dict(self._request_constraints),
+                }
+                if trial_unassigned == 0:
+                    break  # 完全割当達成 → 探索終了
+
+        # 最良結果を復元
+        if best_result:
+            self.results = best_result["results"]
+            self.unassigned = best_result["unassigned"]
+            self.assign_count = best_result["assign_count"]
+            self.staff_day_visits = best_result["staff_day_visits"]
+            self.pid_date_staff = best_result["pid_date_staff"]
+            self.last_assigned_by_patient = best_result["last_assigned"]
+            self._request_constraints = best_result["request_constraints"]
+
+        # ----------------------------------------------------------
+        # 戦略2: Ejection Chain（入替え挿入で未割当をさらに削減）
+        # ----------------------------------------------------------
+        remaining_unassigned = [
             i for i, r in enumerate(self.results)
             if not r.staff_id and not r.is_event
         ]
-        if unassigned_indices:
+        if remaining_unassigned:
             logger.info(
-                "Level 1: Attempting reinsertion of %d unassigned visits...",
-                len(unassigned_indices),
+                "Ejection Chain: Attempting swap-based reinsertion for %d visits...",
+                len(remaining_unassigned),
             )
-            self._level1_reinsertion(unassigned_indices)
-            self._sync_coupled_times()
+            ejected = self._ejection_chain(remaining_unassigned)
+            if ejected > 0:
+                self._sync_coupled_times()
+                logger.info("Ejection Chain: resolved %d visits", ejected)
+
+        # ----------------------------------------------------------
+        # 戦略3: 段階的制約緩和（それでも未割当があれば）
+        # ----------------------------------------------------------
+        still_unassigned = [
+            i for i, r in enumerate(self.results)
+            if not r.staff_id and not r.is_event
+        ]
+        if still_unassigned:
+            logger.info(
+                "Relaxed Pass: Attempting with relaxed constraints for %d visits...",
+                len(still_unassigned),
+            )
+            relaxed = self._relaxed_reinsertion(still_unassigned)
+            if relaxed > 0:
+                self._sync_coupled_times()
+                logger.info("Relaxed Pass: resolved %d visits", relaxed)
 
         # Step 8 - route optimisation
         logger.info("Level 3: Optimizing routes...")
@@ -1315,3 +1395,316 @@ class AllocationEngine:
         self.results.extend(new_results)
         if new_results:
             logger.info("MentorPairs: %d shadowing visits added", len(new_results))
+
+    # ==================================================================
+    # Smart Strategy Methods
+    # ==================================================================
+
+    def _generate_orderings(self, requests: List[VisitRequest]) -> List[List[VisitRequest]]:
+        """Generate multiple request orderings for multi-trial allocation.
+
+        Strategy: try different sort keys to find the ordering that
+        minimizes unassigned visits.
+        """
+        import random as _rnd
+
+        orderings = []
+
+        # Order 1: Default (date → needStaff desc → rotation → time)
+        orderings.append(self._sort_requests(requests))
+
+        # Order 2: Hardest-first (fewest eligible staff → need_staff desc → date)
+        def _constraint_tightness(r: VisitRequest) -> tuple:
+            eligible = 0
+            for s in self.staff_list:
+                if s.sid in r.ng_staff_ids:
+                    continue
+                if r.sex_limit == "女性のみ" and s.gender != "女性":
+                    continue
+                if r.sex_limit == "男性のみ" and s.gender != "男性":
+                    continue
+                if s.work_days and r.weekday and r.weekday not in s.work_days:
+                    continue
+                eligible += 1
+            return (eligible, -r.need_staff, r.date_str, r.start_min or 9999)
+        orderings.append(sorted(requests, key=_constraint_tightness))
+
+        # Order 3: Reverse date (金→月) + need_staff desc
+        def _reverse_date(r: VisitRequest) -> tuple:
+            return (r.date_str, -r.need_staff, r.start_min or 9999)
+        orderings.append(sorted(requests, key=_reverse_date, reverse=True))
+
+        return orderings
+
+    def _ejection_chain(self, unassigned_indices: List[int]) -> int:
+        """Swap-based reinsertion: displace an assigned visit to make room.
+
+        For each unassigned visit U:
+          1. For each staff S (all staff, not just top 10):
+             - If S has room → insert U directly
+          2. If no room via direct insert:
+             - For each assigned visit A on the same date:
+               - Temporarily remove A
+               - Try inserting U in A's staff slot
+               - If U fits, try re-inserting A with another staff
+               - If both succeed → commit the swap
+               - If not → rollback
+        """
+        resolved = 0
+
+        for idx in unassigned_indices:
+            r = self.results[idx]
+            if r.staff_id or r.is_event:
+                continue
+
+            constraints = self._request_constraints.get(idx, {})
+            ng_ids = list(constraints.get("ng_staff_ids", []))
+            sex_lim = constraints.get("sex_limit", "")
+
+            # Coupled pair: also exclude the other slot's staff
+            if r.is_coupled and r.visit_id:
+                m = _COUPLED_RE.match(r.visit_id)
+                if m:
+                    base_id = m.group(1)
+                    for other_r in self.results:
+                        if (other_r.visit_id and other_r.visit_id != r.visit_id
+                                and other_r.visit_id.startswith(base_id + "-")
+                                and other_r.staff_id):
+                            ng_ids.append(other_r.staff_id)
+
+            patient = self.patient_map.get(r.pid)
+            if not patient:
+                continue
+
+            # --- Direct insert (全スタッフ探索) ---
+            placed = False
+            for staff in self.staff_list:
+                if not self._is_staff_available_for_reinsertion(
+                    staff, r, ng_staff_ids=ng_ids, sex_limit=sex_lim
+                ):
+                    continue
+                if r.time_type == "固定" and r.earliest_min is not None:
+                    fit_start = r.earliest_min
+                    svc = r.service_min or 30
+                    if self._has_overlap(staff.sid, r.date_str, fit_start, fit_start + svc):
+                        continue
+                else:
+                    fit_start = self._can_insert(staff, r)
+                if fit_start is not None:
+                    svc = r.service_min or 30
+                    r.staff_id = staff.sid
+                    r.staff_name = staff.name
+                    r.start_min = fit_start
+                    r.end_min = fit_start + svc
+                    self._register_assignment(staff.sid, r.date_str, idx, pid=r.pid)
+                    r.note += f" [EjectionChain直接挿入: {staff.name}]"
+                    resolved += 1
+                    placed = True
+                    break
+
+            if placed:
+                continue
+
+            # --- Ejection Chain (入替え挿入) ---
+            # 同日の割当済み訪問を1つずつ試す
+            same_day_assigned = [
+                (ai, ar) for ai, ar in enumerate(self.results)
+                if ar.staff_id and not ar.is_event
+                and ar.date_str == r.date_str
+                and not ar.is_coupled  # coupled訪問は入替え対象外
+            ]
+
+            for victim_idx, victim in same_day_assigned:
+                victim_staff = self.staff_map.get(victim.staff_id)
+                if not victim_staff:
+                    continue
+
+                # U をvictimのスタッフに入れられるか？
+                if not self._is_staff_available_for_reinsertion(
+                    victim_staff, r, ng_staff_ids=ng_ids, sex_limit=sex_lim
+                ):
+                    continue
+
+                # victimを一時的に除去
+                saved_staff = victim.staff_id
+                saved_name = victim.staff_name
+                saved_start = victim.start_min
+                saved_end = victim.end_min
+                self._unregister_assignment(victim.staff_id, victim.date_str, victim_idx)
+                victim.staff_id = ""
+                victim.staff_name = ""
+
+                # U をvictimの元スタッフに挿入試行
+                if r.time_type == "固定" and r.earliest_min is not None:
+                    fit_u = r.earliest_min
+                    svc_u = r.service_min or 30
+                    if self._has_overlap(saved_staff, r.date_str, fit_u, fit_u + svc_u):
+                        fit_u = None
+                else:
+                    fit_u = self._can_insert(victim_staff, r)
+
+                if fit_u is None:
+                    # U が入らない → ロールバック
+                    victim.staff_id = saved_staff
+                    victim.staff_name = saved_name
+                    victim.start_min = saved_start
+                    victim.end_min = saved_end
+                    self._register_assignment(saved_staff, victim.date_str, victim_idx, pid=victim.pid)
+                    continue
+
+                # U を配置
+                svc_u = r.service_min or 30
+                r.staff_id = saved_staff
+                r.staff_name = saved_name
+                r.start_min = fit_u
+                r.end_min = fit_u + svc_u
+                self._register_assignment(saved_staff, r.date_str, idx, pid=r.pid)
+
+                # victimを別スタッフに再配置
+                victim_constraints = self._request_constraints.get(victim_idx, {})
+                v_ng = list(victim_constraints.get("ng_staff_ids", []))
+                v_sex = victim_constraints.get("sex_limit", "")
+                victim_placed = False
+
+                for alt_staff in self.staff_list:
+                    if alt_staff.sid == saved_staff:
+                        continue
+                    if not self._is_staff_available_for_reinsertion(
+                        alt_staff, victim, ng_staff_ids=v_ng, sex_limit=v_sex
+                    ):
+                        continue
+                    alt_fit = self._can_insert(alt_staff, victim)
+                    if alt_fit is not None:
+                        svc_v = victim.service_min or 30
+                        victim.staff_id = alt_staff.sid
+                        victim.staff_name = alt_staff.name
+                        victim.start_min = alt_fit
+                        victim.end_min = alt_fit + svc_v
+                        self._register_assignment(alt_staff.sid, victim.date_str, victim_idx, pid=victim.pid)
+                        victim.note += f" [EjectionChain移動: {alt_staff.name}]"
+                        victim_placed = True
+                        break
+
+                if victim_placed:
+                    r.note += f" [EjectionChain入替: {saved_name}→移動]"
+                    resolved += 1
+                    break
+                else:
+                    # victimが再配置不可 → 全ロールバック
+                    self._unregister_assignment(saved_staff, r.date_str, idx)
+                    r.staff_id = ""
+                    r.staff_name = ""
+                    r.start_min = None
+                    r.end_min = None
+                    victim.staff_id = saved_staff
+                    victim.staff_name = saved_name
+                    victim.start_min = saved_start
+                    victim.end_min = saved_end
+                    self._register_assignment(saved_staff, victim.date_str, victim_idx, pid=victim.pid)
+                    continue
+
+        return resolved
+
+    def _relaxed_reinsertion(self, unassigned_indices: List[int]) -> int:
+        """Final pass with progressively relaxed constraints.
+
+        Relaxation levels:
+          Level 1: Use max_per_day instead of soft_cap
+          Level 2: Expand time window (午前/午後 → 終日)
+        """
+        resolved = 0
+
+        for idx in unassigned_indices:
+            r = self.results[idx]
+            if r.staff_id or r.is_event:
+                continue
+
+            constraints = self._request_constraints.get(idx, {})
+            ng_ids = list(constraints.get("ng_staff_ids", []))
+            sex_lim = constraints.get("sex_limit", "")
+
+            if r.is_coupled and r.visit_id:
+                m = _COUPLED_RE.match(r.visit_id)
+                if m:
+                    base_id = m.group(1)
+                    for other_r in self.results:
+                        if (other_r.visit_id and other_r.visit_id != r.visit_id
+                                and other_r.visit_id.startswith(base_id + "-")
+                                and other_r.staff_id):
+                            ng_ids.append(other_r.staff_id)
+
+            # --- Relaxation Level 1: max_per_day (no soft_cap) ---
+            for staff in self.staff_list:
+                if staff.sid in ng_ids:
+                    continue
+                if sex_lim == "女性のみ" and staff.gender != "女性":
+                    continue
+                if sex_lim == "男性のみ" and staff.gender != "男性":
+                    continue
+                if staff.work_days and r.weekday not in staff.work_days:
+                    continue
+                key = f"{staff.sid}|{r.date_str}"
+                if self.assign_count.get(key, 0) >= staff.max_per_day:
+                    continue
+                blocked = self._get_blocked_intervals(staff.sid, r.date_str)
+                if any(iv.start <= 0 and iv.end >= 1440 for iv in blocked):
+                    continue
+
+                fit_start = self._can_insert(staff, r)
+                if fit_start is not None:
+                    svc = r.service_min or 30
+                    r.staff_id = staff.sid
+                    r.staff_name = staff.name
+                    r.start_min = fit_start
+                    r.end_min = fit_start + svc
+                    self._register_assignment(staff.sid, r.date_str, idx, pid=r.pid)
+                    r.note += f" [緩和挿入L1: {staff.name}]"
+                    resolved += 1
+                    break
+
+            if r.staff_id:
+                continue
+
+            # --- Relaxation Level 2: 時間窓拡大（午前/午後→終日） ---
+            saved_tt = r.time_type
+            saved_earliest = r.earliest_min
+            saved_latest = r.latest_min
+            r.time_type = "終日"
+            r.earliest_min = None
+            r.latest_min = None
+
+            for staff in self.staff_list:
+                if staff.sid in ng_ids:
+                    continue
+                if sex_lim == "女性のみ" and staff.gender != "女性":
+                    continue
+                if sex_lim == "男性のみ" and staff.gender != "男性":
+                    continue
+                if staff.work_days and r.weekday not in staff.work_days:
+                    continue
+                key = f"{staff.sid}|{r.date_str}"
+                if self.assign_count.get(key, 0) >= staff.max_per_day:
+                    continue
+                blocked = self._get_blocked_intervals(staff.sid, r.date_str)
+                if any(iv.start <= 0 and iv.end >= 1440 for iv in blocked):
+                    continue
+
+                fit_start = self._can_insert(staff, r)
+                if fit_start is not None:
+                    svc = r.service_min or 30
+                    r.staff_id = staff.sid
+                    r.staff_name = staff.name
+                    r.start_min = fit_start
+                    r.end_min = fit_start + svc
+                    self._register_assignment(staff.sid, r.date_str, idx, pid=r.pid)
+                    r.note += f" [緩和挿入L2: {staff.name}, 時間窓拡大({saved_tt}→終日)]"
+                    resolved += 1
+                    break
+
+            if not r.staff_id:
+                # 復元（割当できなかった場合）
+                r.time_type = saved_tt
+                r.earliest_min = saved_earliest
+                r.latest_min = saved_latest
+
+        return resolved
