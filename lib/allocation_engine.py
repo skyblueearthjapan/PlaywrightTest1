@@ -244,8 +244,8 @@ class AllocationEngine:
                 self._enforce_coupled_atomicity(allow_partial=True)
                 logger.info("Final Day Shift: resolved %d visits", shifted)
 
-        # Step 13 - 2名体制の不足分を未割当として追加
-        self._add_missing_coupled_entries(active_requests)
+        # Step 13 - 2名体制の不足分はGAS側(週ビュー/インタラクティブ)で追加
+        # Python側では追加しない（二重カウント防止）
 
         # Summary
         assigned_count = sum(
