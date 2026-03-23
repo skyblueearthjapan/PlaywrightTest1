@@ -401,9 +401,13 @@ class AllocationEngine:
 
                 chosen = self._find_best_staff(req, used_staff_ids)
 
+                # 固定時刻: earliest_minからstart_minを確定
+                start_min = req.start_min
+                if start_min is None and req.time_type == "固定" and req.earliest_min is not None:
+                    start_min = req.earliest_min
                 end_min = req.end_min
-                if end_min is None and req.start_min is not None:
-                    end_min = req.start_min + req.service_min
+                if end_min is None and start_min is not None:
+                    end_min = start_min + req.service_min
 
                 result = AssignmentResult(
                     visit_id=visit_id,
@@ -412,7 +416,7 @@ class AllocationEngine:
                     pid=req.pid,
                     pname=req.pname,
                     area=req.area,
-                    start_min=req.start_min,
+                    start_min=start_min,
                     end_min=end_min,
                     service_min=req.service_min,
                     time_type=req.time_type,
@@ -1666,6 +1670,9 @@ class AllocationEngine:
                 continue
 
             # --- Relaxation Level 2: 時間窓拡大（午前/午後→終日） ---
+            # 固定時刻は絶対に緩和しない
+            if r.time_type == "固定":
+                continue
             saved_tt = r.time_type
             saved_earliest = r.earliest_min
             saved_latest = r.latest_min
