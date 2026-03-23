@@ -229,7 +229,8 @@ class AllocationEngine:
 
         # Step 11 - 最終安全ネット（必ずパイプライン最後に実行）
         self._final_overlap_sweep()
-        self._enforce_coupled_atomicity()  # coupled片割れ保護
+        # 最終段階では1名のみ割当を許可（2名揃わなくても1名は割当維持）
+        self._enforce_coupled_atomicity(allow_partial=True)
 
         # Summary
         assigned_count = sum(
@@ -667,12 +668,16 @@ class AllocationEngine:
             return not self._has_overlap(staff.sid, req.date_str, fixed_start, fixed_end)
 
         # Flexible time: check if service fits in any available gap
-        # (既存訪問との重複も必ずチェック)
-        eff_earliest, eff_latest = get_effective_window(
-            req.time_type, req.earliest_min, req.latest_min,
-        )
-        eff_earliest = max(eff_earliest, staff.shift_start_min, 540)
-        eff_latest = min(eff_latest, staff.shift_end_min)
+        # 終日の訪問はearliest_minに縛られず全時間帯で空きを探す
+        if req.time_type in ("終日", ""):
+            eff_earliest = max(staff.shift_start_min, 540)
+            eff_latest = staff.shift_end_min
+        else:
+            eff_earliest, eff_latest = get_effective_window(
+                req.time_type, req.earliest_min, req.latest_min,
+            )
+            eff_earliest = max(eff_earliest, staff.shift_start_min, 540)
+            eff_latest = min(eff_latest, staff.shift_end_min)
 
         all_blocked = list(blocked)
         # Include existing visit times as blocked (重複防止の核心)
@@ -1065,11 +1070,16 @@ class AllocationEngine:
                     if not any(intervals_overlap(fixed_start, fixed_end, b.start, b.end) for b in blocked):
                         return fixed_start
             return None  # 固定時刻で入れなければ他の時間は試さない
-        eff_earliest, eff_latest = get_effective_window(
-            r.time_type, r.earliest_min, r.latest_min,
-        )
-        eff_earliest = max(eff_earliest, staff.shift_start_min, 540)
-        eff_latest = min(eff_latest, staff.shift_end_min)
+        # 終日の訪問はearliest_minに縛られず全時間帯で空きを探す
+        if r.time_type in ("終日", ""):
+            eff_earliest = max(staff.shift_start_min, 540)
+            eff_latest = staff.shift_end_min
+        else:
+            eff_earliest, eff_latest = get_effective_window(
+                r.time_type, r.earliest_min, r.latest_min,
+            )
+            eff_earliest = max(eff_earliest, staff.shift_start_min, 540)
+            eff_latest = min(eff_latest, staff.shift_end_min)
 
         # Aggregate all blocked intervals
         blocked = list(self._get_blocked_intervals(staff.sid, r.date_str))
@@ -1089,8 +1099,13 @@ class AllocationEngine:
                 return gap_start
         return None
 
-    def _enforce_coupled_atomicity(self) -> None:
-        """If one half of a 2-staff pair is unassigned, unassign both."""
+    def _enforce_coupled_atomicity(self, allow_partial: bool = False) -> None:
+        """If one half of a 2-staff pair is unassigned, handle based on mode.
+
+        Args:
+            allow_partial: If True, keep the assigned half with a warning.
+                           If False (default), unassign both halves.
+        """
         coupled_map: Dict[str, List[int]] = {}
         for i, r in enumerate(self.results):
             if not r.visit_id:
@@ -1108,13 +1123,23 @@ class AllocationEngine:
             assigned2 = bool(r2.staff_id)
 
             if assigned1 != assigned2:
-                for idx in indices:
-                    r = self.results[idx]
-                    if r.staff_id:
-                        self._unregister_assignment(r.staff_id, r.date_str, idx)
-                    r.staff_id = ""
-                    r.staff_name = ""
-                    r.note += " [2名体制:ペア未確保]"
+                if allow_partial:
+                    # 1名のみ割当を許可（警告付き）
+                    for idx in indices:
+                        r = self.results[idx]
+                        if not r.staff_id:
+                            r.note += " [2名体制:1名のみ割当]"
+                        else:
+                            r.note += " [2名体制:1名のみ割当(相方未確保)]"
+                else:
+                    # 両方解除（厳格モード）
+                    for idx in indices:
+                        r = self.results[idx]
+                        if r.staff_id:
+                            self._unregister_assignment(r.staff_id, r.date_str, idx)
+                        r.staff_id = ""
+                        r.staff_name = ""
+                        r.note += " [2名体制:ペア未確保]"
 
     # ==================================================================
     # Level 3 - Route Optimization
