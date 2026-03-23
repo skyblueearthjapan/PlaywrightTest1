@@ -26,6 +26,7 @@ class Patient:
     time_type: str = ""           # "固定","午前","午後","終日","時間帯"
     start_pref_min: Optional[int] = None  # minutes from midnight
     end_pref_min: Optional[int] = None
+    day_priority: str = "低"         # "低","中","高" - 曜日優先度
 
 
 @dataclass

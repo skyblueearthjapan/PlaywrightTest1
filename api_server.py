@@ -1147,6 +1147,7 @@ def api_allocate():
                 lat=p.get("latitude"),
                 lng=p.get("longitude"),
                 service_minutes=p.get("service_minutes", 60),
+                day_priority=p.get("day_priority", "低"),
             )
 
         # Parse events

@@ -1530,7 +1530,16 @@ class AllocationEngine:
         # Sort dates by load (least crowded first)
         sorted_dates = sorted(date_load.keys(), key=lambda d: date_load.get(d, 0))
 
-        for pid, indices in patient_unassigned.items():
+        # 曜日優先度でソート（低→中→高: 低優先度を先にシフト）
+        priority_order = {"低": 0, "中": 1, "高": 2, "": 0}
+        sorted_patients = sorted(
+            patient_unassigned.items(),
+            key=lambda x: priority_order.get(
+                getattr(self.patient_map.get(x[0], None), "day_priority", "低"), 0
+            ),
+        )
+
+        for pid, indices in sorted_patients:
             if not indices:
                 continue
 
