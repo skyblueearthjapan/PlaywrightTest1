@@ -1534,29 +1534,32 @@ class AllocationEngine:
             except (ValueError, IndexError):
                 pass
 
-        # Group unassigned by patient (for coupled pair handling)
-        patient_unassigned: Dict[str, List[int]] = {}
+        # Group unassigned by patient+date (for coupled pair handling)
+        pid_date_unassigned: Dict[str, List[int]] = {}
         for idx in unassigned_indices:
             r = self.results[idx]
             if r.staff_id or r.is_event:
                 continue
-            patient_unassigned.setdefault(r.pid, []).append(idx)
+            key = f"{r.pid}|{r.date_str}"
+            pid_date_unassigned.setdefault(key, []).append(idx)
 
         # Sort dates by load (least crowded first)
         sorted_dates = sorted(date_load.keys(), key=lambda d: date_load.get(d, 0))
 
         # 曜日優先度でソート（低→中→高: 低優先度を先にシフト）
         priority_order = {"低": 0, "中": 1, "高": 2, "": 0}
-        sorted_patients = sorted(
-            patient_unassigned.items(),
+        sorted_groups = sorted(
+            pid_date_unassigned.items(),
             key=lambda x: priority_order.get(
-                getattr(self.patient_map.get(x[0], None), "day_priority", "低"), 0
+                getattr(self.patient_map.get(x[0].split("|")[0], None), "day_priority", "低"), 0
             ),
         )
 
-        for pid, indices in sorted_patients:
+        for pd_key, indices in sorted_groups:
             if not indices:
                 continue
+
+            pid = pd_key.split("|")[0]
 
             # Get patient info
             patient = self.patient_map.get(pid)
@@ -1580,6 +1583,10 @@ class AllocationEngine:
                 if not alt_weekday:
                     continue
 
+                # Skip weekends (Sat/Sun) unless patient has visits on those days
+                if alt_weekday in ("Sat", "Sun"):
+                    continue
+
                 # Check if this patient already has a visit on this date
                 already_on_date = any(
                     r.pid == pid and r.date_str == alt_date and r.staff_id
@@ -1590,13 +1597,13 @@ class AllocationEngine:
 
                 # For coupled visits, need to handle all slots together
                 is_coupled = orig_r.is_coupled
-                need_staff = 2 if is_coupled else 1
+                need_staff = len(indices)  # 2名体制なら2件
 
                 # Find eligible staff for this date
                 placed_staff = []
                 all_placed = True
 
-                for slot_idx in indices[:need_staff]:
+                for slot_idx in indices:
                     r = self.results[slot_idx]
                     found_staff = False
 
@@ -1639,7 +1646,7 @@ class AllocationEngine:
 
                 if all_placed and len(placed_staff) >= need_staff:
                     # Assign all slots
-                    for si, slot_idx in enumerate(indices[:need_staff]):
+                    for si, slot_idx in enumerate(indices):
                         r = self.results[slot_idx]
                         staff = placed_staff[si]
                         svc = r.service_min or 30
