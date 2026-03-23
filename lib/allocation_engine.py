@@ -244,6 +244,9 @@ class AllocationEngine:
                 self._enforce_coupled_atomicity(allow_partial=True)
                 logger.info("Final Day Shift: resolved %d visits", shifted)
 
+        # Step 13 - 2名体制の不足分を未割当として追加
+        self._add_missing_coupled_entries(active_requests)
+
         # Summary
         assigned_count = sum(
             1 for r in self.results if r.staff_id and not r.is_event
@@ -1810,6 +1813,70 @@ class AllocationEngine:
                 self._day_shift_failures.append(msg)
 
         return resolved
+
+    # ==================================================================
+    # Add missing coupled entries
+    # ==================================================================
+    def _add_missing_coupled_entries(self, requests: List[VisitRequest]) -> None:
+        """For 2-staff visits with only 1 assigned, add unassigned entry.
+
+        Scans by patient+date: if need_staff=2 but only 1 result has
+        staff_id set, adds an explicit unassigned placeholder.
+        """
+        # Build need_staff map from original requests
+        need_staff_map: Dict[str, int] = {}
+        for req in requests:
+            if req.need_staff >= 2:
+                key = f"{req.pid}|{req.date_str}"
+                need_staff_map[key] = req.need_staff
+
+        # Count assigned per patient+date
+        assigned_count_map: Dict[str, int] = {}
+        assigned_info: Dict[str, AssignmentResult] = {}
+        for r in self.results:
+            if r.is_event or not r.is_coupled:
+                continue
+            key = f"{r.pid}|{r.date_str}"
+            if r.staff_id:
+                assigned_count_map[key] = assigned_count_map.get(key, 0) + 1
+                assigned_info[key] = r
+
+        # Also check day-shifted visits (they have different dates from original)
+        for r in self.results:
+            if r.is_event or not r.is_coupled or not r.staff_id:
+                continue
+            key = f"{r.pid}|{r.date_str}"
+            if key not in need_staff_map:
+                # This visit was day-shifted to a date not in original requests
+                need_staff_map[key] = 2  # Assume 2-staff need
+
+        # Add missing entries
+        added = 0
+        for key, need in need_staff_map.items():
+            actual = assigned_count_map.get(key, 0)
+            if 0 < actual < need:
+                # Has some assigned but not enough
+                ref = assigned_info.get(key)
+                if not ref:
+                    continue
+                for _ in range(need - actual):
+                    placeholder = AssignmentResult(
+                        visit_id=f"{ref.visit_id}_NEED",
+                        date_str=ref.date_str,
+                        weekday=ref.weekday,
+                        pid=ref.pid,
+                        pname=ref.pname,
+                        area=ref.area,
+                        service_min=ref.service_min,
+                        time_type=ref.time_type,
+                        is_coupled=True,
+                        note="[2名体制:2人目未割当]",
+                    )
+                    self.results.append(placeholder)
+                    added += 1
+
+        if added:
+            logger.info("Added %d missing coupled entries", added)
 
     # ==================================================================
     # Final Overlap Sweep (最終重複チェック＆修正)
