@@ -653,11 +653,15 @@ class AllocationEngine:
 
         all_blocked = list(blocked)
         # Include existing visit times as blocked (重複防止の核心)
+        # EXTRA_BUFFER_MINを含めて_can_insertと整合性を取る
         key = f"{staff.sid}|{req.date_str}"
         for idx in self.staff_day_visits.get(key, []):
             r = self.results[idx]
             if r.start_min is not None and r.end_min is not None:
-                all_blocked.append(Interval(r.start_min, r.end_min))
+                all_blocked.append(Interval(
+                    r.start_min - EXTRA_BUFFER_MIN,
+                    r.end_min + EXTRA_BUFFER_MIN,
+                ))
 
         gaps = compute_gaps(all_blocked, eff_earliest, eff_latest)
         svc = req.service_min or 30
@@ -814,14 +818,18 @@ class AllocationEngine:
             for idx in indices:
                 r = self.results[idx]
                 has_time = r.start_min is not None and r.end_min is not None
-                # Level0で時間確定済みの訪問は全てアンカー扱い
-                # （GapPackが時間を変えて重複を作るのを防止）
+                # 固定時刻・イベント・2名体制(時刻確定)のみアンカー
+                # 柔軟訪問(終日/午前/午後/時間帯)はflex → 時間調整可能
                 is_anchor = (
                     r.is_event
-                    or has_time  # 時間確定済み = アンカー
+                    or (r.time_type == "固定" and has_time)
+                    or (r.is_coupled and has_time)
                 )
                 if is_anchor:
                     anchors.append((idx, r.start_min, r.end_min))  # type: ignore[arg-type]
+                elif has_time:
+                    flexes.append(idx)  # 時間確定済みだが柔軟 → 再配置可能
+                # start_min=Noneの訪問もflex
                 else:
                     flexes.append(idx)
 
@@ -866,17 +874,34 @@ class AllocationEngine:
 
                 placed = False
                 for gi, gap in enumerate(gaps):
-                    start_cand = max(gap_cursors[gi], eff_earliest)
-                    end_cand = start_cand + svc
+                    # 同一ギャップ内でリトライ（重複箇所をスキップして再試行）
+                    while True:
+                        start_cand = max(gap_cursors[gi], eff_earliest)
+                        end_cand = start_cand + svc
 
-                    if eff_latest is not None and end_cand > eff_latest:
-                        continue
+                        if end_cand > gap.end:
+                            break  # このギャップには入らない
 
-                    if start_cand >= gap.start and end_cand <= gap.end:
-                        r.start_min = start_cand
-                        r.end_min = end_cand
-                        gap_cursors[gi] = end_cand + EXTRA_BUFFER_MIN
-                        placed = True
+                        if eff_latest is not None and end_cand > eff_latest:
+                            break
+
+                        if start_cand >= gap.start and end_cand <= gap.end:
+                            # 重複チェック（他の訪問との衝突を防止）
+                            if self._has_overlap(
+                                staff_id, r.date_str, start_cand, end_cand,
+                                exclude_indices={f_idx},
+                            ):
+                                # この位置は使えない → カーソルを進めて同ギャップ内リトライ
+                                gap_cursors[gi] = end_cand + EXTRA_BUFFER_MIN
+                                continue
+                            r.start_min = start_cand
+                            r.end_min = end_cand
+                            gap_cursors[gi] = end_cand + EXTRA_BUFFER_MIN
+                            placed = True
+                            break
+                        else:
+                            break
+                    if placed:
                         break
 
                 if not placed:
@@ -884,7 +909,7 @@ class AllocationEngine:
                         "GapPack: visit %s could not fit, unassigning", r.visit_id,
                     )
                     if r.staff_id:
-                        self._unregister_assignment(r.staff_id, r.date_str, idx)
+                        self._unregister_assignment(r.staff_id, r.date_str, f_idx)
                     r.staff_id = ""
                     r.staff_name = ""
                     r.note += " [GapPack: 隙間に入らず未割当]"
@@ -931,7 +956,7 @@ class AllocationEngine:
                 candidates.append((staff, dist if dist is not None else 99999.0))
 
             candidates.sort(key=lambda x: x[1])
-            candidates = candidates[:10]
+            # 全スタッフを候補に（Top10制限を撤廃）
 
             for staff, _ in candidates:
                 # 固定時刻の場合はその時刻を尊重
