@@ -143,120 +143,66 @@ class AllocationEngine:
         active_requests = self._enrich_from_patterns(active_requests)
 
         # ==============================================================
-        # Smart Multi-Strategy Allocation Engine
-        # 戦略1: 複数の処理順序で最良結果を選択
-        # 戦略2: 全スタッフ探索 + Ejection Chain
-        # 戦略3: 段階的制約緩和で未割当をゼロに近づける
+        # Smart Allocation Engine (安定版)
+        # Phase 1: 制約厳しい順ソートで初期割当
+        # Phase 2: Level 1 全スタッフ再挿入
+        # Phase 3: Ejection Chain
+        # Phase 4: 段階的制約緩和
         # ==============================================================
-
-        import copy
-        import random
 
         # Step 1 - events
         self._insert_events()
 
-        # ----------------------------------------------------------
-        # 戦略1: Multi-Order Trial（3つの異なる順序で割当し最良を採用）
-        # ----------------------------------------------------------
-        orderings = self._generate_orderings(active_requests)
-        best_result = None
-        best_unassigned = 99999
+        # Step 2 - sort (制約が厳しいリクエストを先に処理)
+        sorted_requests = self._sort_requests_smart(active_requests)
 
-        for trial_idx, ordered_reqs in enumerate(orderings):
-            # 各トライアルで状態をリセット（イベントは保持）
-            saved_events = [r for r in self.results if r.is_event]
-            self._reset_state()
-            self.results = list(saved_events)
-            # イベントをstaffDateMapに再登録
-            for ei, ev in enumerate(saved_events):
-                if ev.staff_id:
-                    self._register_assignment(ev.staff_id, ev.date_str, ei)
+        # Step 3 - Level 0: 初期割当（即座に時間確定）
+        logger.info("Level 0: Allocating %d requests...", len(sorted_requests))
+        self._level0_allocate(sorted_requests)
+        self._enforce_coupled_atomicity()
+        self._sync_coupled_times()
 
-            # Level 0
-            self._level0_allocate(ordered_reqs)
-            self._enforce_coupled_atomicity()
+        # Step 4 - GapPack (時間の詰め直し)
+        logger.info("GapPack: Refining time assignments...")
+        self._gap_pack()
+        self._sync_coupled_times()
+
+        # Step 5 - Level 1: 全スタッフ再挿入
+        unassigned_indices = [
+            i for i, r in enumerate(self.results)
+            if not r.staff_id and not r.is_event
+        ]
+        if unassigned_indices:
+            logger.info("Level 1: Reinsertion for %d visits...", len(unassigned_indices))
+            self._level1_reinsertion(unassigned_indices)
             self._sync_coupled_times()
 
-            # GapPack
-            self._gap_pack()
-            self._sync_coupled_times()
-
-            # Level 1 (enhanced: 全スタッフ探索)
-            unassigned_indices = [
-                i for i, r in enumerate(self.results)
-                if not r.staff_id and not r.is_event
-            ]
-            if unassigned_indices:
-                self._level1_reinsertion(unassigned_indices)
-                self._sync_coupled_times()
-
-            # スコア計算
-            trial_unassigned = sum(
-                1 for r in self.results if not r.staff_id and not r.is_event
-            )
-            logger.info(
-                "Trial %d/%d: %d unassigned (order: %s)",
-                trial_idx + 1, len(orderings), trial_unassigned,
-                ordered_reqs[0].date_str if ordered_reqs else "empty",
-            )
-
-            if trial_unassigned < best_unassigned:
-                best_unassigned = trial_unassigned
-                best_result = {
-                    "results": list(self.results),
-                    "unassigned": list(self.unassigned),
-                    "assign_count": dict(self.assign_count),
-                    "staff_day_visits": {k: list(v) for k, v in self.staff_day_visits.items()},
-                    "pid_date_staff": {k: set(v) for k, v in self.pid_date_staff.items()},
-                    "last_assigned": dict(self.last_assigned_by_patient),
-                    "request_constraints": dict(self._request_constraints),
-                }
-                if trial_unassigned == 0:
-                    break  # 完全割当達成 → 探索終了
-
-        # 最良結果を復元
-        if best_result:
-            self.results = best_result["results"]
-            self.unassigned = best_result["unassigned"]
-            self.assign_count = best_result["assign_count"]
-            self.staff_day_visits = best_result["staff_day_visits"]
-            self.pid_date_staff = best_result["pid_date_staff"]
-            self.last_assigned_by_patient = best_result["last_assigned"]
-            self._request_constraints = best_result["request_constraints"]
-
-        # ----------------------------------------------------------
-        # 戦略2: Ejection Chain（入替え挿入で未割当をさらに削減）
-        # ----------------------------------------------------------
+        # Step 6 - Ejection Chain（入替え挿入）
         remaining_unassigned = [
             i for i, r in enumerate(self.results)
             if not r.staff_id and not r.is_event
         ]
         if remaining_unassigned:
-            logger.info(
-                "Ejection Chain: Attempting swap-based reinsertion for %d visits...",
-                len(remaining_unassigned),
-            )
+            logger.info("Ejection Chain: %d visits...", len(remaining_unassigned))
             ejected = self._ejection_chain(remaining_unassigned)
             if ejected > 0:
                 self._sync_coupled_times()
                 logger.info("Ejection Chain: resolved %d visits", ejected)
 
-        # ----------------------------------------------------------
-        # 戦略3: 段階的制約緩和（それでも未割当があれば）
-        # ----------------------------------------------------------
+        # Step 7 - 段階的制約緩和
         still_unassigned = [
             i for i, r in enumerate(self.results)
             if not r.staff_id and not r.is_event
         ]
         if still_unassigned:
-            logger.info(
-                "Relaxed Pass: Attempting with relaxed constraints for %d visits...",
-                len(still_unassigned),
-            )
+            logger.info("Relaxed Pass: %d visits...", len(still_unassigned))
             relaxed = self._relaxed_reinsertion(still_unassigned)
             if relaxed > 0:
                 self._sync_coupled_times()
                 logger.info("Relaxed Pass: resolved %d visits", relaxed)
+
+        # Step 8 - 最終重複チェック＆修正
+        self._final_overlap_sweep()
 
         # Step 8 - route optimisation
         logger.info("Level 3: Optimizing routes...")
@@ -381,6 +327,24 @@ class AllocationEngine:
             cont = normalize_cont_pref(r.cont_pref)
             rotation_priority = 0 if cont == "ローテーション優先" else 1
             return (r.date_str, -r.need_staff, rotation_priority, r.start_min or 9999)
+        return sorted(requests, key=_key)
+
+    def _sort_requests_smart(self, requests: List[VisitRequest]) -> List[VisitRequest]:
+        """Sort by constraint tightness: hardest to place first."""
+        def _key(r: VisitRequest) -> tuple:
+            # 候補スタッフ数を事前計算（少ないほど先に処理）
+            eligible = 0
+            for s in self.staff_list:
+                if s.sid in r.ng_staff_ids:
+                    continue
+                if r.sex_limit == "女性のみ" and s.gender != "女性":
+                    continue
+                if r.sex_limit == "男性のみ" and s.gender != "男性":
+                    continue
+                if s.work_days and r.weekday and r.weekday not in s.work_days:
+                    continue
+                eligible += 1
+            return (eligible, r.date_str, -r.need_staff, r.start_min or 9999)
         return sorted(requests, key=_key)
 
     # ==================================================================
@@ -820,10 +784,11 @@ class AllocationEngine:
             for idx in indices:
                 r = self.results[idx]
                 has_time = r.start_min is not None and r.end_min is not None
+                # Level0で時間確定済みの訪問は全てアンカー扱い
+                # （GapPackが時間を変えて重複を作るのを防止）
                 is_anchor = (
                     r.is_event
-                    or (r.time_type == "固定" and has_time)
-                    or (r.is_coupled and has_time)
+                    or has_time  # 時間確定済み = アンカー
                 )
                 if is_anchor:
                     anchors.append((idx, r.start_min, r.end_min))  # type: ignore[arg-type]
@@ -1404,6 +1369,49 @@ class AllocationEngine:
         self.results.extend(new_results)
         if new_results:
             logger.info("MentorPairs: %d shadowing visits added", len(new_results))
+
+    # ==================================================================
+    # Final Overlap Sweep (最終重複チェック＆修正)
+    # ==================================================================
+    def _final_overlap_sweep(self) -> None:
+        """Final safety net: detect and fix any remaining time overlaps.
+
+        Scans all staff-date combinations and removes overlapping visits
+        (keeping the one with earlier visit_id).
+        """
+        # Build staff-date groups from results (not from staff_day_visits which may be stale)
+        groups: Dict[str, List[int]] = {}
+        for i, r in enumerate(self.results):
+            if not r.staff_id or r.start_min is None or r.end_min is None:
+                continue
+            key = f"{r.staff_id}|{r.date_str}"
+            groups.setdefault(key, []).append(i)
+
+        fixed_count = 0
+        for key, indices in groups.items():
+            if len(indices) <= 1:
+                continue
+            # Sort by start time
+            sorted_idx = sorted(indices, key=lambda i: self.results[i].start_min)
+            occupied_end = 0
+            for idx in sorted_idx:
+                r = self.results[idx]
+                if r.start_min < occupied_end:
+                    # Overlap detected! Unassign this visit
+                    logger.warning(
+                        "FinalSweep: overlap detected for %s staff=%s %s-%s, unassigning",
+                        r.visit_id, r.staff_id,
+                        fmt_min(r.start_min), fmt_min(r.end_min),
+                    )
+                    r.staff_id = ""
+                    r.staff_name = ""
+                    r.note += " [最終重複チェック: 未割当]"
+                    fixed_count += 1
+                else:
+                    occupied_end = r.end_min
+
+        if fixed_count:
+            logger.info("FinalSweep: %d overlapping visits unassigned", fixed_count)
 
     # ==================================================================
     # Smart Strategy Methods
