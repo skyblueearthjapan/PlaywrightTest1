@@ -1592,6 +1592,7 @@ class AllocationEngine:
                 if ar.staff_id and not ar.is_event
                 and ar.date_str == r.date_str
                 and not ar.is_coupled  # coupled訪問は入替え対象外
+                and ar.time_type != "固定"  # 固定時刻訪問は入替え対象外
             ]
 
             for victim_idx, victim in same_day_assigned:
@@ -1653,7 +1654,14 @@ class AllocationEngine:
                         alt_staff, victim, ng_staff_ids=v_ng, sex_limit=v_sex
                     ):
                         continue
-                    alt_fit = self._can_insert(alt_staff, victim)
+                    # 固定時刻のvictimは元の時刻でのみ再配置可能
+                    if victim.time_type == "固定" and saved_start is not None:
+                        svc_v = victim.service_min or 30
+                        if self._has_overlap(alt_staff.sid, victim.date_str, saved_start, saved_start + svc_v):
+                            continue
+                        alt_fit = saved_start
+                    else:
+                        alt_fit = self._can_insert(alt_staff, victim)
                     if alt_fit is not None:
                         svc_v = victim.service_min or 30
                         victim.staff_id = alt_staff.sid
@@ -1746,8 +1754,8 @@ class AllocationEngine:
                 continue
 
             # --- Relaxation Level 2: 時間窓拡大（午前/午後→終日） ---
-            # 固定時刻は絶対に緩和しない
-            if r.time_type == "固定":
+            # 固定時刻・時間帯指定は絶対に緩和しない
+            if r.time_type in ("固定", "時間帯"):
                 continue
             saved_tt = r.time_type
             saved_earliest = r.earliest_min
