@@ -1488,17 +1488,32 @@ class AllocationEngine:
 
         resolved = 0
 
-        # Build a map of dates in this week
+        # Build a map of ALL dates in this week (Mon-Sun)
+        # 週の全7日を候補にする（リクエストにない日も含む）
         week_dates = set()
+        sample_dates = set()
         for r in self.results:
             if r.date_str:
-                week_dates.add(r.date_str)
+                sample_dates.add(r.date_str)
         for r in all_requests:
             if r.date_str:
-                week_dates.add(r.date_str)
+                sample_dates.add(r.date_str)
 
-        if not week_dates:
+        if not sample_dates:
             return 0
+
+        # 最初の日付から週の月曜を計算し、7日分を生成
+        first_date_str = min(sample_dates)
+        try:
+            parts = first_date_str.split("/")
+            first_dt = datetime(int(parts[0]), int(parts[1]), int(parts[2]))
+            # 月曜に戻す
+            monday = first_dt - timedelta(days=first_dt.weekday())
+            for i in range(7):
+                d = monday + timedelta(days=i)
+                week_dates.add(d.strftime("%Y/%m/%d"))
+        except (ValueError, IndexError):
+            week_dates = sample_dates
 
         # Calculate load per date (how many visits are already assigned)
         date_load: Dict[str, int] = {}
