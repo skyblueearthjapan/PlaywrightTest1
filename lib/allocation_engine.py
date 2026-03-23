@@ -1143,12 +1143,32 @@ class AllocationEngine:
             if assigned1 != assigned2:
                 if allow_partial:
                     # 1名のみ割当を許可（警告付き）
+                    assigned_r = None
+                    has_unassigned_slot = False
                     for idx in indices:
                         r = self.results[idx]
                         if not r.staff_id:
                             r.note += " [2名体制:1名のみ割当]"
+                            has_unassigned_slot = True
                         else:
                             r.note += " [2名体制:1名のみ割当(相方未確保)]"
+                            assigned_r = r
+                    # 未割当スロットがない場合（曜日シフト等で移動済み）
+                    # → 割当済み側の日付に未割当エントリを追加
+                    if not has_unassigned_slot and assigned_r:
+                        placeholder = AssignmentResult(
+                            visit_id=f"{assigned_r.visit_id}_NEED2",
+                            date_str=assigned_r.date_str,
+                            weekday=assigned_r.weekday,
+                            pid=assigned_r.pid,
+                            pname=assigned_r.pname,
+                            area=assigned_r.area,
+                            service_min=assigned_r.service_min,
+                            time_type=assigned_r.time_type,
+                            is_coupled=True,
+                            note="[2名体制:2人目未割当]",
+                        )
+                        self.results.append(placeholder)
                 else:
                     # 両方解除（厳格モード）
                     for idx in indices:
