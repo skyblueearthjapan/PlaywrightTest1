@@ -2101,10 +2101,7 @@ class AllocationEngine:
                     # GAS側のペア認識は visit_id が `^(V\d+)-\d+$` にマッチすることを
                     # 前提にしているため、`_P2` サフィックスではなく V###-N ハイフン
                     # 形式で発番する（同じ base_id で未使用のスロット番号を採番）。
-                    logger.info(
-                        "Rescue new entry: key=%r date_str=%r weekday=%r ref.visit_id=%r",
-                        key, date_str, ref.weekday, ref.visit_id,
-                    )
+
                     base_match = _COUPLED_RE.match(ref.visit_id or '')
                     if base_match:
                         base_id = base_match.group(1)
@@ -2138,10 +2135,6 @@ class AllocationEngine:
                     )
                     new_idx = len(self.results)
                     self.results.append(new_result)
-                    logger.info(
-                        "RESCUE_OBJECT: visit_id=%r new_result.date_str=%r",
-                        new_result.visit_id, new_result.date_str,
-                    )
                     self._register_assignment(found_staff.sid, date_str, new_idx, pid=pid)
                 rescued += 1
 

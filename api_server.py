@@ -1343,12 +1343,6 @@ def api_allocate():
                 "movement_km": round(r.movement_km, 2) if r.movement_km else None,
             })
 
-        # Temporary: log rescue entry date_str for debugging
-        import re as _re
-        for _r in result["results"]:
-            if _r.visit_id and _re.match(r'^V\d+-[3-9]', _r.visit_id):
-                print(f"RESCUE_SERIAL: visit_id={_r.visit_id!r} date_str={_r.date_str!r} weekday={_r.weekday!r}", flush=True)
-
         add_log(f"allocate 完了: {len(assignment_results)}件割当")
         return jsonify({
             "success": True,
