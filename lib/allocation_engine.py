@@ -2002,31 +2002,25 @@ class AllocationEngine:
         # This avoids relying on patient_map.need_staff which may not be set
         need2_pid_dates: Set[str] = set()
         for r in self.results:
-            if r.is_event:
+            if r.is_event or not r.date_str:
                 continue
             vid = r.visit_id or ''
-            if vid.startswith('EV_') or '_T_' in vid:
+            if vid.startswith('EV_') or '_T_' in vid or '_P2' in vid:
                 continue
             if r.is_coupled or _COUPLED_RE.match(vid):
                 need2_pid_dates.add(f"{r.pid}|{r.date_str}")
-        # Also check patient_map as fallback
-        for pid, p in self.patient_map.items():
-            if p.need_staff >= 2:
-                for r in self.results:
-                    if r.pid == pid and not r.is_event:
-                        need2_pid_dates.add(f"{pid}|{r.date_str}")
 
         if not need2_pid_dates:
             return 0
         logger.info("Coupled Rescue: %d patient-dates with 2-staff need", len(need2_pid_dates))
 
-        # Group results by pid|date (exclude events and trainee shadows)
+        # Group results by pid|date (exclude events, trainee shadows, and existing _P2)
         pid_date_results: Dict[str, List[int]] = {}
         for i, r in enumerate(self.results):
-            if r.is_event:
+            if r.is_event or not r.date_str:
                 continue
             vid = r.visit_id or ''
-            if vid.startswith('EV_') or '_T_' in vid:
+            if vid.startswith('EV_') or '_T_' in vid or '_P2' in vid:
                 continue
             key = f"{r.pid}|{r.date_str}"
             if key not in need2_pid_dates:
@@ -2048,8 +2042,10 @@ class AllocationEngine:
             if ref.start_min is None or ref.end_min is None:
                 continue
 
-            pid = key.split('|')[0]
-            date_str = ref.date_str
+            pid, date_str = key.split('|', 1)
+            # date_strがNone/空の場合はスキップ
+            if not date_str or date_str == 'None':
+                continue
 
             # Get constraints from the assigned visit
             constraints = self._request_constraints.get(ref_idx, {})
