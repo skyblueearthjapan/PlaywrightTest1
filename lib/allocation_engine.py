@@ -630,14 +630,33 @@ class AllocationEngine:
             if non_prev:
                 candidates = non_prev
 
-        # Exclude recent staff from confirmed_history (past 2 assignments)
+        # Exclude recent staff from confirmed_history (dynamic count).
+        # Guarantee "different from last time" and aim to avoid as many
+        # recent staff as possible while keeping at least one candidate.
         history_records = self.rotation_history.get(req.pid, [])
         if history_records and len(candidates) > 1:
             sorted_hist = sorted(history_records, key=lambda h: h.date_str, reverse=True)
-            recent_sids = set(h.staff_id for h in sorted_hist[:2])
-            non_recent = [c for c in candidates if c["staff"].sid not in recent_sids]
-            if non_recent:
-                candidates = non_recent
+            # Deduplicate keeping most-recent order
+            seen = set()
+            unique_recent_sids = []
+            for h in sorted_hist:
+                if h.staff_id not in seen:
+                    seen.add(h.staff_id)
+                    unique_recent_sids.append(h.staff_id)
+
+            # Try excluding as many recent staff as possible (greedy shrink)
+            # Always exclude at least the most recent 1 (guarantee different
+            # from last time) and expand up to len(candidates)-1.
+            max_exclude = min(len(unique_recent_sids), len(candidates) - 1)
+            best_candidates = None
+            for n_exclude in range(max_exclude, 0, -1):
+                exclude_sids = set(unique_recent_sids[:n_exclude])
+                remaining = [c for c in candidates if c["staff"].sid not in exclude_sids]
+                if remaining:
+                    best_candidates = remaining
+                    break
+            if best_candidates:
+                candidates = best_candidates
 
         # Weekday rotation shift
         day_idx = weekday_index(req.weekday)
