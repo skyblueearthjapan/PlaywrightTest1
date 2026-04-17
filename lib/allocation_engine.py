@@ -2138,6 +2138,10 @@ class AllocationEngine:
                     )
                     new_idx = len(self.results)
                     self.results.append(new_result)
+                    logger.info(
+                        "RESCUE_OBJECT: visit_id=%r new_result.date_str=%r",
+                        new_result.visit_id, new_result.date_str,
+                    )
                     self._register_assignment(found_staff.sid, date_str, new_idx, pid=pid)
                 rescued += 1
 
