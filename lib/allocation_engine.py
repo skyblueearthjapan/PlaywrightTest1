@@ -143,18 +143,97 @@ class AllocationEngine:
         active_requests = self._enrich_from_patterns(active_requests)
 
         # ==============================================================
-        # Smart Allocation Engine (安定版)
-        # Phase 1: 制約厳しい順ソートで初期割当
-        # Phase 2: Level 1 全スタッフ再挿入
-        # Phase 3: Ejection Chain
-        # Phase 4: 段階的制約緩和
+        # Multi-Trial Smart Allocation Engine
+        # 複数の割当順序を試行し、未割当が最も少ない結果を採用
         # ==============================================================
+        orderings = self._generate_orderings(active_requests)
 
+        best_results = None
+        best_unassigned_list = None
+        best_unassigned_count = float('inf')
+        best_request_constraints = None
+        best_coupled_debug = {}
+        best_day_shift_failures = []
+
+        for trial_idx, ordering in enumerate(orderings):
+            self._reset_state()
+            self._run_pipeline(ordering, active_requests)
+
+            unassigned_count = sum(
+                1 for r in self.results if not r.staff_id and not r.is_event
+            )
+            logger.info(
+                "Trial %d/%d: %d unassigned",
+                trial_idx + 1, len(orderings), unassigned_count,
+            )
+
+            if unassigned_count < best_unassigned_count:
+                best_unassigned_count = unassigned_count
+                best_results = list(self.results)
+                best_unassigned_list = list(self.unassigned)
+                best_request_constraints = dict(self._request_constraints)
+                best_coupled_debug = getattr(self, '_coupled_debug', {})
+                best_day_shift_failures = getattr(self, '_day_shift_failures', [])
+
+                if unassigned_count == 0:
+                    logger.info("Trial %d: perfect allocation, skipping remaining trials", trial_idx + 1)
+                    break
+
+        # Restore best results
+        self.results = best_results
+        self.unassigned = best_unassigned_list
+        self._request_constraints = best_request_constraints
+
+        # Summary
+        assigned_count = sum(
+            1 for r in self.results if r.staff_id and not r.is_event
+        )
+        unassigned_count = sum(
+            1 for r in self.results if not r.staff_id and not r.is_event
+        )
+        logger.info(
+            "Allocation complete (best of %d trials): %d assigned, %d unassigned out of %d total",
+            len(orderings), assigned_count, unassigned_count, len(active_requests),
+        )
+
+        # デバッグ: 未割当の内訳
+        unassigned_detail = {}
+        for r in self.results:
+            if not r.staff_id and not r.is_event:
+                key = f"{r.pid}({r.pname})|{r.date_str}"
+                unassigned_detail[key] = unassigned_detail.get(key, 0) + 1
+        debug_notes = []
+        for r in self.results:
+            if r.note and ("[曜日シフト" in r.note or "[DayShift" in r.note):
+                debug_notes.append(f"{r.pid}: {r.note[:60]}")
+        day_shift_failures = best_day_shift_failures or []
+
+        return {
+            "results": self.results,
+            "unassigned": self.unassigned,
+            "summary": {
+                "total": len(active_requests),
+                "assigned": assigned_count,
+                "unassigned": unassigned_count,
+                "unassigned_detail": unassigned_detail,
+                "day_shifts": debug_notes,
+                "day_shift_failures": day_shift_failures[:30],
+                "coupled_debug": best_coupled_debug or {},
+                "trials": len(orderings),
+                "message": (
+                    f"割当結果を {assigned_count} 件作成しました。"
+                    f"割当不可: {unassigned_count} 件"
+                    f"（{len(orderings)}試行中の最良結果）"
+                ),
+            },
+        }
+
+    def _run_pipeline(
+        self, sorted_requests: List[VisitRequest], active_requests: List[VisitRequest],
+    ) -> None:
+        """Execute the full allocation pipeline for a given request ordering."""
         # Step 1 - events
         self._insert_events()
-
-        # Step 2 - sort (制約が厳しいリクエストを先に処理)
-        sorted_requests = self._sort_requests_smart(active_requests)
 
         # Step 3 - Level 0: 初期割当（即座に時間確定）
         logger.info("Level 0: Allocating %d requests...", len(sorted_requests))
@@ -163,7 +242,6 @@ class AllocationEngine:
         self._sync_coupled_times()
 
         # Step 4 - GapPack (時間の詰め直し)
-        logger.info("GapPack: Refining time assignments...")
         self._gap_pack()
         self._sync_coupled_times()
 
@@ -173,7 +251,6 @@ class AllocationEngine:
             if not r.staff_id and not r.is_event
         ]
         if unassigned_indices:
-            logger.info("Level 1: Reinsertion for %d visits...", len(unassigned_indices))
             self._level1_reinsertion(unassigned_indices)
             self._sync_coupled_times()
 
@@ -183,11 +260,9 @@ class AllocationEngine:
             if not r.staff_id and not r.is_event
         ]
         if remaining_unassigned:
-            logger.info("Ejection Chain: %d visits...", len(remaining_unassigned))
             ejected = self._ejection_chain(remaining_unassigned)
             if ejected > 0:
                 self._sync_coupled_times()
-                logger.info("Ejection Chain: resolved %d visits", ejected)
 
         # Step 7 - 段階的制約緩和
         still_unassigned = [
@@ -195,11 +270,9 @@ class AllocationEngine:
             if not r.staff_id and not r.is_event
         ]
         if still_unassigned:
-            logger.info("Relaxed Pass: %d visits...", len(still_unassigned))
             relaxed = self._relaxed_reinsertion(still_unassigned)
             if relaxed > 0:
                 self._sync_coupled_times()
-                logger.info("Relaxed Pass: resolved %d visits", relaxed)
 
         # Step 7.5 - 曜日シフト戦略（希望日以外への振替）
         day_shift_unassigned = [
@@ -207,16 +280,12 @@ class AllocationEngine:
             if not r.staff_id and not r.is_event
         ]
         if day_shift_unassigned:
-            logger.info("Day Shift: Attempting day redistribution for %d visits...",
-                        len(day_shift_unassigned))
             shifted = self._day_shift_strategy(day_shift_unassigned, active_requests)
             if shifted > 0:
                 self._enforce_coupled_atomicity()
                 self._sync_coupled_times()
-                logger.info("Day Shift: resolved %d visits", shifted)
 
         # Step 8 - route optimisation
-        logger.info("Level 3: Optimizing routes...")
         self._level3_route_optimize()
         self._sync_coupled_times()
 
@@ -237,58 +306,10 @@ class AllocationEngine:
             if not r.staff_id and not r.is_event
         ]
         if final_unassigned:
-            logger.info("Final Day Shift: %d visits after overlap sweep...", len(final_unassigned))
             shifted = self._day_shift_strategy(final_unassigned, active_requests)
             if shifted > 0:
                 self._sync_coupled_times()
                 self._enforce_coupled_atomicity(allow_partial=True)
-                logger.info("Final Day Shift: resolved %d visits", shifted)
-
-        # Step 13 - 2名体制の不足分はGAS側(週ビュー/インタラクティブ)で追加
-        # Python側では追加しない（二重カウント防止）
-
-        # Summary
-        assigned_count = sum(
-            1 for r in self.results if r.staff_id and not r.is_event
-        )
-        unassigned_count = sum(
-            1 for r in self.results if not r.staff_id and not r.is_event
-        )
-        logger.info(
-            "Allocation complete: %d assigned, %d unassigned out of %d total",
-            assigned_count, unassigned_count, len(active_requests),
-        )
-
-        # デバッグ: 未割当の内訳
-        unassigned_detail = {}
-        for r in self.results:
-            if not r.staff_id and not r.is_event:
-                key = f"{r.pid}({r.pname})|{r.date_str}"
-                unassigned_detail[key] = unassigned_detail.get(key, 0) + 1
-        debug_notes = []
-        for r in self.results:
-            if r.note and ("[曜日シフト" in r.note or "[DayShift" in r.note):
-                debug_notes.append(f"{r.pid}: {r.note[:60]}")
-        # 曜日シフト失敗ログも収集
-        day_shift_failures = getattr(self, '_day_shift_failures', [])
-
-        return {
-            "results": self.results,
-            "unassigned": self.unassigned,
-            "summary": {
-                "total": len(active_requests),
-                "assigned": assigned_count,
-                "unassigned": unassigned_count,
-                "unassigned_detail": unassigned_detail,
-                "day_shifts": debug_notes,
-                "day_shift_failures": day_shift_failures[:30],
-                "coupled_debug": getattr(self, '_coupled_debug', {}),
-                "message": (
-                    f"割当結果を {assigned_count} 件作成しました。"
-                    f"割当不可: {unassigned_count} 件"
-                ),
-            },
-        }
 
     # ------------------------------------------------------------------
     # Internal helpers - state management
@@ -301,6 +322,7 @@ class AllocationEngine:
         self.staff_day_visits = {}
         self.pid_date_staff = {}
         self.last_assigned_by_patient = {}
+        self._request_constraints = {}
 
     def _register_assignment(
         self, staff_id: str, date_str: str, result_idx: int,
@@ -1958,15 +1980,17 @@ class AllocationEngine:
         Strategy: try different sort keys to find the ordering that
         minimizes unassigned visits.
         """
-        import random as _rnd
-
         orderings = []
 
-        # Order 1: Default (date → needStaff desc → rotation → time)
+        # Order 1: Smart sort (fewest eligible staff first) - current default
+        orderings.append(self._sort_requests_smart(requests))
+
+        # Order 2: Default (date → needStaff desc → rotation → time)
         orderings.append(self._sort_requests(requests))
 
-        # Order 2: Hardest-first (fewest eligible staff → need_staff desc → date)
-        def _constraint_tightness(r: VisitRequest) -> tuple:
+        # Order 3: Hardest-first with time-slot scarcity
+        # 固定時刻を最優先し、午後の固定時刻は特に早く処理
+        def _time_slot_scarcity(r: VisitRequest) -> tuple:
             eligible = 0
             for s in self.staff_list:
                 if s.sid in r.ng_staff_ids:
@@ -1978,10 +2002,21 @@ class AllocationEngine:
                 if s.work_days and r.weekday and r.weekday not in s.work_days:
                     continue
                 eligible += 1
-            return (eligible, -r.need_staff, r.date_str, r.start_min or 9999)
-        orderings.append(sorted(requests, key=_constraint_tightness))
+            # 固定時刻は最優先（0）、それ以外は1
+            is_fixed = 0 if r.time_type == "固定" else 1
+            return (is_fixed, eligible, -r.need_staff, r.date_str, r.start_min or 9999)
+        orderings.append(sorted(requests, key=_time_slot_scarcity))
 
-        # Order 3: Reverse date (金→月) + need_staff desc
+        # Order 4: 2名体制 + 固定時刻を絶対最優先
+        # 2名体制は2枠消費するため、先に確保しないと枠が足りなくなる
+        def _coupled_fixed_first(r: VisitRequest) -> tuple:
+            # 2名体制+固定 → 2名体制+柔軟 → 1名固定 → 1名柔軟
+            coupled_priority = 0 if r.need_staff >= 2 else 1
+            fixed_priority = 0 if r.time_type == "固定" else 1
+            return (coupled_priority, fixed_priority, r.date_str, r.start_min or 9999)
+        orderings.append(sorted(requests, key=_coupled_fixed_first))
+
+        # Order 5: Reverse date (金→月) + need_staff desc
         def _reverse_date(r: VisitRequest) -> tuple:
             return (r.date_str, -r.need_staff, r.start_min or 9999)
         orderings.append(sorted(requests, key=_reverse_date, reverse=True))
