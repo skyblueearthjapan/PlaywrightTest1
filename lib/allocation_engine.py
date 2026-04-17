@@ -2097,9 +2097,25 @@ class AllocationEngine:
                     ua_r.note = (ua_r.note or '') + f" [2名体制救済: {found_staff.name}]"
                     self._register_assignment(found_staff.sid, date_str, ua_idx, pid=pid)
                 else:
-                    # Create new 2nd-staff entry
+                    # Create new 2nd-staff entry.
+                    # GAS側のペア認識は visit_id が `^(V\d+)-\d+$` にマッチすることを
+                    # 前提にしているため、`_P2` サフィックスではなく V###-N ハイフン
+                    # 形式で発番する（同じ base_id で未使用のスロット番号を採番）。
+                    base_match = _COUPLED_RE.match(ref.visit_id or '')
+                    if base_match:
+                        base_id = base_match.group(1)
+                        used_slots: Set[int] = set()
+                        for r in self.results:
+                            m = _COUPLED_RE.match(r.visit_id or '')
+                            if m and m.group(1) == base_id:
+                                used_slots.add(int(m.group(2)))
+                        next_slot = (max(used_slots) if used_slots else 1) + 1
+                        new_visit_id = f"{base_id}-{next_slot}"
+                    else:
+                        # ref がハイフン形式でない想定外ケースのフォールバック
+                        new_visit_id = f"{ref.visit_id}_P2"
                     new_result = AssignmentResult(
-                        visit_id=f"{ref.visit_id}_P2",
+                        visit_id=new_visit_id,
                         date_str=date_str,
                         weekday=ref.weekday,
                         staff_id=found_staff.sid,
