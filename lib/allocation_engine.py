@@ -298,6 +298,36 @@ class AllocationEngine:
 
         # Step 11 - 最終安全ネット
         self._final_overlap_sweep()
+
+        # Step 11.5 - FinalSweepで解除された訪問を救済
+        post_sweep_unassigned = [
+            i for i, r in enumerate(self.results)
+            if not r.staff_id and not r.is_event
+        ]
+        if post_sweep_unassigned:
+            logger.info("Post-Sweep Rescue: %d visits to rescue...", len(post_sweep_unassigned))
+            # Level 1 再挿入
+            self._level1_reinsertion(post_sweep_unassigned)
+            self._sync_coupled_times()
+            # 残りに Ejection Chain
+            still_free = [
+                i for i in post_sweep_unassigned
+                if not self.results[i].staff_id
+            ]
+            if still_free:
+                self._ejection_chain(still_free)
+                self._sync_coupled_times()
+            # 残りに制約緩和
+            still_free2 = [
+                i for i in post_sweep_unassigned
+                if not self.results[i].staff_id
+            ]
+            if still_free2:
+                self._relaxed_reinsertion(still_free2)
+                self._sync_coupled_times()
+            rescued = sum(1 for i in post_sweep_unassigned if self.results[i].staff_id)
+            logger.info("Post-Sweep Rescue: rescued %d/%d visits", rescued, len(post_sweep_unassigned))
+
         self._enforce_coupled_atomicity(allow_partial=True)
 
         # Step 12 - 最終曜日シフト（overlap sweepで解除された訪問を救済）
@@ -310,6 +340,32 @@ class AllocationEngine:
             if shifted > 0:
                 self._sync_coupled_times()
                 self._enforce_coupled_atomicity(allow_partial=True)
+
+        # Step 13 - unassignedリストを最終結果から再構築
+        self.unassigned = []
+        for i, r in enumerate(self.results):
+            if not r.staff_id and not r.is_event:
+                need_staff = 1
+                slot = 1
+                m = _COUPLED_RE.match(r.visit_id or '')
+                if m:
+                    need_staff = 2
+                    slot = int(m.group(2))
+                reason = '条件を満たすスタッフなし'
+                if '最終重複チェック' in (r.note or ''):
+                    reason = '重複解消不可'
+                elif 'ペア未確保' in (r.note or ''):
+                    reason = '2名体制ペア未確保'
+                elif 'GapPack' in (r.note or ''):
+                    reason = '時間枠に空きなし'
+                self.unassigned.append({
+                    'date_str': r.date_str,
+                    'pid': r.pid,
+                    'pname': r.pname,
+                    'need_staff': need_staff,
+                    'slot': slot,
+                    'reason': reason,
+                })
 
     # ------------------------------------------------------------------
     # Internal helpers - state management
