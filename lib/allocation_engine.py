@@ -341,6 +341,11 @@ class AllocationEngine:
                 self._sync_coupled_times()
                 self._enforce_coupled_atomicity(allow_partial=True)
 
+        # Step 12.5 - 2名体制レスキュー（1名のみ割当の2名体制に2人目を追加）
+        coupled_rescued = self._rescue_partial_coupled()
+        if coupled_rescued > 0:
+            logger.info("Coupled Rescue: added 2nd staff for %d visits", coupled_rescued)
+
         # Step 13 - unassignedリストを最終結果から再構築
         self.unassigned = []
         for i, r in enumerate(self.results):
@@ -1982,6 +1987,128 @@ class AllocationEngine:
         }
         if added:
             logger.info("Added %d missing coupled entries", added)
+
+    # ==================================================================
+    # Rescue Partial Coupled (2名体制の2人目確保)
+    # ==================================================================
+    def _rescue_partial_coupled(self) -> int:
+        """Find 2nd staff for 2-staff visits where only 1 is assigned.
+
+        Scans results for patients needing 2 staff but having only 1
+        assigned on a given date. Tries to find a 2nd staff member
+        available at the same time slot and creates a new result entry.
+        """
+        # Build set of patients needing 2+ staff
+        need2_pids = {pid for pid, p in self.patient_map.items() if p.need_staff >= 2}
+        if not need2_pids:
+            return 0
+
+        # Group results by pid|date (exclude events and trainee shadows)
+        pid_date_results: Dict[str, List[int]] = {}
+        for i, r in enumerate(self.results):
+            if r.is_event:
+                continue
+            vid = r.visit_id or ''
+            if vid.startswith('EV_') or '_T_' in vid:
+                continue
+            if r.pid not in need2_pids:
+                continue
+            key = f"{r.pid}|{r.date_str}"
+            pid_date_results.setdefault(key, []).append(i)
+
+        rescued = 0
+        for key, indices in pid_date_results.items():
+            assigned = [(i, self.results[i]) for i in indices if self.results[i].staff_id]
+            unassigned = [(i, self.results[i]) for i in indices if not self.results[i].staff_id]
+            assigned_sids = {r.staff_id for _, r in assigned}
+
+            if len(assigned_sids) >= 2:
+                continue  # Already fully staffed
+            if not assigned:
+                continue  # No one assigned, can't determine time
+
+            ref_idx, ref = assigned[0]
+            if ref.start_min is None or ref.end_min is None:
+                continue
+
+            pid = key.split('|')[0]
+            date_str = ref.date_str
+
+            # Get constraints from the assigned visit
+            constraints = self._request_constraints.get(ref_idx, {})
+            ng_ids = list(constraints.get("ng_staff_ids", []))
+            sex_lim = constraints.get("sex_limit", "")
+
+            # Try each staff as 2nd person
+            found_staff = None
+            for staff in self.staff_list:
+                if staff.sid in assigned_sids:
+                    continue
+                if staff.sid in ng_ids:
+                    continue
+                if sex_lim == "女性のみ" and staff.gender != "女性":
+                    continue
+                if sex_lim == "男性のみ" and staff.gender != "男性":
+                    continue
+                if staff.work_days and ref.weekday not in staff.work_days:
+                    continue
+
+                # Capacity check (use max_per_day for rescue)
+                cap_key = f"{staff.sid}|{date_str}"
+                if self.assign_count.get(cap_key, 0) >= staff.max_per_day:
+                    continue
+
+                # Blocked intervals check
+                blocked = self._get_blocked_intervals(staff.sid, date_str)
+                if any(iv.start <= 0 and iv.end >= 1440 for iv in blocked):
+                    continue
+                if any(intervals_overlap(ref.start_min, ref.end_min, b.start, b.end)
+                       for b in blocked):
+                    continue
+
+                # Overlap with existing visits
+                if self._has_overlap(staff.sid, date_str, ref.start_min, ref.end_min):
+                    continue
+
+                found_staff = staff
+                break
+
+            if found_staff:
+                if unassigned:
+                    # Fill existing empty slot
+                    ua_idx, ua_r = unassigned[0]
+                    ua_r.staff_id = found_staff.sid
+                    ua_r.staff_name = found_staff.name
+                    ua_r.start_min = ref.start_min
+                    ua_r.end_min = ref.end_min
+                    ua_r.note = (ua_r.note or '') + f" [2名体制救済: {found_staff.name}]"
+                    self._register_assignment(found_staff.sid, date_str, ua_idx, pid=pid)
+                else:
+                    # Create new 2nd-staff entry
+                    new_result = AssignmentResult(
+                        visit_id=f"{ref.visit_id}_P2",
+                        date_str=date_str,
+                        weekday=ref.weekday,
+                        staff_id=found_staff.sid,
+                        staff_name=found_staff.name,
+                        pid=pid,
+                        pname=ref.pname,
+                        area=ref.area,
+                        start_min=ref.start_min,
+                        end_min=ref.end_min,
+                        service_min=ref.service_min,
+                        time_type=ref.time_type,
+                        earliest_min=ref.earliest_min,
+                        latest_min=ref.latest_min,
+                        is_coupled=True,
+                        note=f"[2名体制救済: {found_staff.name}]",
+                    )
+                    new_idx = len(self.results)
+                    self.results.append(new_result)
+                    self._register_assignment(found_staff.sid, date_str, new_idx, pid=pid)
+                rescued += 1
+
+        return rescued
 
     # ==================================================================
     # Final Overlap Sweep (最終重複チェック＆修正)
