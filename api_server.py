@@ -1156,6 +1156,9 @@ def api_allocate():
                 lat=p.get("latitude"),
                 lng=p.get("longitude"),
                 service_minutes=p.get("service_minutes", 60),
+                need_staff=p.get("need_staff", 1),
+                sex_limit=p.get("sex_limit", ""),
+                cont_pref=p.get("continuation_pref", p.get("cont_pref", "")),
                 day_priority=p.get("day_priority", "低"),
             )
 
