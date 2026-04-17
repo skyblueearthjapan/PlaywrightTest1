@@ -2120,11 +2120,6 @@ class AllocationEngine:
                     self.results.append(new_result)
                     self._register_assignment(found_staff.sid, date_str, new_idx, pid=pid)
                 rescued += 1
-                logger.info(
-                    "Coupled Rescue: %s -> %s on %s (%s-%s) date_str=%r",
-                    pid, found_staff.name, date_str,
-                    ref.start_min, ref.end_min, date_str,
-                )
 
         return rescued
 

@@ -1343,10 +1343,6 @@ def api_allocate():
                 "movement_km": round(r.movement_km, 2) if r.movement_km else None,
             })
 
-        # Debug: _P2エントリのdate確認
-        for ar in assignment_results:
-            if '_P2' in (ar.get('visit_id') or ''):
-                add_log(f"DEBUG _P2: {ar['visit_id']} date={ar['date']!r} staff={ar['staff_id']}")
         add_log(f"allocate 完了: {len(assignment_results)}件割当")
         return jsonify({
             "success": True,
