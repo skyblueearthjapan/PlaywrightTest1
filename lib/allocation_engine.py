@@ -1998,10 +1998,27 @@ class AllocationEngine:
         assigned on a given date. Tries to find a 2nd staff member
         available at the same time slot and creates a new result entry.
         """
-        # Build set of patients needing 2+ staff
-        need2_pids = {pid for pid, p in self.patient_map.items() if p.need_staff >= 2}
-        if not need2_pids:
+        # Detect 2-staff patients from results (is_coupled flag or V###-N visit IDs)
+        # This avoids relying on patient_map.need_staff which may not be set
+        need2_pid_dates: Set[str] = set()
+        for r in self.results:
+            if r.is_event:
+                continue
+            vid = r.visit_id or ''
+            if vid.startswith('EV_') or '_T_' in vid:
+                continue
+            if r.is_coupled or _COUPLED_RE.match(vid):
+                need2_pid_dates.add(f"{r.pid}|{r.date_str}")
+        # Also check patient_map as fallback
+        for pid, p in self.patient_map.items():
+            if p.need_staff >= 2:
+                for r in self.results:
+                    if r.pid == pid and not r.is_event:
+                        need2_pid_dates.add(f"{pid}|{r.date_str}")
+
+        if not need2_pid_dates:
             return 0
+        logger.info("Coupled Rescue: %d patient-dates with 2-staff need", len(need2_pid_dates))
 
         # Group results by pid|date (exclude events and trainee shadows)
         pid_date_results: Dict[str, List[int]] = {}
@@ -2011,9 +2028,9 @@ class AllocationEngine:
             vid = r.visit_id or ''
             if vid.startswith('EV_') or '_T_' in vid:
                 continue
-            if r.pid not in need2_pids:
-                continue
             key = f"{r.pid}|{r.date_str}"
+            if key not in need2_pid_dates:
+                continue
             pid_date_results.setdefault(key, []).append(i)
 
         rescued = 0
