@@ -105,6 +105,46 @@ class Correction:
         return self.business_type in ("医療保険", "介護保険", "")
 
 
+def _extract_day_of_month(value: str) -> Optional[int]:
+    """Return day-of-month (1-31) from a date string, or None on failure.
+
+    Accepts plain day numbers ("1", "03"), zero-padded days, ``MM/dd``,
+    ``yyyy/MM/dd``, ``yyyy-MM-dd``, ``yyyy.MM.dd`` and any whitespace
+    surrounding. Used by ``compare_schedules`` to filter by week range
+    (C-10) without crashing on month-spanning data.
+    """
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
+    # Direct integer day (e.g. "1", "03")
+    if s.isdigit():
+        try:
+            d = int(s)
+            return d if 1 <= d <= 31 else None
+        except ValueError:
+            return None
+    # Split by common separators
+    for sep in ("/", "-", ".", " "):
+        if sep in s:
+            parts = [p for p in s.split(sep) if p.strip()]
+            if not parts:
+                continue
+            # Last numeric part is the day in yyyy/MM/dd, MM/dd, or dd alone
+            for candidate in reversed(parts):
+                c = candidate.strip()
+                if c.isdigit():
+                    try:
+                        d = int(c)
+                    except ValueError:
+                        continue
+                    if 1 <= d <= 31:
+                        return d
+            return None
+    return None
+
+
 def parse_time(time_str: str) -> tuple[int, int]:
     """時間文字列をパース ("HH:MM" or "H:MM" -> (hour, minute))"""
     if not time_str or time_str == "-":
@@ -311,12 +351,15 @@ def compare_schedules(
         print(f"  [DEBUG] フィルタ前 optimized の日付一覧: {sorted(optimized_dates_before)}")
 
         def in_range(entry):
-            try:
-                day = int(entry.date)
-                return target_week_start <= day <= target_week_end
-            except ValueError:
+            # Bug fix (C-10): ``int(entry.date)`` blew up when the CSV
+            # contained ``yyyy/MM/dd`` or ``MM/dd`` strings, and silently
+            # filtered out month-spanning entries. Normalise by extracting
+            # only the day component.
+            day = _extract_day_of_month(entry.date)
+            if day is None:
                 print(f"  [DEBUG] 日付パース失敗: '{entry.date}' (利用者={entry.user_name})")
                 return False
+            return target_week_start <= day <= target_week_end
         current_entries = [e for e in current_entries if in_range(e)]
         optimized_entries = [e for e in optimized_entries if in_range(e)]
         print(f"  [DEBUG] 日付フィルタ後: current={len(current_entries)}, optimized={len(optimized_entries)}")
@@ -417,7 +460,12 @@ def compare_schedules(
         # 日付ごとに比較
         all_dates = current_dates | optimized_dates
 
-        for date in sorted(all_dates, key=lambda x: int(x) if x.isdigit() else 0):
+        # Bug fix (C-10): use day-of-month extraction so yyyy/MM/dd dates
+        # sort correctly alongside plain day numbers.
+        for date in sorted(
+            all_dates,
+            key=lambda x: _extract_day_of_month(x) if _extract_day_of_month(x) is not None else 0,
+        ):
             current_on_date = [(i, e) for i, e in enumerate(user_current) if e.date == date]
             optimized_on_date = [(i, e) for i, e in enumerate(user_optimized) if e.date == date]
 
@@ -478,9 +526,19 @@ def compare_schedules(
                 for cur_idx, cur_entry in current_on_date:
                     if cur_idx in matched_current_local:
                         continue
-                    svc_match = (cur_entry.service_type == opt_entry.service_type or
-                        cur_entry.service_type in opt_entry.service_type or
-                        opt_entry.service_type in cur_entry.service_type)
+                    # Bug fix (C-9): when either service_type is empty
+                    # string, ``"" in other`` is always True in Python,
+                    # which forced spurious substring matches between
+                    # unrelated services. Require both sides non-empty
+                    # for substring fallback matching.
+                    cur_svc = cur_entry.service_type or ""
+                    opt_svc = opt_entry.service_type or ""
+                    if cur_svc == opt_svc:
+                        svc_match = True
+                    elif cur_svc and opt_svc and (cur_svc in opt_svc or opt_svc in cur_svc):
+                        svc_match = True
+                    else:
+                        svc_match = False
                     if svc_match:
                         # 差分があるかチェック
                         has_diff = (
@@ -537,10 +595,18 @@ def compare_schedules(
             for opt_idx, opt_entry in unmatched_optimized:
                 if opt_idx in all_matched_optimized:
                     continue
+                # Bug fix (C-9): guard substring fallback against empty
+                # strings (``"" in any_string`` is True in Python).
+                cur_svc = cur_entry.service_type or ""
+                opt_svc = opt_entry.service_type or ""
+                if cur_svc == opt_svc:
+                    svc_match = True
+                elif cur_svc and opt_svc and (cur_svc in opt_svc or opt_svc in cur_svc):
+                    svc_match = True
+                else:
+                    svc_match = False
                 # サービス内容が一致し、日付が異なる場合は日付変更
-                if (cur_entry.service_type == opt_entry.service_type or
-                    cur_entry.service_type in opt_entry.service_type or
-                    opt_entry.service_type in cur_entry.service_type):
+                if svc_match:
                     # 日付が異なることを確認
                     if cur_entry.date != opt_entry.date:
                         corrections.append(Correction(

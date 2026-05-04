@@ -1,0 +1,10 @@
+# Development dependencies (testing only).
+# Install with::
+#
+#     pip install -r requirements-dev.txt
+#
+-r requirements.txt
+
+# pytest is required for running lib/test_allocation_engine.py and any
+# future regression suites.
+pytest>=7.0

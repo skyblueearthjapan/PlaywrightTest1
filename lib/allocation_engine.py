@@ -154,6 +154,13 @@ class AllocationEngine:
         best_request_constraints = None
         best_coupled_debug = {}
         best_day_shift_failures = []
+        # Bug fix (C-4): also snapshot internal state maps so that any
+        # post-allocate consumer that calls back into the engine sees the
+        # state corresponding to the *best* trial, not the last trial.
+        best_assign_count: Optional[Dict[str, int]] = None
+        best_staff_day_visits: Optional[Dict[str, List[int]]] = None
+        best_pid_date_staff: Optional[Dict[str, Set[str]]] = None
+        best_last_assigned_by_patient: Optional[Dict[str, str]] = None
 
         for trial_idx, ordering in enumerate(orderings):
             self._reset_state()
@@ -174,6 +181,15 @@ class AllocationEngine:
                 best_request_constraints = dict(self._request_constraints)
                 best_coupled_debug = getattr(self, '_coupled_debug', {})
                 best_day_shift_failures = getattr(self, '_day_shift_failures', [])
+                # C-4: snapshot of all state maps tied to best_results
+                best_assign_count = dict(self.assign_count)
+                best_staff_day_visits = {
+                    k: list(v) for k, v in self.staff_day_visits.items()
+                }
+                best_pid_date_staff = {
+                    k: set(v) for k, v in self.pid_date_staff.items()
+                }
+                best_last_assigned_by_patient = dict(self.last_assigned_by_patient)
 
                 if unassigned_count == 0:
                     logger.info("Trial %d: perfect allocation, skipping remaining trials", trial_idx + 1)
@@ -183,6 +199,15 @@ class AllocationEngine:
         self.results = best_results
         self.unassigned = best_unassigned_list
         self._request_constraints = best_request_constraints
+        # Bug fix (C-4): restore the state maps that go with best_results
+        if best_assign_count is not None:
+            self.assign_count = best_assign_count
+        if best_staff_day_visits is not None:
+            self.staff_day_visits = best_staff_day_visits
+        if best_pid_date_staff is not None:
+            self.pid_date_staff = best_pid_date_staff
+        if best_last_assigned_by_patient is not None:
+            self.last_assigned_by_patient = best_last_assigned_by_patient
 
         # Summary
         assigned_count = sum(
@@ -401,12 +426,55 @@ class AllocationEngine:
     def _unregister_assignment(
         self, staff_id: str, date_str: str, result_idx: int,
     ) -> None:
-        """Remove tracking for a previously-registered assignment."""
+        """Remove tracking for a previously-registered assignment.
+
+        Bug fix (C-1): also rolls back ``pid_date_staff`` and
+        ``last_assigned_by_patient`` so subsequent re-insertion does not
+        see stale "patient already covered today" / "previous staff"
+        entries from the visit being unregistered.
+        """
         key = f"{staff_id}|{date_str}"
         visits = self.staff_day_visits.get(key, [])
         if result_idx in visits:
             visits.remove(result_idx)
         self.assign_count[key] = max(0, self.assign_count.get(key, 0) - 1)
+
+        # Restore pid-level tracking maps
+        if 0 <= result_idx < len(self.results):
+            r = self.results[result_idx]
+            pid = getattr(r, "pid", "") or ""
+            if pid:
+                pd_key = f"{pid}|{date_str}"
+                # Only drop the staff from pid_date_staff if no other live
+                # assignment for the same (pid, date) still uses that staff.
+                still_used = False
+                for other_idx in self.staff_day_visits.get(key, []):
+                    if other_idx == result_idx:
+                        continue
+                    other_r = self.results[other_idx] if 0 <= other_idx < len(self.results) else None
+                    if other_r and other_r.pid == pid and other_r.date_str == date_str:
+                        still_used = True
+                        break
+                if not still_used:
+                    bucket = self.pid_date_staff.get(pd_key)
+                    if bucket and staff_id in bucket:
+                        bucket.discard(staff_id)
+                        if not bucket:
+                            self.pid_date_staff.pop(pd_key, None)
+                # Roll back last_assigned_by_patient if it pointed to this staff
+                if self.last_assigned_by_patient.get(pid) == staff_id:
+                    # Find the most recent remaining assigned staff for the pid
+                    fallback: Optional[str] = None
+                    for other_r in self.results:
+                        if (other_r is not r
+                                and other_r.pid == pid
+                                and other_r.staff_id
+                                and not other_r.is_event):
+                            fallback = other_r.staff_id
+                    if fallback:
+                        self.last_assigned_by_patient[pid] = fallback
+                    else:
+                        self.last_assigned_by_patient.pop(pid, None)
 
     # ==================================================================
     # Step 1 - Insert Events
@@ -568,6 +636,42 @@ class AllocationEngine:
     # ==================================================================
     # Staff Selection
     # ==================================================================
+    def _passes_hard_constraints(
+        self, staff: Staff, req: VisitRequest,
+    ) -> bool:
+        """Check shared hard constraints used by required/same-person/regular paths.
+
+        Bug fix (C-3): the required-staff and same-person-preference paths
+        previously only called ``_is_staff_available`` and skipped:
+          - gender restriction (``req.sex_limit``)
+          - soft_cap (``staff.soft_cap()``)
+          - same-patient-same-day exclusion (``pid_date_staff``)
+          - area restriction (``staff.areas`` vs ``req.area``) [also C-7]
+        Centralising the check guarantees identical filtering across paths.
+        """
+        # Gender restriction
+        if req.sex_limit == "女性のみ" and staff.gender != "女性":
+            return False
+        if req.sex_limit == "男性のみ" and staff.gender != "男性":
+            return False
+
+        # Area restriction (C-7): if staff has explicit areas list,
+        # they can only serve patients whose area is in that list.
+        if staff.areas and req.area and req.area not in staff.areas:
+            return False
+
+        # Capacity (soft_cap)
+        cap_key = f"{staff.sid}|{req.date_str}"
+        if self.assign_count.get(cap_key, 0) >= staff.soft_cap():
+            return False
+
+        # Same patient + same day + same staff
+        pd_key = f"{req.pid}|{req.date_str}"
+        if staff.sid in self.pid_date_staff.get(pd_key, set()):
+            return False
+
+        return True
+
     def _find_best_staff(
         self, req: VisitRequest, used_staff_ids: Set[str],
     ) -> Optional[Staff]:
@@ -587,7 +691,11 @@ class AllocationEngine:
                 if sid in used_staff_ids:
                     continue
                 staff = self.staff_map.get(sid)
-                if staff and self._is_staff_available(staff, req):
+                # Bug fix (C-3): apply same hard constraints as the
+                # regular candidate path (gender / soft_cap / same-day).
+                if (staff
+                        and self._passes_hard_constraints(staff, req)
+                        and self._is_staff_available(staff, req)):
                     return staff
             return None  # required staff unavailable
 
@@ -599,6 +707,7 @@ class AllocationEngine:
                 if (staff
                         and req.prev_staff_id not in used_staff_ids
                         and req.prev_staff_id not in req.ng_staff_ids
+                        and self._passes_hard_constraints(staff, req)
                         and self._is_staff_available(staff, req)):
                     return staff
             # 2. confirmed_historyから最頻担当スタッフを検索
@@ -610,7 +719,9 @@ class AllocationEngine:
                     if sid in used_staff_ids or sid in req.ng_staff_ids:
                         continue
                     staff = self.staff_map.get(sid)
-                    if staff and self._is_staff_available(staff, req):
+                    if (staff
+                            and self._passes_hard_constraints(staff, req)
+                            and self._is_staff_available(staff, req)):
                         return staff
 
         # ---- Build scored candidate list ----
@@ -655,6 +766,13 @@ class AllocationEngine:
             if req.sex_limit == "女性のみ" and staff.gender != "女性":
                 continue
             if req.sex_limit == "男性のみ" and staff.gender != "男性":
+                continue
+
+            # Bug fix (C-7): area restriction. ``staff.areas`` was loaded
+            # but never enforced, so staff bound to area "B" could serve
+            # patients in area "A". When the staff has an explicit areas
+            # list, the request area must match.
+            if staff.areas and req.area and req.area not in staff.areas:
                 continue
 
             # Avoid same patient + same day + same staff (for multi-visit days)
@@ -1153,7 +1271,7 @@ class AllocationEngine:
     ) -> bool:
         """Quick eligibility check for Level-1 reinsertion.
 
-        Now includes NG staff and gender checks (previously missing).
+        Now includes NG staff, gender, and area (C-7) checks.
         """
         # H1: NGスタッフ除外
         if ng_staff_ids and staff.sid in ng_staff_ids:
@@ -1162,6 +1280,10 @@ class AllocationEngine:
         if sex_limit == "女性のみ" and staff.gender != "女性":
             return False
         if sex_limit == "男性のみ" and staff.gender != "男性":
+            return False
+        # H2.5 (C-7): エリア制限。staff.areas が指定されているなら
+        # その中に req.area が含まれない限り対象外。
+        if staff.areas and r.area and r.area not in staff.areas:
             return False
         # H3: 勤務曜日
         if staff.work_days and r.weekday not in staff.work_days:
@@ -1444,6 +1566,11 @@ class AllocationEngine:
                         "Could not resolve overlap for visit %s on %s; unassigning",
                         r.visit_id, r.date_str,
                     )
+                    # Bug fix (C-2): unregister before wiping staff_id so
+                    # state maps (assign_count/staff_day_visits/pid_date_staff)
+                    # don't keep a stale entry pointing at a freed slot.
+                    if r.staff_id:
+                        self._unregister_assignment(r.staff_id, r.date_str, idx)
                     r.staff_id = ""
                     r.staff_name = ""
                     r.note += " [重複解消不可: 未割当]"
@@ -1816,6 +1943,9 @@ class AllocationEngine:
                             continue
                         if sex_lim == "男性のみ" and staff.gender != "男性":
                             continue
+                        # C-7: area restriction in day-shift strategy too
+                        if staff.areas and r.area and r.area not in staff.areas:
+                            continue
                         if staff.work_days and alt_weekday not in staff.work_days:
                             continue
                         # Check maxPerDay
@@ -2063,6 +2193,9 @@ class AllocationEngine:
                     continue
                 if sex_lim == "男性のみ" and staff.gender != "男性":
                     continue
+                # C-7: area restriction for the 2nd-staff rescue path
+                if staff.areas and ref.area and ref.area not in staff.areas:
+                    continue
                 if staff.work_days and ref.weekday not in staff.work_days:
                     continue
 
@@ -2173,6 +2306,11 @@ class AllocationEngine:
                         r.visit_id, r.staff_id,
                         fmt_min(r.start_min), fmt_min(r.end_min),
                     )
+                    # Bug fix (C-2): unregister before wiping staff_id so
+                    # post-sweep rescue logic doesn't see stale staff_day_visits
+                    # entries (which would block re-insertion via _has_overlap).
+                    if r.staff_id:
+                        self._unregister_assignment(r.staff_id, r.date_str, idx)
                     r.staff_id = ""
                     r.staff_name = ""
                     r.note += " [最終重複チェック: 未割当]"
@@ -2449,6 +2587,9 @@ class AllocationEngine:
                     continue
                 if sex_lim == "男性のみ" and staff.gender != "男性":
                     continue
+                # C-7: area restriction even in relaxed reinsertion path
+                if staff.areas and r.area and r.area not in staff.areas:
+                    continue
                 if staff.work_days and r.weekday not in staff.work_days:
                     continue
                 key = f"{staff.sid}|{r.date_str}"
@@ -2490,6 +2631,9 @@ class AllocationEngine:
                 if sex_lim == "女性のみ" and staff.gender != "女性":
                     continue
                 if sex_lim == "男性のみ" and staff.gender != "男性":
+                    continue
+                # C-7: area restriction even when relaxing time window
+                if staff.areas and r.area and r.area not in staff.areas:
                     continue
                 if staff.work_days and r.weekday not in staff.work_days:
                     continue
