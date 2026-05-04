@@ -882,3 +882,193 @@ def test_diff_engine_schedule_entry_get_key():
     assert e.get_key() == "P1|3|医療保険|X"
     assert e.is_medical_insurance()
     assert not e.is_event()
+
+
+# ===========================================================================
+# Codex Bug A: required-staff invariant must persist into post-Level0 paths
+# ===========================================================================
+
+
+def _request_constraints_for(engine: AllocationEngine, pid: str, date_str: str):
+    """Find the result row matching pid|date and return its constraint dict."""
+    for idx, r in enumerate(engine.results):
+        if r.pid == pid and r.date_str == date_str:
+            return engine._request_constraints.get(idx, {})
+    return {}
+
+
+def test_codex_bug_a_required_constraints_persisted_for_assigned():
+    """When the required staff IS placed at Level0, the saved constraints
+    still record specified_type / specified_staff_ids so any subsequent
+    rescue (e.g. after a final-sweep unassign) honours the hard rule."""
+    staff = [make_staff("S1"), make_staff("S2")]
+    patients = [make_patient("P1")]
+    req = make_request(
+        "P1", specified_staff_ids=["S1"], specified_type="必須",
+    )
+    engine = make_engine(staff, patients)
+    engine.allocate([req])
+    saved = _request_constraints_for(engine, "P1", DAY)
+    assert saved.get("specified_type") == "必須"
+    assert saved.get("specified_staff_ids") == {"S1"}
+
+
+def test_codex_bug_a_level1_does_not_assign_other_staff_for_required():
+    """The required staff S1 cannot serve on DAY (full-day off via
+    StaffChange), so Level0 fails. Without the fix, Level1 reinsertion
+    happily picks S2 (eligible by every other criterion) and silently
+    breaks the 必須 contract. With the fix, S2 must be rejected."""
+    staff = [make_staff("S1"), make_staff("S2")]
+    patients = [make_patient("P1")]
+    # S1 fully blocked on every weekday so day-shift cannot save the request
+    s1_changes = [
+        StaffChange(staff_id="S1", date_str=d, restriction_type="休み")
+        for d in (
+            "2026/05/04", "2026/05/05", "2026/05/06",
+            "2026/05/07", "2026/05/08",
+        )
+    ]
+    req = make_request(
+        "P1", specified_staff_ids=["S1"], specified_type="必須",
+    )
+    out = make_engine(
+        staff, patients, staff_changes=s1_changes,
+    ).allocate([req])
+    assigned = assigned_results(out)
+    # Either unassigned, or (defensively) only S1 — never S2.
+    assert all(r.staff_id == "S1" for r in assigned), (
+        "Bug A: required-staff invariant violated — Level1/relaxed picked "
+        f"non-S1 staff: {[r.staff_id for r in assigned]}"
+    )
+    # The strongest assertion: with S1 fully blocked, must remain unassigned
+    assert len(assigned) == 0
+
+
+def test_codex_bug_a_relaxed_reinsertion_does_not_pick_other_staff():
+    """Drive the relaxed-reinsertion path directly: pre-fill engine state
+    so only the relaxed-rescue loop is exercised, then assert that the
+    required-staff invariant rejects every other staff."""
+    staff = [make_staff("S1", max_per_day=1, alloc_pref="均等"),
+             make_staff("S2", max_per_day=999, alloc_pref="多め")]
+    engine = make_engine(staff, [make_patient("P1"), make_patient("P0")])
+    # Saturate S1's soft_cap
+    fake = AssignmentResult(
+        visit_id="VFAKE", date_str=DAY, staff_id="S1", staff_name="S1",
+        pid="P0", pname="P0", start_min=540, end_min=600,
+    )
+    engine.results.append(fake)
+    engine._register_assignment("S1", DAY, 0, pid="P0")
+    # Insert an unassigned result for P1 with required-S1
+    unassigned = AssignmentResult(
+        visit_id="V_P1", date_str=DAY, weekday="Mon",
+        pid="P1", pname="P1", area="",
+        service_min=60, time_type="終日",
+    )
+    engine.results.append(unassigned)
+    engine._request_constraints[1] = {
+        "ng_staff_ids": [],
+        "sex_limit": "",
+        "specified_type": "必須",
+        "specified_staff_ids": {"S1"},
+        "pid": "P1",
+        "date_str": DAY,
+    }
+    engine._relaxed_reinsertion([1])
+    # Despite S2 being available with full capacity, the required-staff
+    # invariant must keep the visit unassigned (S1 is at max_per_day too).
+    assert engine.results[1].staff_id == "" or engine.results[1].staff_id == "S1"
+    # And specifically, S2 must NEVER be chosen.
+    assert engine.results[1].staff_id != "S2", (
+        "Bug A: relaxed reinsertion bypassed specified_type=必須"
+    )
+
+
+# ===========================================================================
+# Codex Bug B: same patient + same day + same staff via rescue paths
+# ===========================================================================
+
+
+def test_codex_bug_b_reinsertion_rejects_same_patient_same_day_staff():
+    """Direct unit test on _is_staff_available_for_reinsertion: if
+    pid_date_staff already has the staff for this patient+date, the
+    reinsertion eligibility check must reject the staff."""
+    staff_list = [make_staff("S1", max_per_day=999, alloc_pref="多め")]
+    engine = make_engine(staff_list, [make_patient("P1")])
+    # Pre-register S1 already serving P1 on DAY
+    fake = AssignmentResult(
+        visit_id="VFAKE", date_str=DAY, staff_id="S1", staff_name="S1",
+        pid="P1", pname="P1", start_min=540, end_min=600,
+    )
+    engine.results.append(fake)
+    engine._register_assignment("S1", DAY, 0, pid="P1")
+    # An unassigned second visit for the same P1 on DAY
+    r2 = AssignmentResult(
+        visit_id="V2", date_str=DAY, weekday="Mon",
+        pid="P1", pname="P1", service_min=30, time_type="終日",
+    )
+    engine.results.append(r2)
+    ok = engine._is_staff_available_for_reinsertion(
+        staff_list[0], r2,
+    )
+    assert ok is False, (
+        "Bug B: reinsertion accepted same staff for same pid|date pair"
+    )
+
+
+def test_codex_bug_b_relaxed_skips_same_pid_date_staff():
+    """End-to-end: with S1 already serving P1 on DAY and S2 not eligible
+    via Level0 but available via relaxed rescue, the relaxed loop must
+    not place a *second* P1 visit on S1 just because soft_cap is loose."""
+    staff_list = [make_staff("S1", max_per_day=2, alloc_pref="均等")]
+    engine = make_engine(staff_list, [make_patient("P1")])
+    # Pre-register S1 serving P1 on DAY
+    fake = AssignmentResult(
+        visit_id="VFAKE", date_str=DAY, staff_id="S1", staff_name="S1",
+        pid="P1", pname="P1", start_min=540, end_min=600,
+    )
+    engine.results.append(fake)
+    engine._register_assignment("S1", DAY, 0, pid="P1")
+    # Unassigned 2nd visit for P1 on DAY → relaxed should NOT pick S1
+    unassigned = AssignmentResult(
+        visit_id="V2_P1", date_str=DAY, weekday="Mon",
+        pid="P1", pname="P1", service_min=30, time_type="終日",
+    )
+    engine.results.append(unassigned)
+    engine._request_constraints[1] = {
+        "ng_staff_ids": [],
+        "sex_limit": "",
+        "specified_type": "",
+        "specified_staff_ids": set(),
+        "pid": "P1",
+        "date_str": DAY,
+    }
+    engine._relaxed_reinsertion([1])
+    assert engine.results[1].staff_id != "S1", (
+        "Bug B: relaxed_reinsertion placed same staff on same pid|date"
+    )
+
+
+def test_codex_bug_b_full_pipeline_no_double_assignment():
+    """Pipeline-level test: two P1 visits on the same day must end up on
+    different staff (or one unassigned), not both on the same staff."""
+    staff = [make_staff("S1", max_per_day=999, alloc_pref="多め"),
+             make_staff("S2", max_per_day=999, alloc_pref="多め")]
+    patients = [make_patient("P1")]
+    reqs = [
+        make_request(
+            "P1", time_type="固定", start_min=540, service_min=60,
+        ),
+        make_request(
+            "P1", time_type="固定", start_min=720, service_min=60,
+        ),
+    ]
+    out = make_engine(staff, patients).allocate(reqs)
+    # All P1 visits placed on DAY: each must land on a distinct staff
+    p1_on_day = [
+        r for r in out["results"]
+        if r.pid == "P1" and r.date_str == DAY and r.staff_id and not r.is_event
+    ]
+    sids = [r.staff_id for r in p1_on_day]
+    assert len(sids) == len(set(sids)), (
+        f"Bug B: same staff serving P1 twice on {DAY}: {sids}"
+    )

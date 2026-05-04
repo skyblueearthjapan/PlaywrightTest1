@@ -359,6 +359,12 @@ def compare_schedules(
             if day is None:
                 print(f"  [DEBUG] 日付パース失敗: '{entry.date}' (利用者={entry.user_name})")
                 return False
+            # Bug fix (Codex Bug C): when the week wraps around a month
+            # boundary (e.g. 29..5 covering 29,30,31,1,2,3,4,5), the
+            # straight ``start <= day <= end`` test rejects every entry.
+            # Detect the wrap case (start > end) and accept either tail.
+            if target_week_start > target_week_end:
+                return day >= target_week_start or day <= target_week_end
             return target_week_start <= day <= target_week_end
         current_entries = [e for e in current_entries if in_range(e)]
         optimized_entries = [e for e in optimized_entries if in_range(e)]
@@ -452,22 +458,31 @@ def compare_schedules(
         all_matched_current = set()  # マッチ済みのcurrentエントリのインデックス
         all_matched_optimized = set()  # マッチ済みのoptimizedエントリのインデックス
 
+        # Bug fix (Codex Bug D): introduce a canonical day-of-month key so
+        # mixed date formats (``"2026/05/04"`` vs ``"4"``) compare as the
+        # same day. Without this, identical schedules emitted in different
+        # date formats produced spurious ``date_change`` corrections.
+        def _date_key(s: str) -> Optional[int]:
+            return _extract_day_of_month(s)
+
         # まず、日付変更（3日→4日など）を検出
         # 現在のエントリの中で、最適化後に日付が変わるものを探す
-        current_dates = set(e.date for e in user_current)
-        optimized_dates = set(e.date for e in user_optimized)
+        current_dkeys = set(_date_key(e.date) for e in user_current)
+        optimized_dkeys = set(_date_key(e.date) for e in user_optimized)
 
-        # 日付ごとに比較
-        all_dates = current_dates | optimized_dates
+        # 日付ごとに比較（canonical day key で集約）
+        all_dkeys = current_dkeys | optimized_dkeys
 
         # Bug fix (C-10): use day-of-month extraction so yyyy/MM/dd dates
         # sort correctly alongside plain day numbers.
-        for date in sorted(
-            all_dates,
-            key=lambda x: _extract_day_of_month(x) if _extract_day_of_month(x) is not None else 0,
-        ):
-            current_on_date = [(i, e) for i, e in enumerate(user_current) if e.date == date]
-            optimized_on_date = [(i, e) for i, e in enumerate(user_optimized) if e.date == date]
+        for dkey in sorted(all_dkeys, key=lambda x: x if x is not None else 0):
+            current_on_date = [
+                (i, e) for i, e in enumerate(user_current) if _date_key(e.date) == dkey
+            ]
+            optimized_on_date = [
+                (i, e) for i, e in enumerate(user_optimized) if _date_key(e.date) == dkey
+            ]
+            date = str(dkey) if dkey is not None else ""
 
             # 同じ日付のエントリをマッチング
             # マッチング優先順位:
@@ -607,8 +622,10 @@ def compare_schedules(
                     svc_match = False
                 # サービス内容が一致し、日付が異なる場合は日付変更
                 if svc_match:
-                    # 日付が異なることを確認
-                    if cur_entry.date != opt_entry.date:
+                    # Bug fix (Codex Bug D): compare canonical day keys, not
+                    # raw strings. ``"2026/05/04"`` and ``"4"`` are the same
+                    # day and must NOT trigger a date_change correction.
+                    if _date_key(cur_entry.date) != _date_key(opt_entry.date):
                         corrections.append(Correction(
                             user_name=user,
                             date_from=cur_entry.date,

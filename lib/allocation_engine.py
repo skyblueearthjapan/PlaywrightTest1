@@ -605,9 +605,17 @@ class AllocationEngine:
                     idx = len(self.results)
                     self.results.append(result)
                     self._register_assignment(chosen.sid, req.date_str, idx, pid=req.pid)
+                    # Bug fix (Codex Bug A): also persist specified_type +
+                    # specified_staff_ids so post-Level0 insertion paths can
+                    # honour the hard "必須" constraint instead of silently
+                    # placing the visit on any other eligible staff.
                     self._request_constraints[idx] = {
                         "ng_staff_ids": req.ng_staff_ids,
                         "sex_limit": req.sex_limit,
+                        "specified_type": req.specified_type,
+                        "specified_staff_ids": set(req.specified_staff_ids or []),
+                        "pid": req.pid,
+                        "date_str": req.date_str,
                     }
 
                     # Track movement distance
@@ -620,9 +628,16 @@ class AllocationEngine:
                     result.note += " [未割当: 条件を満たすスタッフなし]"
                     uidx = len(self.results)
                     self.results.append(result)
+                    # Bug fix (Codex Bug A): mirror the assigned-path payload
+                    # so unassigned visits revisited by Level1/ejection/relaxed
+                    # rescue still see specified_type / specified_staff_ids.
                     self._request_constraints[uidx] = {
                         "ng_staff_ids": req.ng_staff_ids,
                         "sex_limit": req.sex_limit,
+                        "specified_type": req.specified_type,
+                        "specified_staff_ids": set(req.specified_staff_ids or []),
+                        "pid": req.pid,
+                        "date_str": req.date_str,
                     }
                     self.unassigned.append({
                         "date_str": req.date_str,
@@ -1209,6 +1224,11 @@ class AllocationEngine:
             constraints = self._request_constraints.get(idx, {})
             ng_ids = list(constraints.get("ng_staff_ids", []))
             sex_lim = constraints.get("sex_limit", "")
+            # Bug fix (Codex Bug A): pull the required-staff invariant
+            # forward into Level1 so the rescue cannot silently pick a
+            # different eligible staff.
+            spec_type = constraints.get("specified_type", "")
+            spec_ids = constraints.get("specified_staff_ids", set())
 
             # Coupled pair: exclude the staff already assigned to the other slot
             if r.is_coupled and r.visit_id:
@@ -1224,7 +1244,8 @@ class AllocationEngine:
             candidates: List[Tuple[Staff, float]] = []
             for staff in self.staff_list:
                 if not self._is_staff_available_for_reinsertion(
-                    staff, r, ng_staff_ids=ng_ids, sex_limit=sex_lim
+                    staff, r, ng_staff_ids=ng_ids, sex_limit=sex_lim,
+                    specified_type=spec_type, specified_staff_ids=spec_ids,
                 ):
                     continue
                 dist = calc_distance_km(staff.lat, staff.lng, patient.lat, patient.lng)
@@ -1268,10 +1289,15 @@ class AllocationEngine:
         self, staff: Staff, r: AssignmentResult,
         ng_staff_ids: Optional[List[str]] = None,
         sex_limit: str = "",
+        specified_type: str = "",
+        specified_staff_ids: Optional[Set[str]] = None,
     ) -> bool:
         """Quick eligibility check for Level-1 reinsertion.
 
-        Now includes NG staff, gender, and area (C-7) checks.
+        Now includes NG staff, gender, and area (C-7) checks. Also enforces
+        the Bug-A required-staff invariant (specified_type=='必須' must keep
+        the staff inside specified_staff_ids) and the Bug-B same-patient/
+        same-day exclusion that was previously absent from this path.
         """
         # H1: NGスタッフ除外
         if ng_staff_ids and staff.sid in ng_staff_ids:
@@ -1296,6 +1322,22 @@ class AllocationEngine:
         blocked = self._get_blocked_intervals(staff.sid, r.date_str)
         for iv in blocked:
             if iv.start <= 0 and iv.end >= 1440:
+                return False
+        # Bug fix (Codex Bug A): respect specified_type=='必須' on every
+        # post-Level0 insertion path. Without this, the rescue paths happily
+        # picked any other eligible staff and silently violated the hard
+        # business rule.
+        if specified_type == "必須" and specified_staff_ids:
+            if staff.sid not in specified_staff_ids:
+                return False
+        # Bug fix (Codex Bug B): same patient + same date + same staff. The
+        # initial-selection paths use _passes_hard_constraints which checks
+        # this, but reinsertion previously skipped it, allowing the same
+        # staff to receive a second visit for the same patient on the same
+        # day after rescue.
+        if r.pid and r.date_str:
+            pd_key = f"{r.pid}|{r.date_str}"
+            if staff.sid in self.pid_date_staff.get(pd_key, set()):
                 return False
         return True
 
@@ -1892,6 +1934,11 @@ class AllocationEngine:
             constraints = self._request_constraints.get(indices[0], {})
             ng_ids = constraints.get("ng_staff_ids", [])
             sex_lim = constraints.get("sex_limit", "")
+            # Bug fix (Codex Bug A): pull required-staff invariant into the
+            # day-shift rescue too. A "必須" request must remain bound to
+            # specified_staff_ids regardless of date relocation.
+            spec_type = constraints.get("specified_type", "")
+            spec_ids = constraints.get("specified_staff_ids", set())
 
             self._day_shift_failures.append(
                 f"TRYING: {pid}|{orig_date} ({len(indices)} slots)"
@@ -1943,10 +1990,19 @@ class AllocationEngine:
                             continue
                         if sex_lim == "男性のみ" and staff.gender != "男性":
                             continue
+                        # Bug fix (Codex Bug A): required-staff invariant
+                        if (spec_type == "必須" and spec_ids
+                                and staff.sid not in spec_ids):
+                            continue
                         # C-7: area restriction in day-shift strategy too
                         if staff.areas and r.area and r.area not in staff.areas:
                             continue
                         if staff.work_days and alt_weekday not in staff.work_days:
+                            continue
+                        # Bug fix (Codex Bug B): same-patient-same-date-same-staff
+                        # on the alternate date.
+                        pd_key_alt = f"{pid}|{alt_date}"
+                        if staff.sid in self.pid_date_staff.get(pd_key_alt, set()):
                             continue
                         # Check maxPerDay
                         key = f"{staff.sid}|{alt_date}"
@@ -2181,6 +2237,10 @@ class AllocationEngine:
             constraints = self._request_constraints.get(ref_idx, {})
             ng_ids = list(constraints.get("ng_staff_ids", []))
             sex_lim = constraints.get("sex_limit", "")
+            # Bug fix (Codex Bug A): respect specified_type even on the
+            # coupled-rescue path so the 2nd staff still honours "必須".
+            spec_type = constraints.get("specified_type", "")
+            spec_ids = constraints.get("specified_staff_ids", set())
 
             # Try each staff as 2nd person
             found_staff = None
@@ -2193,10 +2253,21 @@ class AllocationEngine:
                     continue
                 if sex_lim == "男性のみ" and staff.gender != "男性":
                     continue
+                # Bug fix (Codex Bug A): required-staff invariant
+                if (spec_type == "必須" and spec_ids
+                        and staff.sid not in spec_ids):
+                    continue
                 # C-7: area restriction for the 2nd-staff rescue path
                 if staff.areas and ref.area and ref.area not in staff.areas:
                     continue
                 if staff.work_days and ref.weekday not in staff.work_days:
+                    continue
+                # Bug fix (Codex Bug B): same-patient-same-day-same-staff.
+                # assigned_sids already excludes the partner staff on the
+                # ref entry, but other entries on the same pid|date_str may
+                # also exist (e.g. multiple visits in one day).
+                pd_key2 = f"{pid}|{date_str}"
+                if staff.sid in self.pid_date_staff.get(pd_key2, set()):
                     continue
 
                 # Capacity check (use max_per_day for rescue)
@@ -2398,6 +2469,8 @@ class AllocationEngine:
             constraints = self._request_constraints.get(idx, {})
             ng_ids = list(constraints.get("ng_staff_ids", []))
             sex_lim = constraints.get("sex_limit", "")
+            spec_type = constraints.get("specified_type", "")
+            spec_ids = constraints.get("specified_staff_ids", set())
 
             # Coupled pair: also exclude the other slot's staff
             if r.is_coupled and r.visit_id:
@@ -2418,7 +2491,8 @@ class AllocationEngine:
             placed = False
             for staff in self.staff_list:
                 if not self._is_staff_available_for_reinsertion(
-                    staff, r, ng_staff_ids=ng_ids, sex_limit=sex_lim
+                    staff, r, ng_staff_ids=ng_ids, sex_limit=sex_lim,
+                    specified_type=spec_type, specified_staff_ids=spec_ids,
                 ):
                     continue
                 if r.time_type == "固定" and r.earliest_min is not None:
@@ -2460,7 +2534,8 @@ class AllocationEngine:
 
                 # U をvictimのスタッフに入れられるか？
                 if not self._is_staff_available_for_reinsertion(
-                    victim_staff, r, ng_staff_ids=ng_ids, sex_limit=sex_lim
+                    victim_staff, r, ng_staff_ids=ng_ids, sex_limit=sex_lim,
+                    specified_type=spec_type, specified_staff_ids=spec_ids,
                 ):
                     continue
 
@@ -2503,13 +2578,17 @@ class AllocationEngine:
                 victim_constraints = self._request_constraints.get(victim_idx, {})
                 v_ng = list(victim_constraints.get("ng_staff_ids", []))
                 v_sex = victim_constraints.get("sex_limit", "")
+                v_spec_type = victim_constraints.get("specified_type", "")
+                v_spec_ids = victim_constraints.get("specified_staff_ids", set())
                 victim_placed = False
 
                 for alt_staff in self.staff_list:
                     if alt_staff.sid == saved_staff:
                         continue
                     if not self._is_staff_available_for_reinsertion(
-                        alt_staff, victim, ng_staff_ids=v_ng, sex_limit=v_sex
+                        alt_staff, victim, ng_staff_ids=v_ng, sex_limit=v_sex,
+                        specified_type=v_spec_type,
+                        specified_staff_ids=v_spec_ids,
                     ):
                         continue
                     # 固定時刻のvictimは元の時刻でのみ再配置可能
@@ -2568,6 +2647,11 @@ class AllocationEngine:
             constraints = self._request_constraints.get(idx, {})
             ng_ids = list(constraints.get("ng_staff_ids", []))
             sex_lim = constraints.get("sex_limit", "")
+            # Bug fix (Codex Bug A): respect specified_type=='必須' even in
+            # the relaxed-reinsertion fallback. Relaxation only loosens
+            # capacity / time-window — never the hard "必須" business rule.
+            spec_type = constraints.get("specified_type", "")
+            spec_ids = constraints.get("specified_staff_ids", set())
 
             if r.is_coupled and r.visit_id:
                 m = _COUPLED_RE.match(r.visit_id)
@@ -2587,6 +2671,10 @@ class AllocationEngine:
                     continue
                 if sex_lim == "男性のみ" and staff.gender != "男性":
                     continue
+                # Bug fix (Codex Bug A): required-staff invariant
+                if (spec_type == "必須" and spec_ids
+                        and staff.sid not in spec_ids):
+                    continue
                 # C-7: area restriction even in relaxed reinsertion path
                 if staff.areas and r.area and r.area not in staff.areas:
                     continue
@@ -2594,6 +2682,11 @@ class AllocationEngine:
                     continue
                 key = f"{staff.sid}|{r.date_str}"
                 if self.assign_count.get(key, 0) >= staff.max_per_day:
+                    continue
+                # Bug fix (Codex Bug B): same patient + same day must not
+                # be assigned to the same staff twice via relaxed rescue.
+                pd_key = f"{r.pid}|{r.date_str}"
+                if r.pid and staff.sid in self.pid_date_staff.get(pd_key, set()):
                     continue
                 blocked = self._get_blocked_intervals(staff.sid, r.date_str)
                 if any(iv.start <= 0 and iv.end >= 1440 for iv in blocked):
@@ -2632,6 +2725,10 @@ class AllocationEngine:
                     continue
                 if sex_lim == "男性のみ" and staff.gender != "男性":
                     continue
+                # Bug fix (Codex Bug A): required-staff invariant in L2 too
+                if (spec_type == "必須" and spec_ids
+                        and staff.sid not in spec_ids):
+                    continue
                 # C-7: area restriction even when relaxing time window
                 if staff.areas and r.area and r.area not in staff.areas:
                     continue
@@ -2639,6 +2736,10 @@ class AllocationEngine:
                     continue
                 key = f"{staff.sid}|{r.date_str}"
                 if self.assign_count.get(key, 0) >= staff.max_per_day:
+                    continue
+                # Bug fix (Codex Bug B): same-patient-same-day-same-staff
+                pd_key = f"{r.pid}|{r.date_str}"
+                if r.pid and staff.sid in self.pid_date_staff.get(pd_key, set()):
                     continue
                 blocked = self._get_blocked_intervals(staff.sid, r.date_str)
                 if any(iv.start <= 0 and iv.end >= 1440 for iv in blocked):
