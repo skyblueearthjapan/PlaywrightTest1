@@ -6,9 +6,11 @@ services:
     container_name: kaipoke-api
     restart: unless-stopped
     ports:
-      - "5000:5000"   # Flask API (内部/CLI用)
-      - "8443:5000"   # Flask API (Cloudflare HTTPS対応ポート)
-      - "6080:6080"   # noVNC WebSocket
+      # 127.0.0.1 bind: 外部到達は Cloudflare Tunnel (host の cloudflared) 経由のみ。
+      # インターネットからの直叩きを遮断する (K-0b セキュリティ是正)。
+      - "127.0.0.1:5000:5000"   # Flask API (内部/CLI用)
+      - "127.0.0.1:8443:5000"   # Flask API (Cloudflare HTTPS対応ポート)
+      - "127.0.0.1:6080:6080"   # noVNC WebSocket
     volumes:
       # ソースコード（git pullだけで反映されるように）
       - ./api_server.py:/app/api_server.py
@@ -31,8 +33,9 @@ services:
       - SCREEN_WIDTH=1280
       - SCREEN_HEIGHT=720
       - SCREEN_DEPTH=24
-      # API認証トークン（本番環境では変更してください）
-      - KAIPOKE_API_TOKEN=your-secure-token-here
+      # API認証トークン: 同ディレクトリの .env の KAIPOKE_API_TOKEN から注入 (必須)。
+      # 全 /api/* が Bearer 必須のため、未設定時は起動を失敗させる。
+      - KAIPOKE_API_TOKEN=${KAIPOKE_API_TOKEN:?KAIPOKE_API_TOKEN を .env に設定してください}
       # VPSホスト名
       - VPS_HOST=kaipoke-api.net
     healthcheck:

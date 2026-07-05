@@ -81,6 +81,11 @@ CORS(app, resources={
 
 # ====== 設定 ======
 API_TOKEN = os.environ.get("KAIPOKE_API_TOKEN", "default-dev-token")
+if API_TOKEN in ("default-dev-token", "your-secure-token-here"):
+    logging.warning(
+        "KAIPOKE_API_TOKEN がプレースホルダのままです。"
+        "全 /api/* が Bearer 必須のため、強いトークンを .env に設定してください。"
+    )
 VPS_HOST = os.environ.get("VPS_HOST", "kaipoke-api.net")
 NOVNC_PORT = os.environ.get("NOVNC_PORT", "6080")
 
@@ -148,6 +153,31 @@ def require_auth(f):
             return jsonify({"ok": False, "error": "Invalid token"}), 401
         return f(*args, **kwargs)
     return decorated
+
+
+# 認証なしで公開する API パス。
+# /api/status はコンテナ healthcheck (curl) が叩くため公開を維持する（機微情報は含まない）。
+PUBLIC_API_PATHS = {"/api/status"}
+
+
+@app.before_request
+def enforce_bearer_auth():
+    """全 /api/* エンドポイントに Bearer 認証を強制する。
+
+    従来は /api/kaipoke/* のみ @require_auth で保護され、中核 API
+    (apply/diff/export/expand/stop/allocate 等) が無認証だった。
+    Cloudflare Tunnel 経由でインターネットに露出しているため全面必須化する。
+    /novnc/verify など /api/ 以外のパスは対象外。CORS preflight (OPTIONS) は素通し。
+    """
+    if request.method == "OPTIONS":
+        return None
+    path = request.path
+    if not path.startswith("/api/") or path in PUBLIC_API_PATHS:
+        return None
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer ") or auth_header[7:] != API_TOKEN:
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
+    return None
 
 
 def add_security_headers(response: Response) -> Response:
