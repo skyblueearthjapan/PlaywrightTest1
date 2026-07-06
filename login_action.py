@@ -16,9 +16,11 @@ def run_login(save_state: bool = False, use_state: bool = False):
     .env ファイルから認証情報を読み込んでログインを実行
     """
     # .env ファイルから読み込み（全角文字を除去）
-    corp_id = os.environ.get("KAIPOKE_CORP_ID", "252650").strip()
-    user_id = os.environ.get("KAIPOKE_USER_ID", "sYgRH").strip()
-    password = os.environ.get("KAIPOKE_PASSWORD", "Yoriyori0401").strip()
+    # C-3 (kaipoke-credentials-config-design.md): ハードコード既定値を除去。
+    # 認証情報は CareFlow のアプリ内設定 (ジョブ payload 経由) または .env のみ。
+    corp_id = os.environ.get("KAIPOKE_CORP_ID", "").strip()
+    user_id = os.environ.get("KAIPOKE_USER_ID", "").strip()
+    password = os.environ.get("KAIPOKE_PASSWORD", "").strip()
 
     # 全角文字を半角に変換（念のため）
     import unicodedata

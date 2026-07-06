@@ -230,6 +230,106 @@ export_result_store = {
 }
 
 
+def apply_request_credentials(data):
+    """CareFlow から payload で渡されたログイン情報をプロセス環境へ反映する (C-3).
+
+    lib/common.login() は環境変数を都度読むため、ここで上書きすれば既存の
+    全フロー (expand/export/apply/diff) がそのまま新しい認証情報でログインする。
+    単一スロット (同時実行1) なのでプロセス env の差し替えで競合しない。
+    payload に credentials が無い場合は何もしない (.env フォールバック互換)。
+    値は絶対にログへ出さない。
+
+    アカウントが切り替わった場合 (corp_id/user_id が変化) は state.json を破棄し、
+    旧アカウントのセッションで別法人のデータを操作する事故を防ぐ。
+    """
+    creds = (data or {}).get("credentials") or {}
+    if not isinstance(creds, dict):
+        return
+    corp_id = str(creds.get("corp_id") or "").strip()
+    user_id = str(creds.get("user_id") or "").strip()
+    password = str(creds.get("password") or "")
+    if not (corp_id and user_id and password):
+        return
+
+    prev_corp = os.environ.get("KAIPOKE_CORP_ID", "").strip()
+    prev_user = os.environ.get("KAIPOKE_USER_ID", "").strip()
+    account_changed = (prev_corp and prev_corp != corp_id) or (
+        prev_user and prev_user != user_id
+    )
+
+    os.environ["KAIPOKE_CORP_ID"] = corp_id
+    os.environ["KAIPOKE_USER_ID"] = user_id
+    os.environ["KAIPOKE_PASSWORD"] = password
+    add_log("payload の認証情報を適用しました")
+
+    if account_changed and Path("state.json").exists():
+        try:
+            Path("state.json").unlink()
+            add_log("アカウント変更を検知したため state.json を破棄しました (次回新規ログイン)")
+        except OSError as e:
+            add_log(f"state.json の破棄に失敗: {e}")
+
+
+@app.route('/api/login-test', methods=['POST'])
+def api_login_test():
+    """接続テスト API (C-3): payload の認証情報で実ログインを1回試す (同期 ~60s)。
+
+    成功時は state.json も更新するため、以後のジョブはこのセッションを再利用できる。
+    失敗も HTTP 200 + ok:false で返す (CareFlow 側でメッセージ表示するため)。
+    """
+    global current_task
+
+    with job_state_lock:
+        if current_task["running"]:
+            return jsonify({
+                "success": False,
+                "error": "別のタスクが実行中です",
+                "current_task": dict(current_task),
+            }), 409
+        current_task = {
+            "running": True,
+            "command": "login-test",
+            "started_at": datetime.now().isoformat(),
+        }
+
+    try:
+        data = request.get_json() or {}
+        apply_request_credentials(data)
+        clear_stop()
+        add_log("login-test 開始")
+
+        from playwright.sync_api import sync_playwright
+
+        from lib.common import create_browser_context, login
+
+        with sync_playwright() as p:
+            # headed (Xvfb) で起動し noVNC で目視できるようにする。
+            # use_state=False + force=True で必ずログインフォームから試す。
+            browser, context, page = create_browser_context(
+                p, headless=False, use_state=False
+            )
+            try:
+                ok = login(page, save_state=True, context=context, force=True)
+            finally:
+                browser.close()
+
+        add_log(f"login-test 完了: ok={ok}")
+        message = (
+            "ログイン成功 (セッションを保存しました)"
+            if ok
+            else "ログイン失敗 (法人ID・ユーザーID・パスワードを確認してください)"
+        )
+        return jsonify({"ok": bool(ok), "message": message})
+
+    except Exception as e:
+        add_log(f"login-test エラー: {e}")
+        return jsonify({"ok": False, "message": f"接続テスト中にエラー: {e}"})
+
+    finally:
+        with job_state_lock:
+            current_task = {"running": False, "command": None, "started_at": None}
+
+
 @app.route('/api/status', methods=['GET'])
 def api_status():
     """サーバー状態確認"""
@@ -295,6 +395,7 @@ def api_expand():
 
     try:
         data = request.get_json() or {}
+        apply_request_credentials(data)  # C-3: アプリ内設定の認証情報を反映
         month = data.get("month", "2026-04")
 
         clear_stop()  # 非常停止フラグをクリア
@@ -425,6 +526,7 @@ def api_export():
     async_mode = False
     try:
         data = request.get_json() or {}
+        apply_request_credentials(data)  # C-3: アプリ内設定の認証情報を反映
         month = data.get("month", "2026-04")
         async_mode = data.get("async", False)
 
@@ -574,6 +676,7 @@ def api_apply():
 
     try:
         data = request.get_json() or {}
+        apply_request_credentials(data)  # C-3: アプリ内設定の認証情報を反映
         month = data.get("month", "2026-04")
         correction_sheet = data.get("correction_sheet", "data/correction_sheet.json")
         correction_data = data.get("correction_data")  # インラインデータ
@@ -780,6 +883,7 @@ def api_diff():
     try:
         import json as json_module
         data = request.get_json() or {}
+        apply_request_credentials(data)  # C-3: アプリ内設定の認証情報を反映
 
         # パターンA: Driveから自動読み込み
         use_drive = data.get("use_drive", False)
