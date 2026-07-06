@@ -322,8 +322,14 @@ def api_login_test():
         return jsonify({"ok": bool(ok), "message": message})
 
     except Exception as e:
-        add_log(f"login-test エラー: {e}")
-        return jsonify({"ok": False, "message": f"接続テスト中にエラー: {e}"})
+        add_log(f"login-test エラー: {type(e).__name__}")
+        # レビュー指摘 (MED-2): 例外メッセージに入力値が混入し得るため、
+        # レスポンス/CareFlow側DBへは例外の型名のみ返す (詳細はサーバーログ)。
+        return jsonify({
+            "ok": False,
+            "message": f"接続テスト中にエラーが発生しました ({type(e).__name__})。"
+                       "詳細は実行ログを確認してください。",
+        })
 
     finally:
         with job_state_lock:

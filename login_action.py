@@ -37,7 +37,8 @@ def run_login(save_state: bool = False, use_state: bool = False):
     # デバッグ: 読み込んだ値を表示（パスワードは一部伏せる）
     print(f"法人ID: {corp_id}")
     print(f"ユーザーID: {user_id}")
-    print(f"パスワード: {password[:2]}{'*' * (len(password)-2)}")
+    # レビュー指摘 (MED-1): 先頭2文字も出さない (docker logs への部分漏洩防止)。
+    print(f"パスワード: ****** ({len(password)}文字)")
 
     with sync_playwright() as p:
         # Firefox を使用（Windows環境でより安定）
