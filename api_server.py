@@ -52,6 +52,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from commands.expand import run_expand
 from commands.export import run_export
 from commands.auto_apply import run_auto_apply
+from commands.individual_tasks import run_individual_tasks
 from lib.stop_signal import request_stop, clear_stop, is_stop_requested
 from lib.diff_engine import (
     compare_schedules,
@@ -655,6 +656,66 @@ def api_export_result():
         "status": "no_result",
         "message": "export結果がありません。先に /api/export を呼び出してください。",
     })
+
+
+@app.route('/api/individual-tasks', methods=['POST'])
+def api_individual_tasks():
+    """個別業務(イベント)取得 API — read-only・同期 (~60-90s)
+
+    職員スケジュール画面(週間)から btnIndividual 行をパースして返す。
+    カイポケへの書込は一切しない。CareFlow「イベント取り込み」の取得側。
+
+    payload: { "date": "YYYY-MM-DD"(必須・この日を含む週を取得),
+               "credentials": {...}(任意・C-3) }
+    """
+    global current_task
+
+    with job_state_lock:
+        if current_task["running"]:
+            return jsonify({
+                "success": False,
+                "error": "別のタスクが実行中です",
+                "current_task": dict(current_task),
+            }), 409
+        current_task = {
+            "running": True,
+            "command": "individual_tasks",
+            "started_at": datetime.now().isoformat(),
+        }
+
+    try:
+        data = request.get_json() or {}
+        apply_request_credentials(data)  # C-3: アプリ内設定の認証情報を反映
+        date_str = str(data.get("date") or "")
+        try:
+            datetime.strptime(date_str, "%Y-%m-%d")
+        except ValueError:
+            return jsonify({
+                "success": False,
+                "error": "date (YYYY-MM-DD) が必要です",
+            }), 400
+
+        clear_stop()
+        add_log(f"individual-tasks 開始 (date={date_str})")
+        print(f"\n=== API: individual-tasks 開始 (date={date_str}) ===")
+
+        result = run_individual_tasks(date_str)
+        add_log(
+            f"individual-tasks 完了: {len(result.get('tasks', []))}件 "
+            f"(週 {result.get('week_start')}〜{result.get('week_end')})"
+        )
+        return jsonify({"success": True, "result": result})
+
+    except Exception as e:
+        add_log(f"individual-tasks エラー: {e}")
+        print(f"エラー: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"success": False, "error": str(e)}), 500
+
+    finally:
+        with job_state_lock:
+            current_task = {"running": False, "command": None, "started_at": None}
 
 
 @app.route('/api/apply', methods=['POST'])
