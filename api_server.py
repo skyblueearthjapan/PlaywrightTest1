@@ -699,7 +699,10 @@ def api_individual_tasks():
         add_log(f"individual-tasks 開始 (date={date_str})")
         print(f"\n=== API: individual-tasks 開始 (date={date_str}) ===")
 
-        result = run_individual_tasks(date_str)
+        # 他オペ (export/expand) と同じく既定は headed — Xvfb 上に描画され
+        # ライブモニター (VNC) で進行が見える。payload で headless 上書き可。
+        headless = data.get("headless", False)
+        result = run_individual_tasks(date_str, headless=headless)
         add_log(
             f"individual-tasks 完了: {len(result.get('tasks', []))}件 "
             f"(週 {result.get('week_start')}〜{result.get('week_end')})"
