@@ -32,6 +32,22 @@ from lib.individual_tasks_parser import parse_header_dates, parse_individual_tas
 _ALL_STAFF_LABEL = "－"
 
 
+def _wait_reload(page) -> None:
+    """onchange/submitDate による画面再読込を待つ。
+
+    networkidle はページに常駐通信があると永遠にアイドルにならず
+    TimeoutError で全体が落ちる (2026-08-17 本番事故)。lib/common.py と同じく
+    タイムアウト時は domcontentloaded で妥協して続行する。正しさは呼び出し側の
+    値検証 (currentDate/「－」再検証/ヘッダ日付レンジ/0件×btnIndividual) が担保する。
+    """
+    try:
+        page.wait_for_load_state("networkidle", timeout=15000)
+    except Exception:
+        print("  (networkidle待機がタイムアウト、domcontentloadedで続行)")
+        page.wait_for_load_state("domcontentloaded", timeout=15000)
+    page.wait_for_timeout(1500)
+
+
 def _select_all_staff(page) -> None:
     """職員名セレクトを「－」(全職員) にする。onchange で画面が再読込される。"""
     current = page.eval_on_selector(
@@ -41,8 +57,7 @@ def _select_all_staff(page) -> None:
     if current == _ALL_STAFF_LABEL:
         return
     page.locator("select#staffSelected").select_option(label=_ALL_STAFF_LABEL)
-    page.wait_for_load_state("networkidle")
-    page.wait_for_timeout(1500)
+    _wait_reload(page)
 
 
 def _set_week(page, date_str: str) -> None:
@@ -59,8 +74,7 @@ def _set_week(page, date_str: str) -> None:
         }""",
         target,
     )
-    page.wait_for_load_state("networkidle")
-    page.wait_for_timeout(1500)
+    _wait_reload(page)
     after = page.eval_on_selector("#currentDate", "el => el.value")
     if after != target:
         raise RuntimeError(f"週の切替に失敗: currentDate={after!r} (期待 {target!r})")

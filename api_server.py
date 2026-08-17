@@ -230,6 +230,16 @@ export_result_store = {
     "error": None,
 }
 
+# individual-tasks(イベント取得)結果を保存（非同期完了後にCareFlowがポーリング取得）
+# job_id = 呼び出し側(CareFlow)発行の相関ID。RPA再起動や別ジョブによる
+# 結果の取り違えをポーリング側で検知できるようにエコーバックする。
+individual_tasks_result_store = {
+    "result": None,
+    "completed_at": None,
+    "error": None,
+    "job_id": None,
+}
+
 
 def apply_request_credentials(data):
     """CareFlow から payload で渡されたログイン情報をプロセス環境へ反映する (C-3).
@@ -660,15 +670,17 @@ def api_export_result():
 
 @app.route('/api/individual-tasks', methods=['POST'])
 def api_individual_tasks():
-    """個別業務(イベント)取得 API — read-only・同期 (~60-90s)
+    """個別業務(イベント)取得 API — read-only・非同期モード対応 (~60-90s)
 
     職員スケジュール画面(週間)から btnIndividual 行をパースして返す。
     カイポケへの書込は一切しない。CareFlow「イベント取り込み」の取得側。
 
     payload: { "date": "YYYY-MM-DD"(必須・この日を含む週を取得),
-               "credentials": {...}(任意・C-3) }
+               "credentials": {...}(任意・C-3),
+               "async": true(任意・即応答し /api/individual-tasks/result でポーリング),
+               "job_id": "..."(任意・asyncの相関ID・resultにエコーバック) }
     """
-    global current_task
+    global current_task, individual_tasks_result_store
 
     with job_state_lock:
         if current_task["running"]:
@@ -683,6 +695,7 @@ def api_individual_tasks():
             "started_at": datetime.now().isoformat(),
         }
 
+    async_mode = False
     try:
         data = request.get_json() or {}
         apply_request_credentials(data)  # C-3: アプリ内設定の認証情報を反映
@@ -695,13 +708,70 @@ def api_individual_tasks():
                 "error": "date (YYYY-MM-DD) が必要です",
             }), 400
 
+        async_mode = bool(data.get("async", False))
+        job_id = str(data.get("job_id") or "") or None
+
         clear_stop()
-        add_log(f"individual-tasks 開始 (date={date_str})")
-        print(f"\n=== API: individual-tasks 開始 (date={date_str}) ===")
+        add_log(f"individual-tasks 開始 (date={date_str}, async={async_mode})")
+        print(f"\n=== API: individual-tasks 開始 (date={date_str}, async={async_mode}) ===")
 
         # 他オペ (export/expand) と同じく既定は headed — Xvfb 上に描画され
         # ライブモニター (VNC) で進行が見える。payload で headless 上書き可。
         headless = data.get("headless", False)
+
+        if async_mode:
+            # 非同期モード: スレッド起動前に store を初期化しておく (起動直後の
+            # ポーリングが前回ジョブの残骸を拾わないように job_id をここで確定)。
+            with job_state_lock:
+                individual_tasks_result_store = {
+                    "result": None,
+                    "completed_at": None,
+                    "error": None,
+                    "job_id": job_id,
+                }
+
+            def run_individual_tasks_async():
+                global current_task, individual_tasks_result_store
+                try:
+                    result = run_individual_tasks(date_str, headless=headless)
+                    add_log(
+                        f"individual-tasks 完了: {len(result.get('tasks', []))}件 "
+                        f"(週 {result.get('week_start')}〜{result.get('week_end')})"
+                    )
+                    with job_state_lock:
+                        individual_tasks_result_store = {
+                            "result": result,
+                            "completed_at": datetime.now().isoformat(),
+                            "error": None,
+                            "job_id": job_id,
+                        }
+                except Exception as e:
+                    add_log(f"individual-tasks エラー: {e}")
+                    print(f"エラー: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    with job_state_lock:
+                        individual_tasks_result_store = {
+                            "result": None,
+                            "completed_at": datetime.now().isoformat(),
+                            "error": str(e),
+                            "job_id": job_id,
+                        }
+                finally:
+                    with job_state_lock:
+                        current_task = {"running": False, "command": None, "started_at": None}
+
+            thread = threading.Thread(target=run_individual_tasks_async, daemon=True)
+            thread.start()
+
+            return jsonify({
+                "success": True,
+                "async": True,
+                "job_id": job_id,
+                "message": "個別業務の取得を開始しました。/api/individual-tasks/result でポーリングしてください。",
+            })
+
+        # 同期モード: 従来どおり結果を直接返す (旧CareFlow互換)
         result = run_individual_tasks(date_str, headless=headless)
         add_log(
             f"individual-tasks 完了: {len(result.get('tasks', []))}件 "
@@ -714,11 +784,69 @@ def api_individual_tasks():
         print(f"エラー: {e}")
         import traceback
         traceback.print_exc()
+        # async スレッド起動前の例外でスロットが塞がったままにならないよう明示リセット
+        # (export と同型。thread.start() 後は即 return するためここには来ない)
+        with job_state_lock:
+            current_task = {"running": False, "command": None, "started_at": None}
         return jsonify({"success": False, "error": str(e)}), 500
 
     finally:
-        with job_state_lock:
-            current_task = {"running": False, "command": None, "started_at": None}
+        # 同期モードの場合のみここでリセット（非同期はスレッド内でリセット）
+        if not async_mode:
+            with job_state_lock:
+                current_task = {"running": False, "command": None, "started_at": None}
+
+
+@app.route('/api/individual-tasks/result', methods=['GET'])
+def api_individual_tasks_result():
+    """個別業務(イベント)取得の結果を取得（ポーリング用・/api/export/result の同型）
+
+    - status=running: まだ実行中
+    - status=completed: 完了（result あり）
+    - status=error: エラーで終了
+    - status=no_result: まだ一度も実行されていない（RPA再起動後を含む）
+    job_id は起動時に渡された相関IDのエコーバック。呼び出し側は一致を検証すること。
+    """
+    with job_state_lock:
+        running = (
+            current_task.get("running", False)
+            and current_task.get("command") == "individual_tasks"
+        )
+        started_at = current_task.get("started_at")
+        store = dict(individual_tasks_result_store)
+
+    if running:
+        return jsonify({
+            "success": True,
+            "status": "running",
+            "job_id": store.get("job_id"),
+            "started_at": started_at,
+        })
+
+    if store.get("error"):
+        return jsonify({
+            "success": False,
+            "status": "error",
+            "job_id": store.get("job_id"),
+            "error": store["error"],
+            "completed_at": store.get("completed_at"),
+        })
+
+    if store.get("result"):
+        return jsonify({
+            "success": True,
+            "status": "completed",
+            "job_id": store.get("job_id"),
+            "result": store["result"],
+            "completed_at": store.get("completed_at"),
+        })
+
+    return jsonify({
+        "success": False,
+        "status": "no_result",
+        "job_id": store.get("job_id"),
+        "message": "individual-tasks 結果がありません。先に /api/individual-tasks を呼び出してください。",
+    })
 
 
 @app.route('/api/apply', methods=['POST'])
