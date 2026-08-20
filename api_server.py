@@ -240,6 +240,14 @@ individual_tasks_result_store = {
     "job_id": None,
 }
 
+# individual-tasks-apply(イベント書き込み・Phase 3)結果ストア (同上の流儀)
+individual_tasks_apply_result_store = {
+    "result": None,
+    "completed_at": None,
+    "error": None,
+    "job_id": None,
+}
+
 
 def apply_request_credentials(data):
     """CareFlow から payload で渡されたログイン情報をプロセス環境へ反映する (C-3).
@@ -847,6 +855,127 @@ def api_individual_tasks_result():
         "job_id": store.get("job_id"),
         "message": "individual-tasks 結果がありません。先に /api/individual-tasks を呼び出してください。",
     })
+
+
+@app.route('/api/individual-tasks-apply', methods=['POST'])
+def api_individual_tasks_apply():
+    """個別業務(イベント)書き込み API — Phase 3 (kaipoke-event-two-way-design.md §3-①)
+
+    職員スケジュール画面へ個別業務を新規登録する (更新・削除はしない)。
+    重複 (同 staff×日×時刻×名称) は skip。async:true + job_id 推奨 (CareFlow は
+    /api/individual-tasks-apply/result でポーリング)。
+
+    payload: { "items": [{external_ref, staff_internal_id, date, start, end, title}],
+               "credentials": {...}(任意), "async": true, "job_id": "..." }
+    """
+    global current_task, individual_tasks_apply_result_store
+    from commands.individual_tasks_apply import run_individual_tasks_apply
+
+    with job_state_lock:
+        if current_task["running"]:
+            return jsonify({
+                "success": False,
+                "error": "別のタスクが実行中です",
+                "current_task": dict(current_task),
+            }), 409
+        current_task = {
+            "running": True,
+            "command": "individual_tasks_apply",
+            "started_at": datetime.now().isoformat(),
+        }
+
+    async_mode = False
+    try:
+        data = request.get_json() or {}
+        apply_request_credentials(data)
+        items = data.get("items")
+        if not isinstance(items, list) or not items:
+            return jsonify({"success": False, "error": "items (非空配列) が必要です"}), 400
+
+        async_mode = bool(data.get("async", False))
+        job_id = str(data.get("job_id") or "") or None
+        headless = data.get("headless", False)
+
+        clear_stop()
+        add_log(f"individual-tasks-apply 開始 ({len(items)}件, async={async_mode})")
+        print(f"=== API: individual-tasks-apply 開始 ({len(items)}件) ===")
+
+        if async_mode:
+            with job_state_lock:
+                individual_tasks_apply_result_store = {
+                    "result": None, "completed_at": None, "error": None, "job_id": job_id,
+                }
+
+            def run_apply_async_events():
+                global current_task, individual_tasks_apply_result_store
+                try:
+                    result = run_individual_tasks_apply(items, headless=headless)
+                    add_log(f"individual-tasks-apply 完了: ok={result.get('ok')}/{result.get('total')}")
+                    with job_state_lock:
+                        individual_tasks_apply_result_store = {
+                            "result": result, "completed_at": datetime.now().isoformat(),
+                            "error": None, "job_id": job_id,
+                        }
+                except Exception as e:
+                    add_log(f"individual-tasks-apply エラー: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    with job_state_lock:
+                        individual_tasks_apply_result_store = {
+                            "result": None, "completed_at": datetime.now().isoformat(),
+                            "error": str(e), "job_id": job_id,
+                        }
+                finally:
+                    with job_state_lock:
+                        current_task = {"running": False, "command": None, "started_at": None}
+
+            thread = threading.Thread(target=run_apply_async_events, daemon=True)
+            thread.start()
+            return jsonify({"success": True, "async": True, "job_id": job_id})
+
+        result = run_individual_tasks_apply(items, headless=headless)
+        add_log(f"individual-tasks-apply 完了: ok={result.get('ok')}/{result.get('total')}")
+        return jsonify({"success": True, "result": result})
+
+    except Exception as e:
+        add_log(f"individual-tasks-apply エラー: {e}")
+        import traceback
+        traceback.print_exc()
+        with job_state_lock:
+            current_task = {"running": False, "command": None, "started_at": None}
+        return jsonify({"success": False, "error": str(e)}), 500
+
+    finally:
+        if not async_mode:
+            with job_state_lock:
+                current_task = {"running": False, "command": None, "started_at": None}
+
+
+@app.route('/api/individual-tasks-apply/result', methods=['GET'])
+def api_individual_tasks_apply_result():
+    """イベント書き込みの結果取得（ポーリング用・individual-tasks/result と同型）"""
+    with job_state_lock:
+        running = (
+            current_task.get("running", False)
+            and current_task.get("command") == "individual_tasks_apply"
+        )
+        started_at = current_task.get("started_at")
+        store = dict(individual_tasks_apply_result_store)
+
+    if running:
+        return jsonify({"success": True, "status": "running",
+                        "job_id": store.get("job_id"), "started_at": started_at})
+    if store.get("error"):
+        return jsonify({"success": False, "status": "error",
+                        "job_id": store.get("job_id"), "error": store["error"],
+                        "completed_at": store.get("completed_at")})
+    if store.get("result"):
+        return jsonify({"success": True, "status": "completed",
+                        "job_id": store.get("job_id"), "result": store["result"],
+                        "completed_at": store.get("completed_at")})
+    return jsonify({"success": False, "status": "no_result",
+                    "job_id": store.get("job_id"),
+                    "message": "individual-tasks-apply 結果がありません。"})
 
 
 @app.route('/api/apply', methods=['POST'])
