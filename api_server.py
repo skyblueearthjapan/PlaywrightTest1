@@ -1077,6 +1077,17 @@ def api_apply():
                     target_users=target_users,
                     progress_callback=on_progress,
                 )
+                # 2026-08-21 (#8): 実行ログの尻尾を結果に添付 (失敗解析用)。
+                # エンジンの print は supervisor 経由で api.log へ入るため、
+                # 完了直後の末尾 ~30KB がこの実行のログをほぼ確実に含む。
+                try:
+                    with open("/var/log/supervisor/api.log", "rb") as _lf:
+                        _lf.seek(0, 2)
+                        _sz = _lf.tell()
+                        _lf.seek(max(0, _sz - 30000))
+                        result["log_tail"] = _lf.read().decode("utf-8", errors="replace")
+                except Exception as _le:
+                    result["log_tail"] = f"(log capture failed: {_le})"
                 add_log(f"apply 完了: success={result.get('success', 0)}, failed={result.get('failed', 0)}")
                 with job_state_lock:
                     apply_result_store = {
