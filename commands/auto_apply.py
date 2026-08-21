@@ -63,6 +63,10 @@ def normalize_name(name: str) -> str:
     }
     for old, new in variant_map.items():
         name = name.replace(old, new)
+    # スペース完全除去 (2026-08-21 C2実機テストで発覚: らく助「髙梨桂子」と
+    # カイポケ「髙梨　桂子」の空白差で職員選択が失敗し「-」登録になった)。
+    # name_matches は包含判定のため、比較キーから空白を消すのが最も頑健。
+    name = re.sub(r"[\s\u3000]+", "", name)
     return name
 
 
@@ -1213,6 +1217,32 @@ def close_edit_dialog(page) -> bool:
         return False
 
 
+def _schedule_entry_exists(page, day: int, start_time: str) -> bool:
+    """指定日の行に start_time のエントリが残っているか (削除検証用・クリックしない).
+
+    2026-08-21 C2実機テストで発覚: 削除ボタンのクリックが無反応でも成功扱いになり、
+    時間変更編集 (削除→再追加) が「元行残存 + 新行追加」の二重化に化けた。
+    削除後にこの関数で実在検証し、残っていれば失敗として扱う。
+    """
+    day_str = str(day)
+    try:
+        rows = page.locator("table tr").all()
+        for row in rows:
+            try:
+                day_cells = row.locator("td.tac.nowrap").all()
+                if not any((c.text_content() or "").strip() == day_str for c in day_cells):
+                    continue
+                areas = row.locator("div.service-detail-area").all()
+                for a in areas:
+                    if start_time in (a.inner_text() or ""):
+                        return True
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return False
+
+
 def delete_schedule_entry(page, day: int, start_time: str, dry_run: bool = False) -> bool:
     """
     スケジュールエントリを削除（医療保険・介護保険共通）
@@ -1301,7 +1331,12 @@ def delete_schedule_entry(page, day: int, start_time: str, dry_run: bool = False
         except Exception:
             pass
 
-        print("    削除完了")
+        # 削除検証 (上記 _schedule_entry_exists docstring 参照)。
+        if _schedule_entry_exists(page, day, start_time):
+            print("    削除検証NG: エントリがまだ残っています (削除失敗として扱う)")
+            close_edit_dialog(page)
+            return False
+        print("    削除完了 (検証OK)")
         return True
 
     except Exception as e:
