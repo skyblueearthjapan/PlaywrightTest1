@@ -1303,8 +1303,13 @@ def delete_schedule_entry(page, day: int, start_time: str, dry_run: bool = False
 
         # HTML確認ダイアログ（ネイティブ confirm でない場合のフォールバック）
         try:
+            # 2026-08-21: 素の「削除」ボタン/inputも対象に (確認モーダルの
+            # 文言が「削除」だけのケースを取りこぼし、削除が無反応になっていた疑い)。
+            # 元の #inPopupBtnDel を再度押さないよう :not で除外する。
             ok_btn = page.locator(
-                "button:has-text('OK'), button:has-text('はい'), button:has-text('削除する')"
+                "button:has-text('OK'), button:has-text('はい'), button:has-text('削除する'), "
+                "button:has-text('削除'), input[value='削除']:not(#inPopupBtnDel), "
+                "input[value='OK'], input[value='はい']"
             ).first
             if ok_btn.is_visible(timeout=2000):
                 _safe_click(page, ok_btn, timeout=5000, description="削除確認OKボタン")
@@ -1334,6 +1339,16 @@ def delete_schedule_entry(page, day: int, start_time: str, dry_run: bool = False
         # 削除検証 (上記 _schedule_entry_exists docstring 参照)。
         if _schedule_entry_exists(page, day, start_time):
             print("    削除検証NG: エントリがまだ残っています (削除失敗として扱う)")
+            # デバッグ保存 (2026-08-21): 何のダイアログ/状態で止まったかを残す。
+            try:
+                import datetime as _dt
+                _ts = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+                page.screenshot(path=f"/app/artifacts/delete_verify_ng_{day}_{_ts}.png", full_page=True)
+                with open(f"/app/artifacts/delete_verify_ng_{day}_{_ts}.html", "w", encoding="utf-8") as _f:
+                    _f.write(page.content())
+                print(f"    デバッグ保存: delete_verify_ng_{day}_{_ts}.png/.html")
+            except Exception as _e:
+                print(f"    デバッグ保存失敗: {_e}")
             close_edit_dialog(page)
             return False
         print("    削除完了 (検証OK)")
