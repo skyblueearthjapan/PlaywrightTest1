@@ -1494,7 +1494,62 @@ def _select_and_wait(page, select_locator, label: str, field_name: str) -> bool:
         return False
 
 
-def fill_medical_insurance_fields(page) -> bool:
+
+# ---------------------------------------------------------------------------
+# S3 (2026-08-23): らく助のサービス内容に応じて 医療保険の3選択を切り替える。
+# Phase 0 プローブ (commands/probe_service_options.py) で採取した value:
+#   サービス区分 #inPopupEstimate1: 01=訪問看護 / 02=精神科訪問看護
+#   基本療養費   #inPopupEstimate2: 01=基本療養費Ⅰ (一般) / 01=精神科基本療養費Ⅰ (精神科)
+#   職員資格     #inPopupEstimate3: 01=看護師等 / 03=准看護師 (02 はPT等/OTで らく助は未使用)
+# 文言ではなく value で選ぶ (文言変更に強い)。未知の service_type は従来既定 (精神科×Ⅰ×看護師等)。
+# ---------------------------------------------------------------------------
+SERVICE_SELECT_VALUES = {
+    "estimate1": {"psychiatric": "02", "general": "01"},
+    "estimate2": {"psychiatric": "01", "general": "01"},
+    "estimate3": {"nurse": "01", "assistant_nurse": "03"},
+}
+
+
+def resolve_medical_selects(service_type=None) -> dict:
+    """service_type (例: 精神基本療養費Ⅰ・准看) → 各 select の value と期待されるサービス内容."""
+    st = (service_type or "").strip()
+    category = "general" if (st and "精神" not in st) else "psychiatric"
+    grade = "assistant_nurse" if "准看" in st else "nurse"
+    return {
+        "category": category,
+        "grade": grade,
+        "estimate1": SERVICE_SELECT_VALUES["estimate1"][category],
+        "estimate2": SERVICE_SELECT_VALUES["estimate2"][category],
+        "estimate3": SERVICE_SELECT_VALUES["estimate3"][grade],
+        "expected_content": (
+            ("精神基本療養費Ⅰ" if category == "psychiatric" else "基本療養費Ⅰ")
+            + "・" + ("准看" if grade == "assistant_nurse" else "正看")
+        ),
+    }
+
+
+def _select_value_and_wait(page, select_locator, value: str, field_name: str) -> bool:
+    """value 指定で select してAJAX完了まで待機 (Kaipoke JSF対応)."""
+    try:
+        for _ in range(10):
+            if len(select_locator.locator("option").all()) > 1:
+                break
+            page.wait_for_timeout(500)
+        select_locator.select_option(value=value)
+        try:
+            page.wait_for_load_state("networkidle", timeout=5000)
+        except Exception:
+            pass
+        page.wait_for_timeout(1000)
+        label = select_locator.locator('option[value="%s"]' % value).first.text_content() or value
+        print("    %s: %s (value=%s)" % (field_name, label.strip(), value))
+        return True
+    except Exception as e:
+        print("    %s設定エラー (value=%s): %s" % (field_name, value, e))
+        return False
+
+
+def fill_medical_insurance_fields(page, service_type=None) -> bool:
     """
     医療保険の新規追加: 上部セクションのフィールドを設定
 
@@ -1568,52 +1623,25 @@ def fill_medical_insurance_fields(page) -> bool:
             print("    警告: radio#inPopupInsuranceDivision02 が見つかりません")
             return False
 
-        # サービス区分: 精神科訪問看護（AJAX後にオプションが読み込まれる）
+        # S3: らく助のサービス内容に応じて value で選ぶ (既定は 精神科×Ⅰ×看護師等)
+        sel = resolve_medical_selects(service_type)
+        print("    サービス内容の分岐: %s → 区分=%s 資格=%s (期待: %s)" % (
+            service_type or "(未指定→既定)", sel["category"], sel["grade"], sel["expected_content"]))
+
         estimate1 = page.locator("select#inPopupEstimate1")
         if estimate1.is_visible(timeout=5000):
-            # オプション読み込み待ち
-            for _ in range(10):
-                options = estimate1.locator("option").all()
-                if len(options) > 1:
-                    break
-                page.wait_for_timeout(500)
+            if not _select_value_and_wait(page, estimate1, sel["estimate1"], "サービス区分"):
+                return False
 
-            options = estimate1.locator("option").all()
-            for opt in options:
-                if "精神科訪問看護" in opt.text_content():
-                    _select_and_wait(page, estimate1, opt.text_content(), "サービス区分")
-                    break
-
-        # 基本療養費: Ⅰ（AJAX後に連動で読み込まれる）
         estimate2 = page.locator("select#inPopupEstimate2")
         if estimate2.is_visible(timeout=5000):
-            for _ in range(10):
-                options = estimate2.locator("option").all()
-                if len(options) > 1:
-                    break
-                page.wait_for_timeout(500)
+            if not _select_value_and_wait(page, estimate2, sel["estimate2"], "基本療養費"):
+                return False
 
-            options = estimate2.locator("option").all()
-            for opt in options:
-                text = opt.text_content()
-                if "Ⅰ" in text and "Ⅱ" not in text and "Ⅲ" not in text and "Ⅳ" not in text:
-                    _select_and_wait(page, estimate2, text, "基本療養費")
-                    break
-
-        # 職員資格: 看護師等（AJAX後に連動で読み込まれる）
         estimate3 = page.locator("select#inPopupEstimate3")
         if estimate3.is_visible(timeout=5000):
-            for _ in range(10):
-                options = estimate3.locator("option").all()
-                if len(options) > 1:
-                    break
-                page.wait_for_timeout(500)
-
-            options = estimate3.locator("option").all()
-            for opt in options:
-                if "看護師等" in opt.text_content():
-                    _select_and_wait(page, estimate3, opt.text_content(), "職員資格")
-                    break
+            if not _select_value_and_wait(page, estimate3, sel["estimate3"], "職員資格"):
+                return False
 
         return True
 
@@ -1751,7 +1779,7 @@ def add_schedule_entry(page, correction: Correction, dry_run: bool = False, _ret
 
         # Step 2: 保険種別に応じた上部フィールド設定
         if correction.is_medical_insurance():
-            if not fill_medical_insurance_fields(page):
+            if not fill_medical_insurance_fields(page, correction.service_type):
                 close_edit_dialog(page)
                 return False
         elif correction.is_nursing_insurance():
@@ -1763,7 +1791,7 @@ def add_schedule_entry(page, correction: Correction, dry_run: bool = False, _ret
         else:
             # business_type が空 or 不明 → 医療保険をデフォルトとする
             print(f"    警告: 業務種別 '{correction.business_type}' が不明です。医療保険として処理します。")
-            if not fill_medical_insurance_fields(page):
+            if not fill_medical_insurance_fields(page, correction.service_type):
                 close_edit_dialog(page)
                 return False
 
@@ -1819,7 +1847,7 @@ def add_schedule_entry(page, correction: Correction, dry_run: bool = False, _ret
                     page.wait_for_timeout(2000)
 
                     # 医療保険に戻す
-                    if not fill_medical_insurance_fields(page):
+                    if not fill_medical_insurance_fields(page, correction.service_type):
                         print("    リトライ: 医療保険フィールド再設定失敗")
                         close_edit_dialog(page)
                         return False
