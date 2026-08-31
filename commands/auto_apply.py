@@ -823,6 +823,68 @@ def change_date(page, new_day: int) -> bool:
         return False
 
 
+# =============================================================================
+# 職種 (JobDivision) 自動設定 (2026-09-01)
+# 経緯: edit_staff は chargeStaffNId1 (職員) だけ設定し、職員を変えると
+# カイポケ側で 職種 セレクトが未選択に戻るため、RPA が触った行の職種が
+# 全て「未選択」になっていた (2026-08-31 PO 指摘・9月第1週 51 行)。
+# =============================================================================
+
+# 氏名(正規化) → 職種。カイポケの職種セレクトの表記に完全一致させること。
+STAFF_QUALIFICATIONS = {
+    "熊澤妙子": "看護師",
+    "本名大": "看護師",
+    "髙梨桂子": "看護師",
+    "宇田川優莉": "看護師",
+    "川名千恵": "看護師",
+    "小西彩稀": "看護師",
+    "高岡真由美": "准看護師",
+}
+
+
+def _staff_qualification(name: str):
+    n = normalize_name(name or "")
+    for k, q in STAFF_QUALIFICATIONS.items():
+        if normalize_name(k) == n:
+            return q
+    return None
+
+
+def set_job_division(page, slot: int, staff_name: str = "", clear: bool = False) -> bool:
+    """職員N の職種セレクト (chargeStaff{N}JobDivision1) を設定する。
+
+    失敗しても呼び出し元のフローは止めない (ログのみ)。
+    「看護師」は「准看護師」の部分文字列なので、部分一致は使わず完全一致のみ。
+    """
+    try:
+        sel = page.locator(f"select#chargeStaff{slot}JobDivision1")
+        if not sel.is_visible(timeout=2000):
+            print(f"    職種{slot}: セレクト未表示のためスキップ")
+            return False
+        if clear:
+            sel.select_option(index=0)
+            page.wait_for_timeout(200)
+            print(f"    職種{slot}クリア")
+            return True
+        qual = _staff_qualification(staff_name)
+        if qual is None:
+            print(f"    職種{slot}: '{staff_name}' の資格が未登録のため未選択のまま (STAFF_QUALIFICATIONS に追加を)")
+            return False
+        options = sel.locator("option").all()
+        texts = [(o.text_content() or "").strip() for o in options]
+        for idx, t in enumerate(texts):
+            if t == qual:
+                sel.select_option(index=idx)
+                page.wait_for_timeout(200)
+                print(f"    職種{slot}設定: {qual}")
+                return True
+        print(f"    職種{slot}: 選択肢に '{qual}' が無い。選択肢={texts}")
+        return False
+    except Exception as e:
+        print(f"    職種{slot}設定エラー(続行): {e}")
+        return False
+
+
 def edit_staff(page, staff1_name: str, staff2_name: str = "",
                for_new_entry: bool = False) -> bool:
     """
@@ -946,6 +1008,7 @@ def edit_staff(page, staff1_name: str, staff2_name: str = "",
                     staff1_select.select_option(index=0)
                     page.wait_for_timeout(300)
                     print(f"    職員1設定: 未割当（'-'を選択）")
+                    set_job_division(page, 1, clear=True)
                 else:
                     options = staff1_select.locator("option").all()
                     selected = False
@@ -956,6 +1019,7 @@ def edit_staff(page, staff1_name: str, staff2_name: str = "",
                             page.wait_for_timeout(300)
                             print(f"    職員1設定: {staff1_name}")
                             selected = True
+                            set_job_division(page, 1, staff1_name)
                             break
                     if not selected:
                         print(f"    警告: 職員1 '{staff1_name}' が選択肢に見つかりません")
@@ -977,6 +1041,7 @@ def edit_staff(page, staff1_name: str, staff2_name: str = "",
                         page.wait_for_timeout(300)
                         print(f"    職員2設定: {staff2_name}")
                         selected = True
+                        set_job_division(page, 2, staff2_name)
                         break
                 if not selected:
                     print(f"    警告: 職員2 '{staff2_name}' が選択肢に見つかりません")
@@ -985,6 +1050,7 @@ def edit_staff(page, staff1_name: str, staff2_name: str = "",
                 staff2_select.select_option(index=0)
                 page.wait_for_timeout(300)
                 print("    職員2クリア")
+                set_job_division(page, 2, clear=True)
 
         return True
 
