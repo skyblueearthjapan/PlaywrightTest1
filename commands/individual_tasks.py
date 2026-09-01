@@ -112,9 +112,22 @@ def run_individual_tasks(date_str: str, headless: bool = True) -> dict:
             html = page.content()
             dates = parse_header_dates(html)
             if not (dates[0] <= target <= dates[-1]):
-                raise RuntimeError(
-                    f"指定日 {date_str} が表示週 {dates[0]}〜{dates[-1]} に含まれていません"
-                )
+                # 月跨ぎ週の防御 (2026-09-01 実測): 月初側の月コンテキストでは前月末日
+                # (例: 9月画面で 8/31) を起点にできず、表示週が 9/1〜 に丸められる。
+                # 翌日を起点に切替え直し、取得できた実際の週 (week_dates) を返す —
+                # 呼び出し側 (らく助) が week_dates で対象日を絞る。
+                from datetime import timedelta as _td
+                alt = target + _td(days=1)
+                print(f"表示週ズレ: {dates[0]}〜{dates[-1]} (指定 {date_str}) → {alt} で再試行")
+                _set_week(page, alt.isoformat())
+                _select_all_staff(page)
+                html = page.content()
+                dates = parse_header_dates(html)
+                if not (dates[0] <= alt <= dates[-1]):
+                    raise RuntimeError(
+                        f"指定日 {date_str} が表示週 {dates[0]}〜{dates[-1]} に含まれていません"
+                        f" (翌日 {alt} での再試行も失敗)"
+                    )
 
             tasks = parse_individual_tasks(html)
 
