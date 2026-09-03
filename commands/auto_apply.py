@@ -20,20 +20,30 @@
 import sys
 import re
 import datetime
+import threading
+import unicodedata
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from playwright.sync_api import sync_playwright
-from lib.common import (
-    create_browser_context,
-    setup_monthly_schedule_page,
-    ensure_session,
-    save_artifacts,
-    parse_month,
-    goto_monthly_schedule,
-    set_service_month,
-)
+# Playwright 未導入環境 (純Pythonのヘルパー単体テスト等) でも
+# このモジュールを import できるようにする。実行時に None なら当然動かない。
+try:
+    from playwright.sync_api import sync_playwright
+    from lib.common import (
+        create_browser_context,
+        setup_monthly_schedule_page,
+        ensure_session,
+        save_artifacts,
+        parse_month,
+        goto_monthly_schedule,
+        set_service_month,
+    )
+except ImportError as _pw_import_err:  # pragma: no cover
+    sync_playwright = None
+    create_browser_context = setup_monthly_schedule_page = ensure_session = None
+    save_artifacts = parse_month = goto_monthly_schedule = set_service_month = None
+    print(f"[warn] Playwright未導入のため実行機能は無効です: {_pw_import_err}", file=sys.stderr)
 from lib.diff_engine import load_correction_sheet, Correction, parse_time
 from lib.stop_signal import is_stop_requested, clear_stop
 
@@ -74,6 +84,108 @@ def normalize_name(name: str) -> str:
 def name_matches(needle: str, haystack: str) -> bool:
     """名前が含まれているか判定（全角/半角スペースを無視して比較）"""
     return normalize_name(needle) in normalize_name(haystack)
+
+
+# --- 失敗理由の記録 (run_auto_apply の details["reason"] 用) -------------------
+# 2026-09-03: 本番178件中22件失敗した際、results から原因が読み取れず
+# ログを目視するしかなかった。失敗地点で理由を積み、Phase 1 で回収する。
+# run_auto_apply は API サーバのデーモンスレッドから呼ばれるため、
+# スレッド間で理由が混ざらないよう threading.local に持つ。
+_last_failure_reason = threading.local()
+
+
+def _set_reason(reason: str) -> None:
+    """直近の失敗理由を記録する（後勝ち: 最後に判明した理由が残る・スレッド毎）"""
+    _last_failure_reason.value = reason
+
+
+def _pop_reason():
+    """記録済みの失敗理由を取り出してクリアする（未記録なら None）"""
+    reason = getattr(_last_failure_reason, "value", None)
+    _last_failure_reason.value = None
+    return reason
+
+
+def _normalize_staff_text(text: str) -> str:
+    """職員名を比較用に正規化（NFKC + 括弧注記除去 + 異体字/空白統一）
+
+    カイポケの職員セルは「熊澤妙子(重複)」のように注記が付くため、
+    括弧内を落としてから normalize_name に通す。
+    """
+    if not text:
+        return ""
+    text = unicodedata.normalize("NFKC", text)
+    text = re.sub(r"[（(][^）)]*[）)]", "", text)
+    return normalize_name(text)
+
+
+def _staff_text_matches(staff_name: str, staff_text: str) -> bool:
+    """職員1のセルテキストが指定職員と同一人物か判定（正規化後の完全一致）
+
+    2026-09-03のレビュー指摘: 部分一致だと
+      - 同行の職員2 (小西+熊澤) が職員1として一致してしまう
+      - 短い姓 (森) が別人 (大森) に一致してしまう
+    ため、_row_staff_text が返す「職員1の名前セルだけ」と完全一致で比較する。
+    """
+    if not staff_name or not staff_text:
+        return False
+    needle = _normalize_staff_text(staff_name)
+    target = _normalize_staff_text(staff_text)
+    return bool(needle) and needle == target
+
+
+def _is_plan_onclick(onclick: str) -> bool:
+    """エントリのaタグが「予定側」か判定
+
+    showHNC097807Edit('202604','11834626','01',...) の3番目が
+      '01' = 予定 / '02' = 実績。実績側を掴むと削除も編集も的外れになる。
+    """
+    if not onclick:
+        return False
+    params = re.findall(r"'([^']*)'", onclick)
+    return len(params) >= 3 and params[2] == "01"
+
+
+def _onclick_day(onclick: str) -> str:
+    """エントリのaタグの onclick から日にち（5番目のパラメータ）を取り出す"""
+    if not onclick:
+        return ""
+    params = re.findall(r"'([^']*)'", onclick)
+    return params[4] if len(params) >= 5 else ""
+
+
+def _needs_add_first(date_from, start_time_from, date_to, start_time_to) -> bool:
+    """削除→追加ではなく「追加→削除」で処理すべきか
+
+    旧行キー (日付, 開始時刻) と新行キー が異なる = 盤面上で別行になる場合は、
+    先に追加しても旧行と衝突しないので追加を先に行える（追加失敗時も消失ゼロ）。
+    同一キーの場合は先に削除しないと同じ行を二重に作るため、従来順のまま。
+    """
+    old_key = (str(date_from or "").strip(), str(start_time_from or "").strip())
+    new_key = (str(date_to or "").strip(), str(start_time_to or "").strip())
+    return new_key != old_key
+
+
+def _build_rollback_correction(correction: "Correction") -> "Correction":
+    """削除→追加の追加が失敗した時、元の予定を復元するための Correction を組む"""
+    return Correction(
+        user_name=correction.user_name,
+        date_from=correction.date_from,
+        date_to=correction.date_from,
+        start_time_from=correction.start_time_from,
+        start_time_to=correction.start_time_from,
+        end_time_from=correction.end_time_from,
+        end_time_to=correction.end_time_from,
+        staff1_from=correction.staff1_from,
+        staff1_to=correction.staff1_from,
+        staff2_from=correction.staff2_from,
+        staff2_to=correction.staff2_from,
+        service_type=correction.service_type,
+        action="add",
+        business_type=correction.business_type,
+        remarks=correction.remarks,
+    )
+
 
 def calculate_santei_time(start_time: str, end_time: str) -> str:
     """
@@ -161,6 +273,18 @@ def _check_current_user(page, user_name: str) -> bool:
     return False
 
 
+def _wait_schedule_table(page, timeout: int = 8000) -> None:
+    """月間スケジュール表の行が描画されるまで待つ（失敗しても握り潰す）
+
+    2026-09-03: 利用者切替直後は表が未描画で、直後の走査が
+    「エントリが見つかりません」になった（吉川9/9・園田9/8・木村9/7）。
+    """
+    try:
+        page.wait_for_selector("table tr td.tac.nowrap", timeout=timeout)
+    except Exception:
+        pass
+
+
 def select_user(page, user_name: str) -> bool:
     """
     利用者を選択（div#user_search のドロップダウンを使用）
@@ -177,6 +301,7 @@ def select_user(page, user_name: str) -> bool:
     # 現在の画面に表示されている利用者を確認
     if _check_current_user(page, user_name):
         print(f"  すでに選択されています: {user_name}")
+        _wait_schedule_table(page)
         return True
 
     # 方法1: div#user_search のドロップダウンから直接選択（O(1)・最速）
@@ -196,6 +321,10 @@ def select_user(page, user_name: str) -> bool:
                     dropdown.select_option(value=opt["value"])
                     page.wait_for_load_state("networkidle", timeout=10000)
                     page.wait_for_timeout(1000)
+                    # 2026-09-03: 利用者切替直後に表がまだ描画されておらず、
+                    # 直後の click_schedule_entry が「エントリが見つかりません」に
+                    # なる事故が多発した（吉川9/9・園田9/8・木村9/7）。
+                    _wait_schedule_table(page)
                     print(f"  ドロップダウンから直接選択: {user_name} (value={opt['value']})")
                     return True
             print(f"  ドロップダウンに利用者が見つかりません: {user_name}")
@@ -209,6 +338,7 @@ def select_user(page, user_name: str) -> bool:
     for i in range(max_attempts):
         if _check_current_user(page, user_name):
             print(f"  {i+1}回目で発見: {user_name}")
+            _wait_schedule_table(page)
             return True
 
         next_btn = page.locator("td.linkNextUser a, a:has-text('次へ')").first
@@ -330,117 +460,285 @@ def _click_with_scroll(page, link, timeout=10000):
             raise e3
 
 
-def click_schedule_entry(page, day: int, start_time: str) -> bool:
+def _wait_visible(page, locator, timeout_ms: int = 10000, step_ms: int = 500,
+                  label: str = "") -> bool:
+    """locator が表示されるまでポーリング待機（カイポケが遅い時間帯の対策）
+
+    is_visible() は待機しない即時判定なので、明示的に刻んで待つ。
     """
-    指定した日付・開始時間のスケジュールエントリをクリック
+    waited = 0
+    while True:
+        try:
+            if locator.is_visible():
+                if waited and label:
+                    print(f"    {label}: {waited}ms 待機して表示を確認")
+                return True
+        except Exception:
+            pass
+        if waited >= timeout_ms:
+            return False
+        page.wait_for_timeout(step_ms)
+        waited += step_ms
+
+
+def _row_staff_text(row) -> str:
+    """行(tr)の「予定側・職員1」の名前だけを取得（取得不可なら空文字）
+
+    click_schedule_entry と _schedule_entry_exists の共通ヘルパー。
+
+    カイポケの1訪問行は左が予定・右が実績で、td.staff-list が2つある
+    (artifacts/test_edit_3_user_selected_page_20260128_060104.html で確認)。
+    さらに1セルの中に職員1・職員2が入れ子の tr として縦に並ぶ:
+
+        <td class="staff-list"><table><tbody>
+          <tr><td class="job-type">…</td><td>川名千恵</td></tr>   ← 職員1
+          <tr><td class="job-type">…</td><td>佐藤憲二</td></tr>   ← 職員2(同行)
+        </tbody></table></td>
+
+    セル全体を読むと同行者や実績側の職員まで混ざり、
+    「職員1が誰か」の判定が壊れるため、予定側の先頭行の名前セルだけを返す。
+    """
+    try:
+        cell = row.locator("td.staff-list").first
+        if cell.count() == 0:
+            return ""
+        first_staff_row = cell.locator("tr").first
+        if first_staff_row.count() > 0:
+            name_cell = first_staff_row.locator("td:not(.job-type)").first
+            if name_cell.count() > 0:
+                text = name_cell.inner_text() or ""
+                return text.replace("　", " ").strip()
+        # 入れ子テーブルが無い形式へのフォールバック（セル全体）
+        return (cell.inner_text() or "").replace("　", " ").strip()
+    except Exception:
+        return ""
+
+
+def _entry_time_text(link) -> str:
+    """エントリのaタグから、属する service-detail-area の時間テキストを取得"""
+    try:
+        detail_area = link.locator(
+            "xpath=ancestor::div[contains(@class,'service-detail-area')]"
+        ).first
+        if detail_area.count() > 0:
+            return detail_area.inner_text()
+    except Exception:
+        pass
+    return ""
+
+
+def _plan_detail_areas(row) -> list:
+    """行(tr)の「予定側」の service-detail-area のみを返す（実績側は除外）
+
+    1行に予定と実績の2つの service-detail-area があるため、実績側の時間を
+    拾って「まだ残っている」と誤判定するのを防ぐ。
+    """
+    areas = []
+    try:
+        all_areas = row.locator("div.service-detail-area").all()
+    except Exception:
+        return areas
+    for idx, area in enumerate(all_areas):
+        onclick = ""
+        try:
+            link = area.locator("a[onclick]").first
+            if link.count() > 0:
+                onclick = link.get_attribute("onclick") or ""
+        except Exception:
+            onclick = ""
+        if onclick:
+            if _is_plan_onclick(onclick):
+                areas.append(area)
+        elif idx == 0:
+            # onclickが読めない形式では先頭（＝予定側）だけを採用する
+            areas.append(area)
+    return areas
+
+
+def _collect_entry_candidates(page, day_str: str) -> list:
+    """指定日の「予定側」エントリ候補（link / time_text / staff_text）を収集
+
+    Strategy 1: 行の日にち列(td.tac.nowrap)の完全一致で行を特定
+    Strategy 2: onclick属性をパースして5番目のパラメータ（日にち）で特定
+
+    どちらも onclick の3番目が '01'（予定側）のリンクだけを残す。
+    実績側('02')や職員名リンク(submitLinkTabHelper)を掴むと誤操作になる。
+    """
+    candidate_links = []
+
+    # --- Strategy 1: 行の日にち列(td.tac.nowrap)で特定 ---
+    rows = page.locator("table tr").all()
+    for row in rows:
+        try:
+            day_cells = row.locator("td.tac.nowrap").all()
+            day_match = False
+            for cell in day_cells:
+                cell_text = (cell.text_content() or "").strip()
+                if cell_text == day_str:
+                    day_match = True
+                    break
+
+            if not day_match:
+                continue
+
+            staff_text = _row_staff_text(row)
+            links = row.locator("a[onclick]").all()
+            for link in links:
+                try:
+                    if not _is_plan_onclick(link.get_attribute("onclick") or ""):
+                        continue
+                except Exception:
+                    continue
+                if link.is_visible():
+                    candidate_links.append({
+                        "link": link,
+                        "time_text": _entry_time_text(link),
+                        "staff_text": staff_text,
+                    })
+        except Exception:
+            continue
+
+    # --- Strategy 2: onclick属性パース（fallback） ---
+    if not candidate_links:
+        print(f"    Strategy 1失敗 → onclick属性パースにフォールバック")
+        all_links = page.locator("a[onclick*='Edit']").all()
+        for link in all_links:
+            try:
+                onclick = link.get_attribute("onclick") or ""
+                if not _is_plan_onclick(onclick):
+                    continue
+                if _onclick_day(onclick) == day_str:
+                    staff_text = ""
+                    try:
+                        row = link.locator("xpath=ancestor::tr[1]").first
+                        if row.count() > 0:
+                            staff_text = _row_staff_text(row)
+                    except Exception:
+                        pass
+                    candidate_links.append({
+                        "link": link,
+                        "time_text": _entry_time_text(link),
+                        "staff_text": staff_text,
+                    })
+            except Exception:
+                continue
+
+    return candidate_links
+
+
+def click_schedule_entry(page, day: int, start_time: str, staff_name: str = None) -> bool:
+    """
+    指定した日付・開始時間（＋職員）のスケジュールエントリをクリック
 
     Strategy 1: 行の日にち列(td.tac.nowrap)の完全一致で行を特定し、
                 行内のaタグ(onclick付き)をクリック
     Strategy 2: onclick属性をパースして5番目のパラメータ（日にち）で特定
     同一日複数件: div.service-detail-area 内の時間テキストで絞り込み
+    同一時間複数件: staff_name 指定時は td.staff-list の職員名で確定する
+
+    2026-09-03の本番事故対策:
+      - 表が未描画のまま走査して「見つかりません」になる → 最大3回リトライ
+      - 同日同時刻に旧行/新行が並ぶと先頭を掴んで誤削除する → 職員で確定
     """
-    print(f"  予定をクリック: {day}日 {start_time}")
+    label = f"  予定をクリック: {day}日 {start_time}"
+    if staff_name:
+        label += f" (職員: {staff_name})"
+    print(label)
     day_str = str(day)
 
     # フローティング要素を除去（クリックブロック防止）
     _remove_floating_overlays(page)
 
+    # 表が描画されるまで待つ（利用者切替直後の未描画対策）
+    _wait_schedule_table(page)
+
     try:
         candidate_links = []
-
-        # --- Strategy 1: 行の日にち列(td.tac.nowrap)で特定 ---
-        rows = page.locator("table tr").all()
-        for row in rows:
-            try:
-                day_cells = row.locator("td.tac.nowrap").all()
-                day_match = False
-                for cell in day_cells:
-                    cell_text = cell.text_content().strip()
-                    if cell_text == day_str:
-                        day_match = True
-                        break
-
-                if not day_match:
-                    continue
-
-                links = row.locator("a[onclick]").all()
-                for link in links:
-                    if link.is_visible():
-                        time_text = ""
-                        try:
-                            detail_area = link.locator(
-                                "xpath=ancestor::div[contains(@class,'service-detail-area')]"
-                            ).first
-                            if detail_area.count() > 0:
-                                time_text = detail_area.inner_text()
-                        except Exception:
-                            pass
-                        candidate_links.append({"link": link, "time_text": time_text})
-            except Exception:
-                continue
-
-        # --- Strategy 2: onclick属性パース（fallback） ---
-        if not candidate_links:
-            print(f"    Strategy 1失敗 → onclick属性パースにフォールバック")
-            all_links = page.locator("a[onclick*='Edit']").all()
-            for link in all_links:
+        max_attempts = 3
+        for attempt in range(max_attempts):
+            candidate_links = _collect_entry_candidates(page, day_str)
+            if candidate_links:
+                break
+            if attempt < max_attempts - 1:
+                print(f"    {day}日のエントリが0件 → 描画待ちで再走査 "
+                      f"({attempt + 1}/{max_attempts - 1})")
                 try:
-                    onclick = link.get_attribute("onclick") or ""
-                    params = re.findall(r"'([^']*)'", onclick)
-                    if len(params) >= 5 and params[4] == day_str:
-                        time_text = ""
-                        try:
-                            detail_area = link.locator(
-                                "xpath=ancestor::div[contains(@class,'service-detail-area')]"
-                            ).first
-                            if detail_area.count() > 0:
-                                time_text = detail_area.inner_text()
-                        except Exception:
-                            pass
-                        candidate_links.append({"link": link, "time_text": time_text})
+                    page.wait_for_load_state("networkidle", timeout=5000)
                 except Exception:
-                    continue
+                    pass
+                page.wait_for_timeout(1500)
 
         if not candidate_links:
             print(f"    {day}日のエントリが見つかりません")
             _save_debug_on_failure(page, day, start_time)
+            _set_reason("entry_not_found")
             return False
 
-        # 1件のみ → そのままクリック
-        if len(candidate_links) == 1:
-            print(f"    {day}日に1件のエントリを発見")
-            _click_with_scroll(page, candidate_links[0]["link"])
-            page.wait_for_timeout(2000)
-            return True
-
-        # 複数件 → 時間で絞り込み（正規表現で完全一致優先）
+        # 時間での絞り込みは候補が1件でも必ず行う。
+        # 2026-09-03のレビュー指摘: 1件だけの時に素通りさせると、
+        # 別時刻・別職員の行を掴んで削除し、職員で絞った検証は
+        # 「消えた」と答えてしまう（＝取り違えたまま成功扱い）。
         print(f"    {day}日に{len(candidate_links)}件のエントリを発見 → 時間 '{start_time}' で絞り込み")
         # 完全一致: "HH:MM" が time_text の先頭または "～" の後に出現
         pattern = r'(?:^|\s)' + re.escape(start_time) + r'(?:\s|～|$)'
-        for c in candidate_links:
-            if re.search(pattern, c["time_text"]):
-                print(f"    時間一致: {c['time_text'].strip()}")
-                _click_with_scroll(page, c["link"])
-                page.wait_for_timeout(2000)
-                return True
+        time_matched = [c for c in candidate_links if re.search(pattern, c["time_text"])]
+        matched_label = "時間一致"
+        if not time_matched:
+            # 正規表現でマッチしなかった場合、部分一致にフォールバック
+            time_matched = [c for c in candidate_links if start_time in c["time_text"]]
+            matched_label = "時間一致(部分)"
 
-        # 正規表現でマッチしなかった場合、部分一致にフォールバック
-        for c in candidate_links:
-            if start_time in c["time_text"]:
-                print(f"    時間一致(部分): {c['time_text'].strip()}")
-                _click_with_scroll(page, c["link"])
-                page.wait_for_timeout(2000)
-                return True
+        def _observed(cands):
+            return [f"{c['time_text'].strip().replace(chr(10), ' ')}"
+                    f"/{c['staff_text'].strip()}" for c in cands]
 
-        # 時間で絞り込めなかった場合は最初の1件をクリック
-        print(f"    警告: 時間での絞り込み失敗。最初のエントリをクリック")
-        _click_with_scroll(page, candidate_links[0]["link"])
+        if staff_name:
+            # 職員が判っている場合は、時間・職員のどちらも一致しない限りクリックしない
+            if not time_matched:
+                print(f"    警告: 時間 '{start_time}' に一致する行がありません → クリックしない")
+                print(f"    候補の時間/職員: {_observed(candidate_links)}")
+                _save_debug_on_failure(page, day, start_time)
+                _set_reason("entry_not_found")
+                return False
+            staff_matched = [c for c in time_matched
+                             if _staff_text_matches(staff_name, c["staff_text"])]
+            if not staff_matched:
+                print(f"    警告: 時間一致 {len(time_matched)} 件のうち"
+                      f"職員 '{staff_name}' の行がありません → クリックしない")
+                print(f"    時間一致行の時間/職員: {_observed(time_matched)}")
+                _save_debug_on_failure(page, day, start_time)
+                _set_reason("entry_not_found")
+                return False
+            if len(staff_matched) > 1:
+                print(f"    警告: 職員 '{staff_name}' の一致が{len(staff_matched)}件 "
+                      f"→ 最初のエントリをクリック")
+            target = staff_matched[0]
+            print(f"    {matched_label}+職員一致: {target['time_text'].strip()} "
+                  f"/ {target['staff_text'].strip()}")
+        elif time_matched:
+            if len(time_matched) > 1:
+                print(f"    警告: 時間一致が{len(time_matched)}件ありますが職員指定なし "
+                      f"→ 最初のエントリをクリック")
+            target = time_matched[0]
+            print(f"    {matched_label}: {target['time_text'].strip()}")
+        elif len(candidate_links) == 1 and not candidate_links[0]["time_text"].strip():
+            # 職員指定なし・候補1件・時間テキストが取れない → 従来どおり唯一の候補を採用
+            print(f"    {day}日に1件のエントリを発見（時間テキストなし）")
+            target = candidate_links[0]
+        else:
+            # 時間で絞り込めなかった場合は最初の1件をクリック（従来動作・職員指定なし時のみ）
+            print(f"    警告: 時間での絞り込み失敗。最初のエントリをクリック")
+            print(f"    候補の時間/職員: {_observed(candidate_links)}")
+            target = candidate_links[0]
+
+        _click_with_scroll(page, target["link"])
         page.wait_for_timeout(2000)
         return True
 
     except Exception as e:
         print(f"    エラー: {e}")
         _save_debug_on_failure(page, day, start_time)
+        _set_reason("entry_not_found")
         return False
 
 
@@ -935,6 +1233,15 @@ def edit_staff(page, staff1_name: str, staff2_name: str = "",
                 except Exception:
                     print("    警告: 職員情報入力ボタンが見つかりません")
 
+        # 2026-09-03: 「職員情報入力」クリック後の固定2秒待機では足りず、
+        # select#chargeStaff1Id1 が間に合わないまま強制有効化 → 登録失敗が9件出た。
+        # 診断列挙やJSフォールバックの前に、最大12秒ポーリングして待つ。
+        if for_new_entry:
+            if not _wait_visible(page, page.locator("select#chargeStaff1Id1"),
+                                 timeout_ms=12000, label="select#chargeStaff1Id1"):
+                print("    ※ 12秒待っても select#chargeStaff1Id1 が表示されません")
+                _check_form_errors(page, "Step5:職員ボタン後")
+
         # 職員情報入力ボタンクリック後のデバッグ＋リトライ
         if for_new_entry:
             try:
@@ -1027,6 +1334,7 @@ def edit_staff(page, staff1_name: str, staff2_name: str = "",
                         print(f"    選択肢: {opt_names}")
             else:
                 print("    警告: select#chargeStaff1Id1 が見つかりません")
+                _set_reason("staff_select_not_shown")
 
         # 職員2を設定
         staff2_select = page.locator("select#chargeStaff2Id1")
@@ -1158,6 +1466,7 @@ def click_register_button(page) -> bool:
             else:
                 print("    登録ボタンが見つかりません")
                 page.remove_listener("dialog", _accept_dialog)
+                _set_reason("register_failed")
                 return False
 
         page.remove_listener("dialog", _accept_dialog)
@@ -1181,6 +1490,7 @@ def click_register_button(page) -> bool:
         if error_msgs:
             print(f"    登録エラー検出: {error_msgs}")
             close_edit_dialog(page)
+            _set_reason("register_failed")
             return False
 
         # モーダルが閉じたか確認（閉じていなければ失敗）
@@ -1188,6 +1498,7 @@ def click_register_button(page) -> bool:
             if register_button.is_visible(timeout=2000):
                 print("    警告: 登録後もモーダルが開いたままです → 登録失敗と判定")
                 close_edit_dialog(page)
+                _set_reason("register_failed")
                 return False
         except Exception:
             pass
@@ -1208,6 +1519,7 @@ def click_register_button(page) -> bool:
             page.remove_listener("dialog", _accept_dialog)
         except Exception:
             pass
+        _set_reason("register_failed")
         return False
 
 
@@ -1284,14 +1596,16 @@ def close_edit_dialog(page) -> bool:
         return False
 
 
-def _schedule_entry_exists(page, day: int, start_time: str) -> bool:
-    """指定日の行に start_time のエントリが残っているか (削除検証用・クリックしない).
+def _count_plan_entries(page, day: int, start_time: str, staff_name: str = None) -> int:
+    """指定日・指定開始時間の「予定側」エントリ件数を数える (クリックしない).
 
-    2026-08-21 C2実機テストで発覚: 削除ボタンのクリックが無反応でも成功扱いになり、
-    時間変更編集 (削除→再追加) が「元行残存 + 新行追加」の二重化に化けた。
-    削除後にこの関数で実在検証し、残っていれば失敗として扱う。
+    2026-09-03のレビュー指摘への対応:
+      - 実績側(02)の service-detail-area を数えると、実績があるだけで
+        「まだ残っている」と誤判定するため予定側だけを見る (_plan_detail_areas)。
+      - staff_name 指定時は職員1が一致する行のみ数える。
     """
     day_str = str(day)
+    count = 0
     try:
         rows = page.locator("table tr").all()
         for row in rows:
@@ -1299,27 +1613,46 @@ def _schedule_entry_exists(page, day: int, start_time: str) -> bool:
                 day_cells = row.locator("td.tac.nowrap").all()
                 if not any((c.text_content() or "").strip() == day_str for c in day_cells):
                     continue
-                areas = row.locator("div.service-detail-area").all()
-                for a in areas:
+                if staff_name and not _staff_text_matches(staff_name, _row_staff_text(row)):
+                    continue
+                for a in _plan_detail_areas(row):
                     if start_time in (a.inner_text() or ""):
-                        return True
+                        count += 1
             except Exception:
                 continue
     except Exception:
         pass
-    return False
+    return count
 
 
-def delete_schedule_entry(page, day: int, start_time: str, dry_run: bool = False) -> bool:
+def _schedule_entry_exists(page, day: int, start_time: str, staff_name: str = None) -> bool:
+    """指定日の行に start_time のエントリが残っているか (削除検証用・クリックしない).
+
+    2026-08-21 C2実機テストで発覚: 削除ボタンのクリックが無反応でも成功扱いになり、
+    時間変更編集 (削除→再追加) が「元行残存 + 新行追加」の二重化に化けた。
+    削除後にこの関数で実在検証し、残っていれば失敗として扱う。
+
+    2026-09-03: staff_name 指定時は職員1が一致する行のみ数える。
+    同日同時刻に別職員の新行が既にある場合に、偽の「まだ残っている」を出さないため。
+    """
+    return _count_plan_entries(page, day, start_time, staff_name) > 0
+
+
+def delete_schedule_entry(page, day: int, start_time: str, dry_run: bool = False,
+                          staff_name: str = None) -> bool:
     """
     スケジュールエントリを削除（医療保険・介護保険共通）
 
     PDF仕様: input#inPopupBtnDel
+
+    Args:
+        staff_name: 指定すると同日同時刻の別行を誤って削除しない（旧行の職員1を渡す）
     """
     print(f"  削除: {day}日 {start_time}")
 
-    if not click_schedule_entry(page, day, start_time):
+    if not click_schedule_entry(page, day, start_time, staff_name=staff_name):
         print("    予定が見つかりません")
+        _set_reason("entry_not_found")
         return False
 
     if dry_run:
@@ -1327,13 +1660,21 @@ def delete_schedule_entry(page, day: int, start_time: str, dry_run: bool = False
         close_edit_dialog(page)
         return True
 
+    # 削除前の同時刻・予定側の行数を記録 (M-1)。
+    # 職員テキストが読めない等で職員フィルタが空振りしても、
+    # 「行数が減っていない = 実際には消えていない」を検出できるようにする。
+    count_before = _count_plan_entries(page, day, start_time)
+    print(f"    削除前の同時刻エントリ数: {count_before}")
+
     try:
         # 削除ボタンのクリックでネイティブ confirm() が発火する場合に備える
         page.on("dialog", _accept_dialog)
 
         # Primary: PDF仕様の削除ボタン
+        # 2026-09-03: モーダルの表示が遅いだけで「削除ボタンが見つかりません」に
+        # なる事故が5件あったため、3秒即断ではなく10秒ポーリングで待つ。
         delete_btn = page.locator("input#inPopupBtnDel")
-        if delete_btn.is_visible(timeout=3000):
+        if _wait_visible(page, delete_btn, timeout_ms=10000, label="削除ボタン"):
             try:
                 delete_btn.click(timeout=10000)
             except Exception:
@@ -1366,6 +1707,7 @@ def delete_schedule_entry(page, day: int, start_time: str, dry_run: bool = False
                 print("    削除ボタンが見つかりません")
                 page.remove_listener("dialog", _accept_dialog)
                 close_edit_dialog(page)
+                _set_reason("delete_button_not_found")
                 return False
 
         # HTML確認ダイアログ（ネイティブ confirm でない場合のフォールバック）
@@ -1393,18 +1735,58 @@ def delete_schedule_entry(page, day: int, start_time: str, dry_run: bool = False
             pass
         page.wait_for_timeout(1500)
 
-        # モーダルが閉じたか確認
-        try:
-            delete_btn_check = page.locator("input#inPopupBtnDel")
-            if delete_btn_check.is_visible(timeout=1000):
-                print("    警告: 削除後もモーダルが開いたままです。閉じます...")
-                close_edit_dialog(page)
-                page.wait_for_timeout(1000)
-        except Exception:
-            pass
+        # モーダルが閉じるまでポーリング (最大15秒)
+        # 2026-09-03: 削除クリック直後のスクリーンショットでモーダルが開いたままでも
+        # 実際には直後に削除が通っていた。即断せず閉じるのを待ってから検証する。
+        delete_btn_check = page.locator("input#inPopupBtnDel")
+        modal_closed = False
+        waited = 0
+        while True:
+            try:
+                if not delete_btn_check.is_visible():
+                    modal_closed = True
+            except Exception:
+                # 判定できない間は「閉じた」とみなさず待ち続ける (L-1)
+                pass
+            if modal_closed or waited >= 15000:
+                break
+            page.wait_for_timeout(500)
+            waited += 500
+        if not modal_closed:
+            print("    警告: 削除後15秒経ってもモーダルが開いたままです (削除未受理として扱う)")
+            close_edit_dialog(page)
+            _set_reason("delete_not_accepted")
+            return False
+        if waited:
+            print(f"    モーダルが閉じるまで {waited}ms 待機しました")
 
         # 削除検証 (上記 _schedule_entry_exists docstring 参照)。
-        if _schedule_entry_exists(page, day, start_time):
+        # 2026-09-03: 反映が遅れて偽NGになるため、最大4回 (約8秒) ポーリングする。
+        # 判定は2条件:
+        #   (a) 対象職員の行が消えていること
+        #   (b) 同時刻の予定側の行数が削除前より減っていること (M-1)
+        # (b) により、職員テキストが読めず(a)が空振りしても
+        #     「実は1件も消えていない」無反応削除を取りこぼさない。
+        deleted = False
+        count_after = count_before
+        for check in range(4):
+            count_after = _count_plan_entries(page, day, start_time)
+            gone = not _schedule_entry_exists(page, day, start_time, staff_name)
+            decreased = count_after < count_before if count_before > 0 else True
+            if gone and decreased:
+                deleted = True
+                break
+            if check < 3:
+                try:
+                    page.wait_for_load_state("networkidle", timeout=5000)
+                except Exception:
+                    pass
+                page.wait_for_timeout(2000)
+
+        if not deleted:
+            if count_before > 0 and count_after >= count_before:
+                print(f"    削除検証NG: 同時刻エントリ数が減っていません "
+                      f"({count_before} → {count_after})")
             print("    削除検証NG: エントリがまだ残っています (削除失敗として扱う)")
             # デバッグ保存 (2026-08-21): 何のダイアログ/状態で止まったかを残す。
             try:
@@ -1417,6 +1799,7 @@ def delete_schedule_entry(page, day: int, start_time: str, dry_run: bool = False
             except Exception as _e:
                 print(f"    デバッグ保存失敗: {_e}")
             close_edit_dialog(page)
+            _set_reason("delete_not_verified")
             return False
         print("    削除完了 (検証OK)")
         return True
@@ -1428,6 +1811,7 @@ def delete_schedule_entry(page, day: int, start_time: str, dry_run: bool = False
         except Exception:
             pass
         close_edit_dialog(page)
+        _set_reason("delete_error")
         return False
 
 
@@ -2335,6 +2719,103 @@ def add_event_entry(page, correction: Correction, dry_run: bool = False) -> bool
 # 修正適用のルーティング
 # =============================================================================
 
+def _apply_move_with_reorder(page, correction: Correction, dry_run: bool = False,
+                             month_str: str = None) -> bool:
+    """削除と再追加が伴う変更 (日付変更 / 時間変更) を、消失させない順序で適用する
+
+    2026-09-03の本番事故: 削除→追加の追加側が失敗し、旧行は既に消えていたため
+    訪問がカイポケから消失した (並木9/9・安永9/9・前川七海9/10・前川心愛9/10)。
+
+    対策:
+      - 旧行キー(日付,開始時刻) と新行キーが異なる → 「追加→削除」に反転。
+        追加が失敗しても旧行は無傷 (reason=add_failed_nothing_deleted)。
+        削除は旧日付・旧開始時刻・旧職員で行うため、直前に追加した行は掴まない。
+      - 同一キー (終了時刻や職員のみ変更) → 同じ行を二重に作れないので従来の
+        削除→追加。追加が失敗したら元の予定を再追加してロールバックする。
+    """
+    # 日付が読めない場合に1日へフォールバックすると、無関係な行を消しかねない (M-4)
+    if not (correction.date_from or "").strip().isdigit():
+        print(f"  ※ 変更前の日付が不正です: '{correction.date_from}' → 何もせず中止します")
+        _set_reason("invalid_date_from")
+        return False
+
+    day_from = int(correction.date_from)
+    staff_from = correction.staff1_from or None
+    add_first = _needs_add_first(correction.date_from, correction.start_time_from,
+                                 correction.date_to, correction.start_time_to)
+
+    if add_first:
+        print("  ※ 新旧が別の行になるため、先に追加してから旧行を削除します (消失防止)")
+        if not add_schedule_entry(page, correction, dry_run):
+            _recover_schedule_page(page, month_str)
+            print("  ※ 追加に失敗しました。旧行は削除していません (データ消失なし)")
+            # リカバリでページが遷移している可能性があるため利用者を選び直す (C-2)
+            if not select_user(page, correction.user_name):
+                print(f"  ※ 警告: リカバリ後に利用者 '{correction.user_name}' を再選択できません")
+            _set_reason("add_failed_nothing_deleted")
+            return False
+        # 追加後: networkidle待機 + カレンダー再描画待機
+        try:
+            page.wait_for_load_state("networkidle", timeout=10000)
+        except Exception:
+            pass
+        page.wait_for_timeout(3000)
+        if not delete_schedule_entry(page, day_from, correction.start_time_from, dry_run,
+                                     staff_name=staff_from):
+            print("  ※ 警告: 追加は成功しましたが旧行の削除に失敗しました。"
+                  "この利用者には新旧2件が残っています。手動で旧行を削除してください")
+            _set_reason("old_row_remains_duplicate")
+            return False
+        return True
+
+    # 新旧が同一キー → 従来どおり削除→追加。追加失敗時はロールバックで復元する。
+    print("  ※ 新旧が同一の行になるため、削除→再追加で処理します")
+    if not delete_schedule_entry(page, day_from, correction.start_time_from, dry_run,
+                                 staff_name=staff_from):
+        return False
+    # 削除後: networkidle待機 + カレンダー再描画待機
+    try:
+        page.wait_for_load_state("networkidle", timeout=10000)
+    except Exception:
+        pass
+    page.wait_for_timeout(3000)
+
+    if add_schedule_entry(page, correction, dry_run):
+        return True
+
+    _recover_schedule_page(page, month_str)
+    # リカバリは画面遷移を伴うことがあり、利用者が変わったまま書き込むと
+    # 別人の予定を作ってしまう。再選択できなければ一切書き込まない (C-2)。
+    if not select_user(page, correction.user_name):
+        print(f"  ※ 中止: リカバリ後に利用者 '{correction.user_name}' を再選択できないため"
+              f"ロールバックしません。元の予定を手動で復元してください")
+        _set_reason("add_failed_row_lost")
+        return False
+
+    # 登録ボタンが失敗を返しても実際には保存されている場合がある。
+    # 盤面を見て、新しい行 or 元の行が残っているならロールバックしない (H-3)。
+    if _schedule_entry_exists(page, day_from, correction.start_time_from,
+                              staff_name=correction.staff1_to or None):
+        print("  ※ 追加は失敗扱いですが新しい職員の行が存在します → ロールバックしません")
+        _set_reason("add_may_have_registered")
+        return False
+    if _schedule_entry_exists(page, day_from, correction.start_time_from,
+                              staff_name=staff_from):
+        print("  ※ 元の行が残っています (削除が効いていない) → ロールバックしません")
+        _set_reason("add_failed_old_row_intact")
+        return False
+
+    print("  ※ ロールバック: 元の予定を再追加")
+    if add_schedule_entry(page, _build_rollback_correction(correction), dry_run):
+        print("  ※ ロールバック成功: 元の予定を復元しました")
+        _set_reason("add_failed_rolled_back")
+    else:
+        print("  ※ ロールバック失敗: 元の予定が失われました。手動で復元してください")
+        _recover_schedule_page(page, month_str)
+        _set_reason("add_failed_row_lost")
+    return False
+
+
 def apply_correction(page, correction: Correction, dry_run: bool = False, month_str: str = None) -> bool:
     """
     1件の修正を適用（スケジュール系のみ。イベントは別フロー）
@@ -2351,7 +2832,8 @@ def apply_correction(page, correction: Correction, dry_run: bool = False, month_
         # 削除は医療保険・介護保険で操作が完全に同じ
         print(f"\n=== 削除: {correction.user_name} {correction.date_from}日 [{biz_type}] ===")
         day = int(correction.date_from) if correction.date_from.isdigit() else 1
-        return delete_schedule_entry(page, day, correction.start_time_from, dry_run)
+        return delete_schedule_entry(page, day, correction.start_time_from, dry_run,
+                                     staff_name=correction.staff1_from or None)
 
     elif action == "add":
         print(f"\n=== 追加: {correction.user_name} {correction.date_to}日 [{biz_type}] ===")
@@ -2364,21 +2846,9 @@ def apply_correction(page, correction: Correction, dry_run: bool = False, month_
     elif action == "date_change":
         print(f"\n=== 日付変更: {correction.user_name} "
               f"{correction.date_from}日 → {correction.date_to}日 [{biz_type}] ===")
-        # Kaipokeは日付変更時に登録ボタンが無効化されるため、削除→再追加で処理
-        print(f"  ※ 日付変更のため、削除→再追加で処理します")
-        day = int(correction.date_from) if correction.date_from.isdigit() else 1
-        if not delete_schedule_entry(page, day, correction.start_time_from, dry_run):
-            return False
-        # 削除後: networkidle待機 + カレンダー再描画待機
-        try:
-            page.wait_for_load_state("networkidle", timeout=10000)
-        except Exception:
-            pass
-        page.wait_for_timeout(3000)
-        result = add_schedule_entry(page, correction, dry_run)
-        if not result:
-            _recover_schedule_page(page, month_str)
-        return result
+        # Kaipokeは日付変更時に登録ボタンが無効化されるため、削除と再追加で処理
+        print(f"  ※ 日付変更のため、削除と再追加で処理します")
+        return _apply_move_with_reorder(page, correction, dry_run, month_str)
 
     else:  # edit
         # 変更は医療保険・介護保険共通（上部フィールドはREAD-ONLY）
@@ -2387,25 +2857,15 @@ def apply_correction(page, correction: Correction, dry_run: bool = False, month_
         # Kaipokeは時間変更時に登録ボタンが無効化されるため、
         # 時間変更がある場合は削除→再追加で処理する
         if correction.has_time_change():
-            print(f"  ※ 時間変更があるため、削除→再追加で処理します")
-            day = int(correction.date_from) if correction.date_from.isdigit() else 1
-            if not delete_schedule_entry(page, day, correction.start_time_from, dry_run):
-                return False
-            # 削除後: networkidle待機 + カレンダー再描画待機
-            try:
-                page.wait_for_load_state("networkidle", timeout=10000)
-            except Exception:
-                pass
-            page.wait_for_timeout(3000)
-            result = add_schedule_entry(page, correction, dry_run)
-            if not result:
-                _recover_schedule_page(page, month_str)
-            return result
+            print(f"  ※ 時間変更があるため、削除と再追加で処理します")
+            return _apply_move_with_reorder(page, correction, dry_run, month_str)
 
         # スタッフのみ変更の場合は通常の編集フロー
         day = int(correction.date_from) if correction.date_from.isdigit() else 1
-        if not click_schedule_entry(page, day, correction.start_time_from):
+        if not click_schedule_entry(page, day, correction.start_time_from,
+                                    staff_name=correction.staff1_from or None):
             print("  予定が見つかりません")
+            _set_reason("entry_not_found")
             return False
 
         if correction.has_staff_change():
@@ -2629,8 +3089,31 @@ def run_auto_apply(
                             result["stopped"] = True
                             break
 
+                        # 前件の失敗理由を持ち越さないようクリア
+                        _pop_reason()
+
+                        # リカバリ等でページが別利用者に飛んでいないか確認 (C-2)。
+                        # ここを外すと別人の予定を消し書きする恐れがある。
+                        if not _check_current_user(page, user_name):
+                            print(f"  ※ 画面の利用者が '{user_name}' ではありません → 選択し直します")
+                            if not select_user(page, user_name):
+                                print(f"  利用者の再選択に失敗: {user_name}")
+                                result["skipped"] += 1
+                                result["details"].append({
+                                    "user": user_name,
+                                    "date": correction.date_from or correction.date_to,
+                                    "action": correction.action,
+                                    "business_type": correction.business_type,
+                                    "status": "skipped",
+                                    "reason": "user_not_found",
+                                })
+                                _report_progress("phase1", user_name)
+                                continue
+
                         max_retries = 1
                         for attempt in range(max_retries + 1):
+                            # 試行ごとに前試行の理由をクリアする (L-2)
+                            _pop_reason()
                             try:
                                 # リトライ時はセッション復旧を試みる
                                 if attempt > 0:
@@ -2666,6 +3149,7 @@ def run_auto_apply(
                                         "action": correction.action,
                                         "business_type": correction.business_type,
                                         "status": "failed",
+                                        "reason": _pop_reason() or "unknown",
                                     })
                                 break  # 成功 or 通常失敗 → リトライしない
                             except Exception as e:

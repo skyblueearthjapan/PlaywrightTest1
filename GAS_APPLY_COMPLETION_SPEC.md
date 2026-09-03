@@ -171,6 +171,21 @@ const response = UrlFetchApp.fetch(API_URL + '/api/apply', options);
 | `user_not_found` | 利用者がカイポケのドロップダウンに見つからない |
 | `staff_not_found` | 職員がカイポケのドロップダウンに見つからない |
 | `staff_tab_navigation_failed` | 職員別タブへの遷移失敗 |
+| `entry_not_found` | 対象の予定（日付・時間・職員）が盤面に見つからない |
+| `invalid_date_from` | 変更前の日付が空・数値でない（何も操作せず中止） |
+| `delete_button_not_found` | 削除ボタンが表示されない（モーダルが開かない） |
+| `delete_not_accepted` | 削除後もモーダルが閉じない（削除が受理されていない） |
+| `delete_not_verified` | 削除後も同じ予定が残っている |
+| `delete_error` | 削除中に例外が発生 |
+| `staff_select_not_shown` | 職員選択セレクトが表示されない |
+| `register_failed` | 「登録する」が通らない（エラー表示・モーダルが閉じない） |
+| `add_failed_nothing_deleted` | 追加に失敗。**元の予定は消していない**（消失なし） |
+| `old_row_remains_duplicate` | 追加は成功したが旧行の削除に失敗。**新旧2件が残る**（要手動削除） |
+| `add_may_have_registered` | 追加は失敗扱いだが盤面に新しい行あり。復元操作はしていない（要目視） |
+| `add_failed_old_row_intact` | 追加は失敗、元の行は残存（削除が効いていない）。復元操作なし |
+| `add_failed_rolled_back` | 追加に失敗したので**元の予定を再追加して復元済み** |
+| `add_failed_row_lost` | 追加に失敗し復元もできなかった。**要手動復元** |
+| `unknown` | 失敗したが理由コードが記録されなかった |
 | （エラーメッセージ文字列） | 予期しないエラーの場合、例外メッセージが入る |
 
 ---
