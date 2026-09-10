@@ -65,6 +65,12 @@ def main():
     export_parser.add_argument("--month", default="2026-04", help="対象月 (デフォルト: 2026-04)")
     export_parser.add_argument("--out", default=None, help="出力ファイルパス")
     export_parser.add_argument("--headed", action="store_true", help="ブラウザを表示")
+    export_parser.add_argument(
+        "--division",
+        default="plan",
+        choices=["plan", "actual"],
+        help="予定(plan・既定) / 実績(actual)",
+    )
 
     # 4. apply
     apply_parser = subparsers.add_parser(
@@ -111,6 +117,7 @@ def main():
             month=args.month,
             out_path=args.out,
             headless=not args.headed,
+            division=args.division,
         )
 
     elif args.command == "apply":

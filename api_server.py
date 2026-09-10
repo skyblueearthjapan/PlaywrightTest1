@@ -31,8 +31,9 @@ import subprocess
 import threading
 import time
 import logging
+import hashlib
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 from functools import wraps
 from collections import deque
 from flask import Flask, request, jsonify, Response
@@ -50,7 +51,11 @@ logging.getLogger("lib.allocation_engine").setLevel(logging.INFO)
 sys.path.insert(0, str(Path(__file__).parent))
 
 from commands.expand import run_expand
-from commands.export import run_export
+from commands.export import (
+    run_export,
+    default_export_path,
+    validate_division,
+)
 from commands.auto_apply import run_auto_apply
 from commands.individual_tasks import run_individual_tasks
 from lib.stop_signal import request_stop, clear_stop, is_stop_requested
@@ -450,6 +455,45 @@ def api_expand():
             current_task = {"running": False, "command": None, "started_at": None}
 
 
+STALE_CSV_ERROR = "CSV が更新されませんでした (stale)"
+EXPORT_FAILED_ERROR = "CSV出力に失敗しました"
+UNREADABLE_CSV_ERROR = "CSV を読めませんでした"
+
+# ファイル更新時刻の粒度対策の許容誤差（秒）。
+# NTFS のタイムスタンプ粒度は約15.6msあり、time.time() より僅かに古い値になり得るため、
+# 直前に書かれたファイルを stale と誤判定しないよう余裕を持たせる。
+# 実際の stale（前回実行の残骸）は分〜日単位で古いので判定には影響しない。
+MTIME_TOLERANCE_SEC = 2.0
+
+
+def _file_sha256(path: Path) -> str:
+    """ファイル内容の SHA-256（16進）"""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _read_csv_text(path: Path):
+    """CSVをエンコーディング総当たりで読む。読めなければ None。"""
+    for enc in ["cp932", "utf-8-sig", "utf-8"]:
+        try:
+            return path.read_text(encoding=enc)
+        except UnicodeDecodeError:
+            continue
+    return None
+
+
+def _drive_name_for_division(filename: str, division: str) -> str:
+    """実績は予定と別名にする（Drive上でも予定を上書きしない）。"""
+    if division != "actual":
+        return filename
+    if filename.endswith(".csv"):
+        return f"{filename[:-4]}_actual.csv"
+    return f"{filename}_actual"
+
+
 def _run_export_core(data):
     """export処理の共通ロジック。結果dictを返す。"""
     month = data.get("month", "2026-04")
@@ -457,31 +501,89 @@ def _run_export_core(data):
     auto_drive_upload = data.get("auto_drive_upload", False)
     week_start = data.get("week_start")  # "2026-04-06" or "20260406"
     week_end = data.get("week_end")       # "2026-04-12" or "20260412"
+    division = data.get("division", "plan")
+
+    try:
+        validate_division(division)
+    except ValueError as e:
+        add_log(f"export division 不正: {division!r}")
+        return {
+            "success": False,
+            "status_code": 400,
+            "error": str(e),
+            "division": division,
+            "csv_content": None,
+            "row_count": None,
+            "file_size_bytes": None,
+            "export_timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+
+    if out_path is None:
+        out_path = str(default_export_path(month, division))
 
     headless = data.get("headless", False)
+    add_log(f"export 実行 division={division} path={out_path}")
+
+    # stale 判定用: run_export 呼び出し前の時刻を記録
+    started_ts = time.time()
+
     result = run_export(
         month=month,
         out_path=out_path,
         headless=headless,
+        division=division,
     )
 
-    # CSV内容をレスポンスに含める
-    csv_path = Path(result.get("file_path", ""))
-    if csv_path.exists():
-        csv_content = None
-        for enc in ["cp932", "utf-8-sig", "utf-8"]:
-            try:
-                csv_content = csv_path.read_text(encoding=enc)
-                break
-            except UnicodeDecodeError:
-                continue
-        if csv_content:
-            result["csv_content"] = csv_content
-            result["row_count"] = csv_content.count("\n")
-            result["file_size_bytes"] = csv_path.stat().st_size
+    result["division"] = division
 
-    # export_timestamp を追加
-    result["export_timestamp"] = datetime.now().isoformat()
+    # CSVのハッシュ・更新時刻（存在すれば常に付ける＝stale調査用）
+    csv_path = Path(result.get("file_path", out_path))
+    csv_mtime_ts = None
+    if csv_path.exists():
+        csv_mtime_ts = csv_path.stat().st_mtime
+        result["csv_sha256"] = _file_sha256(csv_path)
+        result["csv_mtime"] = datetime.fromtimestamp(
+            csv_mtime_ts, tz=timezone.utc
+        ).isoformat()
+    else:
+        result["csv_sha256"] = None
+        result["csv_mtime"] = None
+
+    # CSV内容をレスポンスに含める（成功 かつ ファイルが今回更新された場合のみ）
+    is_fresh = (
+        csv_mtime_ts is not None
+        and csv_mtime_ts >= started_ts - MTIME_TOLERANCE_SEC
+    )
+    csv_content = None
+    if result.get("success") and is_fresh:
+        csv_content = _read_csv_text(csv_path)
+
+    if csv_content is not None:
+        result["csv_content"] = csv_content
+        result["row_count"] = csv_content.count("\n")
+        result["file_size_bytes"] = csv_path.stat().st_size
+    else:
+        # 古いファイル・失敗・読めないファイルの中身は返さない（STALE事故の防止）
+        result["csv_content"] = None
+        result["row_count"] = None
+        result["file_size_bytes"] = None
+
+        if not result.get("success"):
+            # run_export 自体が失敗
+            error = result.get("error") or EXPORT_FAILED_ERROR
+        elif not is_fresh:
+            # 成功と言っているのにファイルが更新されていない
+            error = STALE_CSV_ERROR
+        else:
+            # 新しいファイルはあるがデコードできない
+            error = UNREADABLE_CSV_ERROR
+
+        result["success"] = False
+        result["error"] = error
+        add_log(f"export 失敗 division={division} error={error}")
+
+    # export_timestamp を追加（ISO 8601・UTC）
+    result["export_timestamp"] = datetime.now(timezone.utc).isoformat()
 
     # drive_file 情報を追加（GAS側でDriveアップロードする際に使用）
     try:
@@ -491,6 +593,7 @@ def _run_export_core(data):
             month_str = month.replace("-", "")
             drive_filename = config.get("current_csv_name", "kaipoke_export_{month}.csv")
             drive_filename = drive_filename.replace("{month}", month_str)
+            drive_filename = _drive_name_for_division(drive_filename, division)
             result["drive_file"] = {
                 "filename": drive_filename,
                 "folder_id": folder_id,
@@ -512,6 +615,7 @@ def _run_export_core(data):
                 month_str = month.replace("-", "")
                 drive_filename = config.get("current_csv_name", "kaipoke_export_{month}.csv")
                 drive_filename = drive_filename.replace("{month}", month_str)
+                drive_filename = _drive_name_for_division(drive_filename, division)
                 file_id = upload_to_drive(
                     str(csv_path), folder_id, filename=drive_filename
                 )
@@ -554,10 +658,23 @@ def api_export():
         apply_request_credentials(data)  # C-3: アプリ内設定の認証情報を反映
         month = data.get("month", "2026-04")
         async_mode = data.get("async", False)
+        division = data.get("division", "plan")
+
+        # division の検証はスレッド起動前に行う（非同期でも即400を返す）
+        try:
+            validate_division(division)
+        except ValueError as e:
+            add_log(f"export division 不正: {division!r}")
+            async_mode = False  # finally で current_task を解放させる
+            return jsonify({
+                "success": False,
+                "error": str(e),
+                "division": division,
+            }), 400
 
         clear_stop()  # 非常停止フラグをクリア
-        add_log(f"export 開始 (month={month}, async={async_mode})")
-        print(f"\n=== API: export 開始 (month={month}, async={async_mode}) ===")
+        add_log(f"export 開始 (month={month}, division={division}, async={async_mode})")
+        print(f"\n=== API: export 開始 (month={month}, division={division}, async={async_mode}) ===")
 
         if async_mode:
             # 非同期モード: バックグラウンドスレッドで実行し即座にレスポンス
@@ -570,7 +687,7 @@ def api_export():
                 global current_task, export_result_store
                 try:
                     result = _run_export_core(request_data)
-                    add_log(f"export 完了: success={result.get('success')}")
+                    add_log(f"CSV出力完了 division={result.get('division')} path={result.get('file_path')} success={result.get('success')}")
                     with job_state_lock:
                         export_result_store = {
                             "result": result,
@@ -604,7 +721,7 @@ def api_export():
         else:
             # 同期モード: 従来どおり結果を直接返す
             result = _run_export_core(data)
-            add_log(f"export 完了: success={result.get('success')}")
+            add_log(f"CSV出力完了 division={result.get('division')} path={result.get('file_path')} success={result.get('success')}")
             return jsonify({
                 "success": True,
                 "result": result,
