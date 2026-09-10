@@ -51,6 +51,9 @@ ACTUAL_RADIO_ERROR = "実績ラジオが見つかりません/選択できませ
 # 実績ラジオの操作タイムアウト（既定の30秒は同期exportの予算を超えるため短縮）
 ACTUAL_RADIO_TIMEOUT_MS = 10000
 
+# 「スケジュール表」クリックのタイムアウト（既定の30秒は同期exportの予算を超える）
+SCHEDULE_LINK_TIMEOUT_MS = 10000
+
 # ダウンロード一時置き場（data/ 直下に落として既存CSVを踏むのを防ぐ）
 DOWNLOAD_SUBDIR = ".download"
 
@@ -143,36 +146,84 @@ def is_division_selected(page, division: str) -> bool:
         return False
 
 
+def _page_title_quietly(page) -> str:
+    """診断ログ用。タイトルが取れなくても本処理を止めない。"""
+    try:
+        return page.title()
+    except Exception:
+        return "(タイトル取得不可)"
+
+
+def is_on_schedule_settings_page(page) -> bool:
+    """訪問看護スケジュール表の「出力条件 設定」画面に居るかどうか。
+
+    2回連続 export（予定→実績）では、カイポケがこの設定画面へ直接着地することがある。
+    その状態で「スケジュール表」を押そうとすると、見出しテキストにマッチして
+    クリックが 30 秒タイムアウトする（従来の約50%の失敗の正体）。
+    """
+    try:
+        if page.locator('input[name="planAchievementsDivision"]').count() > 0:
+            return True
+        return page.locator("text=出力条件").count() > 0
+    except Exception:
+        return False
+
+
 def click_schedule_table(page) -> bool:
     """
     出力対象選択画面で「スケジュール表」をクリック
 
+    すでに設定画面に居る場合はクリックしない（見出しテキストを掴んで
+    タイムアウトするのを防ぐ）。
+
     Returns:
-        bool: 成功したかどうか
+        bool: 設定画面に到達したかどうか
     """
-    print("スケジュール表をクリックしています...")
-
-    try:
-        # 「スケジュール表」リンクをクリック
-        # DevToolsで見ると span#schedule_tooltip がある
-        schedule_link = page.locator("text=スケジュール表").first
-        if schedule_link.is_visible():
-            schedule_link.click()
-            page.wait_for_load_state("networkidle")
-            page.wait_for_timeout(1000)
-            print("スケジュール表の設定画面を表示しました")
-            return True
-
-        # 別のセレクタを試す
-        page.click("a:has-text('スケジュール表')")
-        page.wait_for_load_state("networkidle")
-        page.wait_for_timeout(1000)
-        print("スケジュール表の設定画面を表示しました")
+    # すでに設定画面に着地している（2回目のexportで起きる）
+    if is_on_schedule_settings_page(page):
+        print("スケジュール表の設定画面は表示済み（クリック不要）")
         return True
 
+    print("スケジュール表をクリックしています...")
+
+    clicked = False
+    # リンクに限定して掴む（bare text だと見出しにマッチする）
+    try:
+        page.get_by_role("link", name="スケジュール表").first.click(
+            timeout=SCHEDULE_LINK_TIMEOUT_MS
+        )
+        clicked = True
     except Exception as e:
-        print(f"スケジュール表のクリックに失敗: {e}")
+        print(f"スケジュール表リンク(role=link)のクリックに失敗: {e}")
+
+    if not clicked:
+        try:
+            page.click(
+                "a:has-text('スケジュール表')", timeout=SCHEDULE_LINK_TIMEOUT_MS
+            )
+            clicked = True
+        except Exception as e:
+            print(f"スケジュール表リンク(a:has-text)のクリックに失敗: {e}")
+
+    if not clicked:
+        print(f"スケジュール表のクリックに失敗: title={_page_title_quietly(page)}")
         return False
+
+    try:
+        page.wait_for_load_state("networkidle")
+        page.wait_for_timeout(1000)
+    except Exception as e:
+        print(f"スケジュール表クリック後の待機に失敗: {e}")
+
+    if not is_on_schedule_settings_page(page):
+        print(
+            "スケジュール表の設定画面に到達できませんでした: "
+            f"title={_page_title_quietly(page)}"
+        )
+        return False
+
+    print("スケジュール表の設定画面を表示しました")
+    return True
 
 
 def set_export_month(page, month: str) -> bool:
@@ -330,11 +381,15 @@ def run_export(
             # 出力対象選択画面に遷移（上部ナビゲーションの各種情報出力▼→出力対象選択）
             goto_export_page(page)
 
-            # スケジュール表をクリック
+            # スケジュール表をクリック（失敗したら出力対象選択からやり直して1回だけ再試行）
             if not click_schedule_table(page):
-                print("スケジュール表の選択に失敗しました")
-                save_artifacts(page, Path("artifacts"), "export_schedule_error")
-                return result
+                print("スケジュール表の選択に失敗しました。1回だけ再試行します...")
+                goto_export_page(page)
+                if not click_schedule_table(page):
+                    print("スケジュール表の選択に失敗しました（再試行も失敗）")
+                    print(f"現在のページタイトル: {_page_title_quietly(page)}")
+                    save_artifacts(page, Path("artifacts"), "export_schedule_error")
+                    return result
 
             # サービス提供年月を設定（令和8年4月）
             if not set_export_month(page, month):
