@@ -18,6 +18,7 @@ import commands.auto_apply as aa  # noqa: E402
 from commands.auto_apply import (  # noqa: E402
     _needs_add_first,
     _build_rollback_correction,
+    _is_delete_done,
     _pop_reason,
 )
 from lib.diff_engine import Correction, correction_from_dict, coerce_bool  # noqa: E402
@@ -179,12 +180,13 @@ class TestSameKeyReorder(unittest.TestCase):
     def test_identical_keys_are_delete_first(self):
         self.assertFalse(_needs_add_first("10", "16:45", "10", "16:45"))
 
-    def _run_reorder(self, correction, add_ok, exists=lambda *a, **kw: False):
-        order = []
+    def _run_reorder(self, correction, add_ok, exists=lambda *a, **kw: False,
+                     delete_ok=True, order=None):
+        order = [] if order is None else order
 
         def fake_delete(page, day, start_time, dry_run=False, staff_name=None):
             order.append(("delete", day, start_time, staff_name))
-            return True
+            return delete_ok
 
         def fake_add(page, c, dry_run=False, _retry=0):
             order.append(("add", c.date_to, c.start_time_to, c.staff1_to, c.service_type))
@@ -241,6 +243,57 @@ class TestSameKeyReorder(unittest.TestCase):
         ok, order = self._run_reorder(c, add_ok=lambda _c: next(results))
         self.assertFalse(ok)
         self.assertEqual(_pop_reason(), "add_failed_rolled_back")
+
+    def test_delete_failure_never_attempts_add(self):
+        """削除が失敗したら追加は一切しない（削除検証が追加の前提という契約）"""
+        c = make_correction(grade_change=True)
+        ok, order = self._run_reorder(c, add_ok=True, delete_ok=False)
+        self.assertFalse(ok)
+        self.assertEqual([step[0] for step in order], ["delete"])
+        self.assertNotIn("add", [step[0] for step in order])
+        self.assertFalse(_is_delete_done(c))
+
+    def test_grade_change_rollback_without_source_service_type_aborts(self):
+        """請求区分が変わるのに変更前のサービス内容が不明 → 推測で復元しない"""
+        c = make_correction(grade_change=True, service_type="精神基本療養費Ⅰ・准看")
+        self.assertEqual(c.service_type_from, "")
+        ok, order = self._run_reorder(c, add_ok=False)
+        self.assertFalse(ok)
+        # 削除 → 追加(失敗) まで。ロールバックの追加は行わない
+        self.assertEqual([step[0] for step in order], ["delete", "add"])
+        self.assertEqual(_pop_reason(), "grade_change_rollback_no_source")
+
+    def test_exception_after_delete_resumes_at_add_on_retry(self):
+        """削除後に例外 → リトライは削除をやり直さず追加から再開する
+
+        run_auto_apply は例外時に apply_correction を頭から再実行する。印が無いと
+        リトライ側の削除が entry_not_found になり、行が消えたまま誤報告になる。
+        """
+        c = make_correction(grade_change=True, service_type_from="精神基本療養費Ⅰ・正看")
+
+        def boom(_c):
+            raise RuntimeError("カイポケが応答しません")
+
+        order = []
+        with self.assertRaises(RuntimeError):
+            self._run_reorder(c, add_ok=boom, order=order)
+        self.assertEqual([step[0] for step in order], ["delete", "add"])
+        self.assertTrue(_is_delete_done(c), "削除済みの印が残っていません")
+
+        # --- リトライ（同じ correction オブジェクトで再実行） ---
+        retry_order = []
+        ok, retry_order = self._run_reorder(c, add_ok=True, order=retry_order)
+        self.assertTrue(ok)
+        self.assertEqual([step[0] for step in retry_order], ["add"])
+        self.assertNotIn("delete", [step[0] for step in retry_order])
+        # 決着がついたので印は消える
+        self.assertFalse(_is_delete_done(c))
+
+    def test_marker_is_cleared_after_successful_first_pass(self):
+        c = make_correction(grade_change=True)
+        ok, order = self._run_reorder(c, add_ok=True)
+        self.assertTrue(ok)
+        self.assertFalse(_is_delete_done(c))
 
     def test_no_rollback_when_new_row_already_exists(self):
         c = make_correction(grade_change=True)

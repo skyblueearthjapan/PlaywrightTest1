@@ -166,6 +166,33 @@ def _needs_add_first(date_from, start_time_from, date_to, start_time_to) -> bool
     return new_key != old_key
 
 
+# 削除→再追加の「削除だけ終わった」状態を修正1件に記録する印。
+# run_auto_apply は例外時に apply_correction を頭から再実行する (max_retries=1) ため、
+# 印が無いとリトライ側が既に消えた行を削除しようとして entry_not_found で終わり、
+# 訪問が消えたまま「予定が見つかりません」と報告されてしまう。
+_DELETE_DONE_ATTR = "_reorder_delete_done"
+
+
+def _mark_delete_done(correction: "Correction") -> None:
+    """検証済みの削除が完了したことを記録する（リトライは追加から再開する）"""
+    try:
+        setattr(correction, _DELETE_DONE_ATTR, True)
+    except Exception:  # pragma: no cover - dataclassは通常setattr可能
+        pass
+
+
+def _is_delete_done(correction: "Correction") -> bool:
+    return bool(getattr(correction, _DELETE_DONE_ATTR, False))
+
+
+def _clear_delete_done(correction: "Correction") -> None:
+    """この修正の決着がついた（もうリトライしない）ので印を消す"""
+    try:
+        setattr(correction, _DELETE_DONE_ATTR, False)
+    except Exception:  # pragma: no cover
+        pass
+
+
 def _build_rollback_correction(correction: "Correction") -> "Correction":
     """削除→追加の追加が失敗した時、元の予定を復元するための Correction を組む"""
     return Correction(
@@ -2771,18 +2798,27 @@ def _apply_move_with_reorder(page, correction: Correction, dry_run: bool = False
         return True
 
     # 新旧が同一キー → 従来どおり削除→追加。追加失敗時はロールバックで復元する。
-    print("  ※ 新旧が同一の行になるため、削除→再追加で処理します")
-    if not delete_schedule_entry(page, day_from, correction.start_time_from, dry_run,
-                                 staff_name=staff_from):
-        return False
-    # 削除後: networkidle待機 + カレンダー再描画待機
-    try:
-        page.wait_for_load_state("networkidle", timeout=10000)
-    except Exception:
-        pass
-    page.wait_for_timeout(3000)
+    if _is_delete_done(correction):
+        # 前の試行が削除の後で例外を出し、run_auto_apply がリトライしてきた場合。
+        # ここで削除をやり直すと「予定が見つかりません」で終わり、旧行が消えたまま
+        # 誤った理由が報告される。削除は済んでいるので追加から再開する。
+        print("  ※ 前回の試行で旧行は削除済みです → 削除を再実行せず追加から再開します")
+    else:
+        print("  ※ 新旧が同一の行になるため、削除→再追加で処理します")
+        if not delete_schedule_entry(page, day_from, correction.start_time_from, dry_run,
+                                     staff_name=staff_from):
+            return False
+        # delete_schedule_entry は実在検証つきなので、True = 旧行はもう無い。
+        _mark_delete_done(correction)
+        # 削除後: networkidle待機 + カレンダー再描画待機
+        try:
+            page.wait_for_load_state("networkidle", timeout=10000)
+        except Exception:
+            pass
+        page.wait_for_timeout(3000)
 
     if add_schedule_entry(page, correction, dry_run):
+        _clear_delete_done(correction)
         return True
 
     _recover_schedule_page(page, month_str)
@@ -2792,6 +2828,7 @@ def _apply_move_with_reorder(page, correction: Correction, dry_run: bool = False
         print(f"  ※ 中止: リカバリ後に利用者 '{correction.user_name}' を再選択できないため"
               f"ロールバックしません。元の予定を手動で復元してください")
         _set_reason("add_failed_row_lost")
+        _clear_delete_done(correction)
         return False
 
     # 登録ボタンが失敗を返しても実際には保存されている場合がある。
@@ -2800,11 +2837,22 @@ def _apply_move_with_reorder(page, correction: Correction, dry_run: bool = False
                               staff_name=correction.staff1_to or None):
         print("  ※ 追加は失敗扱いですが新しい職員の行が存在します → ロールバックしません")
         _set_reason("add_may_have_registered")
+        _clear_delete_done(correction)
         return False
     if _schedule_entry_exists(page, day_from, correction.start_time_from,
                               staff_name=staff_from):
         print("  ※ 元の行が残っています (削除が効いていない) → ロールバックしません")
         _set_reason("add_failed_old_row_intact")
+        _clear_delete_done(correction)
+        return False
+
+    # 請求区分が変わる修正では correction.service_type は「新しい値」。変更前の値が
+    # 分からないまま復元すると、誤った請求区分の行を作ってしまう (課金事故の再生産)。
+    if correction.grade_change and not (correction.service_type_from or "").strip():
+        print("  ※ 中止: 請求区分が変わる修正ですが変更前のサービス内容 (service_type_from) が"
+              "不明です。誤った請求区分で復元しないためロールバックしません。手動で復元してください")
+        _set_reason("grade_change_rollback_no_source")
+        _clear_delete_done(correction)
         return False
 
     print("  ※ ロールバック: 元の予定を再追加")
@@ -2816,6 +2864,7 @@ def _apply_move_with_reorder(page, correction: Correction, dry_run: bool = False
         print("  ※ ロールバック失敗: 元の予定が失われました。手動で復元してください")
         _recover_schedule_page(page, month_str)
         _set_reason("add_failed_row_lost")
+    _clear_delete_done(correction)
     return False
 
 
