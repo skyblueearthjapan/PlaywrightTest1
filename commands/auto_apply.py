@@ -180,7 +180,9 @@ def _build_rollback_correction(correction: "Correction") -> "Correction":
         staff1_to=correction.staff1_from,
         staff2_from=correction.staff2_from,
         staff2_to=correction.staff2_from,
-        service_type=correction.service_type,
+        # 請求区分が変わる修正では correction.service_type は「新しい値」なので、
+        # 復元には変更前の値 (service_type_from) を優先して使う。
+        service_type=correction.service_type_from or correction.service_type,
         action="add",
         business_type=correction.business_type,
         remarks=correction.remarks,
@@ -2808,7 +2810,8 @@ def _apply_move_with_reorder(page, correction: Correction, dry_run: bool = False
     print("  ※ ロールバック: 元の予定を再追加")
     if add_schedule_entry(page, _build_rollback_correction(correction), dry_run):
         print("  ※ ロールバック成功: 元の予定を復元しました")
-        _set_reason("add_failed_rolled_back")
+        _set_reason("grade_change_rollback" if correction.grade_change
+                    else "add_failed_rolled_back")
     else:
         print("  ※ ロールバック失敗: 元の予定が失われました。手動で復元してください")
         _recover_schedule_page(page, month_str)
@@ -2855,9 +2858,14 @@ def apply_correction(page, correction: Correction, dry_run: bool = False, month_
         print(f"\n=== 変更: {correction.user_name} {correction.date_from}日 [{biz_type}] ===")
 
         # Kaipokeは時間変更時に登録ボタンが無効化されるため、
-        # 時間変更がある場合は削除→再追加で処理する
-        if correction.has_time_change():
-            print(f"  ※ 時間変更があるため、削除と再追加で処理します")
+        # 時間変更がある場合は削除→再追加で処理する。
+        # また、編集ダイアログはサービス内容を変更できないため、請求区分
+        # (正看/准看) が変わる修正も削除→再追加に回す (職員だけの変更でも)。
+        if correction.has_time_change() or correction.grade_change:
+            if correction.has_time_change():
+                print(f"  ※ 時間変更があるため、削除と再追加で処理します")
+            if correction.grade_change:
+                print("  ※ 請求区分（正看/准看）が変わるため、削除→再追加で処理します")
             return _apply_move_with_reorder(page, correction, dry_run, month_str)
 
         # スタッフのみ変更の場合は通常の編集フロー

@@ -66,6 +66,7 @@ from lib.diff_engine import (
     load_correction_sheet,
     validate_correction_data,
     Correction,
+    correction_from_dict,
 )
 from lib.google_drive import (
     load_drive_config,
@@ -1610,7 +1611,7 @@ def api_diff_validate():
             # インラインデータから読み込み（配列/dict両対応）
             items = correction_data if isinstance(correction_data, list) else correction_data.get("corrections", [])
             for item in items:
-                corrections.append(Correction(**item))
+                corrections.append(correction_from_dict(item))
         elif correction_sheet and Path(correction_sheet).exists():
             # ファイルから読み込み
             corrections = load_correction_sheet(correction_sheet)

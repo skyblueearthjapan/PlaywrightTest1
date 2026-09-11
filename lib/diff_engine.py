@@ -14,7 +14,7 @@
 import csv
 import json
 import re
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, fields as dataclass_fields
 from pathlib import Path
 from typing import Optional
 
@@ -76,6 +76,12 @@ class Correction:
     action: str             # "edit" or "delete" or "add" or "date_change"
     business_type: str = "" # 業務種別（"医療保険", "介護保険", or イベント名）
     remarks: str = ""       # 備考（イベント名等）
+    # 2026-09-11: らく助(BE)が付与。True = この修正で請求区分(正看/准看)が変わる。
+    # カイポケの編集ダイアログはサービス内容を変更できないため、職員のみの変更でも
+    # 削除→再追加に回して service_type(= 新しい値) を書き込む必要がある。
+    grade_change: bool = False
+    # 変更前のサービス内容（任意）。grade_change 時のロールバックで元の値に戻すため。
+    service_type_from: str = ""
 
     def has_date_change(self) -> bool:
         return self.date_from != self.date_to
@@ -103,6 +109,39 @@ class Correction:
     def is_schedule(self) -> bool:
         """通常のスケジュール（利用者別タブで操作）かどうか"""
         return self.business_type in ("医療保険", "介護保険", "")
+
+
+_TRUE_TOKENS = {"true", "1", "yes", "y", "on"}
+
+
+def coerce_bool(value) -> bool:
+    """JSON由来の真偽値を寛容に解釈する (True / "true" / "True" / 1 / "1" を True)"""
+    if value is None:
+        return False
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in _TRUE_TOKENS
+    return bool(value)
+
+
+_CORRECTION_BOOL_FIELDS = ("grade_change",)
+
+
+def correction_from_dict(item: dict) -> Correction:
+    """JSON 1件から Correction を組む（未知キーは無視・bool は寛容に解釈）
+
+    らく助(BE)が将来キーを増やしても RPA 側が TypeError で落ちないようにするため、
+    Correction(**item) を直接呼ばず必ずこの関数を通す。
+    """
+    known = {f.name for f in dataclass_fields(Correction)}
+    kwargs = {k: v for k, v in (item or {}).items() if k in known}
+    for name in _CORRECTION_BOOL_FIELDS:
+        if name in kwargs:
+            kwargs[name] = coerce_bool(kwargs[name])
+    return Correction(**kwargs)
 
 
 def parse_time(time_str: str) -> tuple[int, int]:
@@ -715,7 +754,7 @@ def load_correction_sheet(file_path: str) -> list[Correction]:
     # data が配列の場合（GASからインライン送信時）と dict の場合に対応
     items = data if isinstance(data, list) else data.get("corrections", [])
     for item in items:
-        corrections.append(Correction(**item))
+        corrections.append(correction_from_dict(item))
 
     return corrections
 
