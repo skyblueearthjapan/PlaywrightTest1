@@ -46,7 +46,6 @@ from commands.auto_apply import (
     _click_with_scroll,
     _wait_visible,
     select_user,
-    edit_schedule_time,
     close_edit_dialog,
 )
 from lib.stop_signal import is_stop_requested
@@ -151,6 +150,43 @@ def match_actual_entries(entries: list, day: int, start: str, staff1: str, end: 
         if narrowed:
             hits = narrowed
     return hits
+
+
+def find_target(entries: list, day: int, start: str, staff1: str, end: str = ""):
+    """書き換える行を 1 件に決める。(エントリ, None) または (None, 理由コード)
+
+    日付・開始・職員1 で一致したものを、old_end があれば終了時刻でも確かめる。
+      0 件 → entry_not_found / 終了が違う → end_mismatch / 2 件以上 → ambiguous
+    """
+    hits = match_actual_entries(entries, day, start, staff1)
+    if not hits:
+        return None, "entry_not_found"
+    end = normalize_hhmm(end) if end else ""
+    if end:
+        hits = [e for e in hits if entry_times(e)[1] == end]
+        if not hits:
+            return None, "end_mismatch"
+    if len(hits) > 1:
+        return None, "ambiguous"
+    return hits[0], None
+
+
+def is_empty_staff(value: str, text: str) -> bool:
+    """担当の select が未選択か ('' / '-999' / 表示 '-')"""
+    return (value or "") in ("", "-999") or (text or "").strip() in ("", "-")
+
+
+def staff_names_mismatch(row_staff: list, dialog_staff: list) -> list:
+    """一覧の行の職員1〜3 と、ダイアログの職員1〜3 (未選択は '') の食い違う番号 (1 始まり)"""
+    out = []
+    for i in range(3):
+        r = row_staff[i] if i < len(row_staff) else ""
+        d = dialog_staff[i] if i < len(dialog_staff) else ""
+        if not r and not d:
+            continue
+        if not (r and d and _staff_text_matches(r, d)):
+            out.append(i + 1)
+    return out
 
 
 def observed_for_day(entries: list, day: int) -> list:
@@ -360,6 +396,75 @@ def _expected_time_values(start: str, end: str) -> list:
     return [sh, sm // 10, sm % 10, eh, em // 10, em % 10]
 
 
+def _dialog_open(page) -> bool:
+    """編集ダイアログ (登録するボタン) が見えているか"""
+    try:
+        return page.locator("input#btnRegisPop").is_visible()
+    except Exception:
+        return False
+
+
+def _read_dialog_staff(page) -> list:
+    """ダイアログの職員1〜3 の [value, 表示名]。select が無い番号は None"""
+    return page.evaluate("""() => [1, 2, 3].map(n => {
+        const el = document.querySelector('#chargeStaff' + n + 'Id1');
+        if (!el) return null;
+        const o = el.options[el.selectedIndex];
+        return [el.value || '', o ? o.text.trim() : ''];
+    })""")
+
+
+def _dialog_staff_names(raw: list) -> list:
+    """_read_dialog_staff の結果を表示名の一覧へ (未選択・欄なしは '')"""
+    return ["" if (not v or is_empty_staff(v[0], v[1])) else v[1] for v in (raw or [])]
+
+
+def _time_selects_locked(page) -> bool:
+    """時刻の select のどれかが無い・disabled (確定済み・請求済みのロック) か"""
+    return bool(page.evaluate("""(sels) => sels.some(s => {
+        const el = document.querySelector(s); return !el || el.disabled; })""", _TIME_SELECTS))
+
+
+def _set_time_values(page, start: str, end: str) -> None:
+    """時刻の 6 つの select を選ぶ。disabled を外すことはしない (edit_schedule_time と違う)"""
+    for sel, target in zip(_TIME_SELECTS, _expected_time_values(start, end)):
+        value = page.evaluate("""([s, t]) => {
+            const el = document.querySelector(s);
+            if (!el) return null;
+            const o = Array.from(el.options).find(o => parseInt(o.value, 10) === t);
+            return o ? o.value : null;
+        }""", [sel, target])
+        if value is None:
+            raise RuntimeError(f"{sel} に {target} の選択肢がありません")
+        page.locator(sel).select_option(value=value, timeout=5000)
+        try:
+            page.wait_for_load_state("networkidle", timeout=3000)
+        except Exception:
+            pass
+        page.wait_for_timeout(300)
+
+
+def _wait_dialog_matches(page, old_values: list, staff1: str, timeout_ms: int = 15000) -> bool:
+    """開いたダイアログが特定した行のもの (旧の時刻・職員1) になるまで待つ。
+
+    職員1 の select が無い・未選択の形 (職員情報入力の前) では職員1 は見ない。
+    その場合は職員情報入力の後で一覧の行の職員と照らす。
+    """
+    waited = 0
+    while True:
+        try:
+            if _dialog_open(page) and _read_time_values(page) == old_values:
+                names = _dialog_staff_names(_read_dialog_staff(page))
+                if not names or not names[0] or _staff_text_matches(staff1, names[0]):
+                    return True
+        except Exception:
+            pass
+        if waited >= timeout_ms:
+            return False
+        page.wait_for_timeout(500)
+        waited += 500
+
+
 def _is_actual_dialog(page) -> bool:
     try:
         return bool(page.evaluate(
@@ -500,12 +605,17 @@ def edit_actual_time(page, user: str, item: dict, dry_run: bool = True) -> dict:
     if (item["old_start"], item["old_end"]) == (item["new_start"], item["new_end"]):
         return _detail(user, item, ST_SKIPPED, "no_change")
 
+    # 閉じ損ねたダイアログが残っていたら、次の行と取り違えないよう触らない (呼び出し側が全体を止める)
+    if _dialog_open(page):
+        print("    編集ダイアログが開いたままです → 処理を止めます")
+        return _detail(user, item, ST_FAILED, "dialog_left_open")
+
     _remove_floating_overlays(page)
     _wait_schedule_table(page)
     entries = _collect_with_retry(page, day)
-    hits = match_actual_entries(entries, day, item["old_start"], item["staff1"], item["old_end"])
+    target, why = find_target(entries, day, item["old_start"], item["staff1"], item["old_end"])
 
-    if not hits:
+    if why == "entry_not_found":
         done = match_actual_entries(entries, day, item["new_start"], item["staff1"], item["new_end"])
         if len(done) == 1 and entry_times(done[0])[1] == item["new_end"]:
             print("    すでに新しい時刻になっています → スキップ")
@@ -513,12 +623,10 @@ def edit_actual_time(page, user: str, item: dict, dry_run: bool = True) -> dict:
         print(f"    実績の行が見つかりません。その日の実績: {observed_for_day(entries, day)}")
         return _detail(user, item, ST_FAILED, "entry_not_found",
                        observed=observed_for_day(entries, day))
-    if len(hits) > 1:
-        print(f"    実績の行が {len(hits)} 件一致 → 触らない")
-        return _detail(user, item, ST_FAILED, "ambiguous",
-                       observed=observed_for_day(entries, day))
+    if why:
+        print(f"    実績の行を 1 件に決められません ({why}) → 触らない")
+        return _detail(user, item, ST_FAILED, why, observed=observed_for_day(entries, day))
 
-    target = hits[0]
     observed_old = "-".join(entry_times(target))
 
     # クリックする前に、nth の要素が読んだものと同じかを確かめる (描画の入れ替わり対策)
@@ -535,7 +643,12 @@ def edit_actual_time(page, user: str, item: dict, dry_run: bool = True) -> dict:
                          label="編集ダイアログ"):
         _close(page)
         return _detail(user, item, ST_FAILED, "open_failed")
-    page.wait_for_timeout(1000)
+
+    old_s, old_e = entry_times(target)
+    if not _wait_dialog_matches(page, _expected_time_values(old_s, old_e), item["staff1"]):
+        print(f"    ダイアログが特定した行と違います: 時刻={_read_time_values(page)} → 閉じる")
+        _close(page)
+        return _detail(user, item, ST_FAILED, "dialog_mismatch", observed_old=observed_old)
 
     if not _is_actual_dialog(page):
         print("    予定・実績が「実績」ではありません → 閉じる")
@@ -544,10 +657,17 @@ def edit_actual_time(page, user: str, item: dict, dry_run: bool = True) -> dict:
 
     before = page.evaluate(_STAFF_SNAPSHOT_JS)
 
-    sh, sm = map(int, item["new_start"].split(":"))
-    eh, em = map(int, item["new_end"].split(":"))
+    if _time_selects_locked(page):
+        print("    時刻の欄がロックされています → 閉じる")
+        _close(page)
+        return _detail(user, item, ST_FAILED, "locked")
+
     expected = _expected_time_values(item["new_start"], item["new_end"])
-    if not edit_schedule_time(page, sh, sm, eh, em) or _read_time_values(page) != expected:
+    try:
+        _set_time_values(page, item["new_start"], item["new_end"])
+    except Exception as e:
+        print(f"    時刻の選択でエラー: {e}")
+    if _read_time_values(page) != expected:
         print(f"    時刻を入れられませんでした: {_read_time_values(page)}")
         _close(page)
         return _detail(user, item, ST_FAILED, "time_set_failed")
@@ -557,17 +677,32 @@ def edit_actual_time(page, user: str, item: dict, dry_run: bool = True) -> dict:
         _close(page)
         return _detail(user, item, ST_FAILED, "staff_button_not_found")
 
+    # 押す前に無かった欄は戻しようがないので、押す前にあった欄だけを比べる
     after = page.evaluate(_STAFF_SNAPSHOT_JS)
-    diff = staff_snapshot_diff(before, after)
+    diff = [k for k in staff_snapshot_diff(before, after) if k in before]
     if diff:
         print(f"    担当欄が変わりました {diff} → 元へ戻します")
         _restore_staff(page, before, diff)
         after = page.evaluate(_STAFF_SNAPSHOT_JS)
-        diff = staff_snapshot_diff(before, after)
+        diff = [k for k in staff_snapshot_diff(before, after) if k in before]
         if diff:
             print(f"    担当欄を戻せません {diff} → 閉じる")
             _close(page)
             return _detail(user, item, ST_FAILED, "staff_changed", fields=diff)
+
+    # 職員1 は必須。押した後の職員1〜3 を一覧の行の職員1〜3 と照らす
+    names = _dialog_staff_names(_read_dialog_staff(page))
+    if not names or not names[0]:
+        print("    職員1 が空です → 閉じる")
+        _close(page)
+        return _detail(user, item, ST_FAILED, "staff_missing")
+    row_staff = target.get("staff_all") or [target.get("staff1", "")]
+    bad = staff_names_mismatch(row_staff, names)
+    if bad:
+        print(f"    担当が一覧の行と違います 職員{bad}: {names} / {row_staff} → 閉じる")
+        _close(page)
+        return _detail(user, item, ST_FAILED, "staff_changed",
+                       fields=[f"chargeStaff{n}Id1" for n in bad])
 
     if _read_time_values(page) != expected:
         print("    「職員情報入力」の後で時刻が変わりました → 閉じる")
@@ -660,16 +795,24 @@ def run_actual_time_edit(items: list, month: str, dry_run: bool = True, headless
         try:
             setup_monthly_schedule_page(page, context, month)
             stopped = False
+            stop_reason = "stopped"
             for user, user_items in groups:
                 if not stopped and is_stop_requested():
                     print("非常停止が要求されました。中断します。")
                     stopped = True
                 if stopped:
                     for it in user_items:
-                        record(_detail(user, it, ST_SKIPPED, "stopped"))
+                        record(_detail(user, it, ST_SKIPPED, stop_reason))
                     continue
 
                 print(f"\n--- 利用者: {user} ({len(user_items)}件) ---")
+                if _dialog_open(page):
+                    # 前の利用者のダイアログが閉じていない → 利用者を切り替えずに全体を止める
+                    print("    編集ダイアログが開いたままです → 処理を止めます")
+                    stopped, stop_reason = True, "dialog_left_open"
+                    for it in user_items:
+                        record(_detail(user, it, ST_SKIPPED, stop_reason))
+                    continue
                 ensure_session(page, context, month)
                 if not select_user(page, user):
                     for it in user_items:
@@ -680,14 +823,25 @@ def run_actual_time_edit(items: list, month: str, dry_run: bool = True, headless
                     if is_stop_requested():
                         stopped = True
                     if stopped:
-                        record(_detail(user, it, ST_SKIPPED, "stopped"))
+                        record(_detail(user, it, ST_SKIPPED, stop_reason))
                         continue
                     try:
+                        if _dialog_open(page):
+                            # 利用者の確認・切り替えより先に見る (ダイアログの裏で切り替えない)
+                            d = _detail(user, it, ST_FAILED, "dialog_left_open")
+                            record(d)
+                            print("    編集ダイアログが開いたままです → 処理を止めます")
+                            stopped, stop_reason = True, "dialog_left_open"
+                            continue
                         # 別の利用者の行を書き換えないよう、毎件確かめる
                         if not _check_current_user(page, user) and not select_user(page, user):
                             record(_detail(user, it, ST_SKIPPED, "user_not_found"))
                             continue
-                        record(edit_actual_time(page, user, it, dry_run=dry_run))
+                        d = edit_actual_time(page, user, it, dry_run=dry_run)
+                        record(d)
+                        if d.get("reason") == "dialog_left_open":
+                            stop_reason = "dialog_left_open"
+                            stopped = True
                     except Exception as e:
                         print(f"    エラー: {e}")
                         _close(page)
