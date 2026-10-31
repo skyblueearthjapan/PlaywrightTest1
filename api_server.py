@@ -14,6 +14,8 @@ VNC/noVNC経由でブラウザ画面をリアルタイム配信します。
     GET  /api/export/result - CSV出力結果取得（ポーリング用）
     POST /api/apply   - 差分適用
     GET  /api/apply/result  - 差分適用結果取得（ポーリング用）
+    POST /api/actual-time/apply  - 実績時刻の書き換え（常に非同期・202）
+    GET  /api/actual-time/result - 実績時刻の書き換え結果取得（ポーリング用）
     POST /api/allocate - 配置エンジン実行
     GET  /api/status  - サーバー状態確認
 
@@ -1299,6 +1301,130 @@ def api_apply_result():
         "status": "no_result",
         "message": "適用結果がありません。先に /api/apply を呼び出してください。",
     })
+
+
+# actual-time(実績時刻の書き換え)結果ストア (individual-tasks-apply と同じ流儀)
+actual_time_result_store = {
+    "result": None,
+    "completed_at": None,
+    "error": None,
+    "job_id": None,
+}
+actual_time_progress = {}
+
+
+@app.route('/api/actual-time/apply', methods=['POST'])
+def api_actual_time_apply():
+    """実績時刻の書き換え API (ACTUAL_TIME_EDIT_SPEC.md)
+
+    月間スケジュール一覧の実績側の行の開始・終了時刻を、その場で書き換える。
+    常に非同期: 202 を返し、結果は /api/actual-time/result でポーリングする。
+
+    payload: { "month": "2026-10", "dry_run": true(既定),
+               "items": [{item_id, user_name, date, old_start, old_end, staff1, new_start, new_end}],
+               "job_id": "...", "headed": true, "credentials": {...}(任意) }
+    """
+    global current_task, actual_time_result_store, actual_time_progress
+    from commands.actual_time_edit import validate_request, run_actual_time_edit
+
+    data = request.get_json(silent=True) or {}
+    month = data.get("month")
+    items, errors = validate_request(month, data.get("items"))
+    if errors:
+        return jsonify({"success": False, "error": "入力が不正です", "errors": errors[:50]}), 400
+    dry_run = data.get("dry_run", True)
+    if not isinstance(dry_run, bool):
+        return jsonify({"success": False, "error": "dry_run は true/false で指定してください"}), 400
+    job_id = str(data.get("job_id") or "") or None
+    headed = data.get("headed", True)
+
+    with job_state_lock:
+        if current_task["running"]:
+            return jsonify({
+                "success": False,
+                "error": "別のタスクが実行中です",
+                "current_task": dict(current_task),
+            }), 409
+        current_task = {
+            "running": True,
+            "command": "actual_time",
+            "started_at": datetime.now().isoformat(),
+        }
+        actual_time_result_store = {
+            "result": None, "completed_at": None, "error": None, "job_id": job_id,
+        }
+        actual_time_progress = {"processed": 0, "total": len(items),
+                                "updated_at": datetime.now().isoformat()}
+
+    try:
+        apply_request_credentials(data)
+        clear_stop()
+        add_log(f"actual-time 開始 (month={month}, {len(items)}件, dry_run={dry_run}, job_id={job_id})")
+
+        def on_progress(p):
+            with job_state_lock:
+                actual_time_progress.update(p)
+                actual_time_progress["updated_at"] = datetime.now().isoformat()
+
+        def run_actual_time_async():
+            global current_task, actual_time_result_store
+            try:
+                result = run_actual_time_edit(items, month, dry_run=dry_run,
+                                              headless=not headed, progress_callback=on_progress)
+                add_log(f"actual-time 完了: success={result.get('success')} "
+                        f"dry_run_ok={result.get('dry_run_ok')} failed={result.get('failed')}")
+                with job_state_lock:
+                    actual_time_result_store = {
+                        "result": result, "completed_at": datetime.now().isoformat(),
+                        "error": None, "job_id": job_id,
+                    }
+            except Exception as e:
+                add_log(f"actual-time エラー: {e}")
+                import traceback
+                traceback.print_exc()
+                with job_state_lock:
+                    actual_time_result_store = {
+                        "result": None, "completed_at": datetime.now().isoformat(),
+                        "error": str(e), "job_id": job_id,
+                    }
+            finally:
+                with job_state_lock:
+                    current_task = {"running": False, "command": None, "started_at": None}
+
+        threading.Thread(target=run_actual_time_async, daemon=True).start()
+        return jsonify({"success": True, "async": True, "job_id": job_id,
+                        "total": len(items), "dry_run": dry_run}), 202
+
+    except Exception as e:
+        add_log(f"actual-time 開始エラー: {e}")
+        with job_state_lock:
+            current_task = {"running": False, "command": None, "started_at": None}
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/actual-time/result', methods=['GET'])
+def api_actual_time_result():
+    """実績時刻の書き換えの結果取得（ポーリング用・individual-tasks-apply/result と同型）"""
+    with job_state_lock:
+        running = (
+            current_task.get("running", False)
+            and str(current_task.get("command") or "").startswith("actual_time")
+        )
+        started_at = current_task.get("started_at")
+        store = dict(actual_time_result_store)
+        progress = dict(actual_time_progress)
+
+    if running:
+        return jsonify({"success": True, "status": "running", "job_id": store.get("job_id"),
+                        "started_at": started_at, "progress": progress})
+    if store.get("error"):
+        return jsonify({"success": False, "status": "error", "job_id": store.get("job_id"),
+                        "error": store["error"], "completed_at": store.get("completed_at")})
+    if store.get("result"):
+        return jsonify({"success": True, "status": "completed", "job_id": store.get("job_id"),
+                        "result": store["result"], "completed_at": store.get("completed_at")})
+    return jsonify({"success": False, "status": "no_result", "job_id": store.get("job_id"),
+                    "message": "actual-time 結果がありません。"})
 
 
 @app.route('/api/config', methods=['GET', 'POST'])
