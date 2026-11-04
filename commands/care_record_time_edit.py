@@ -131,9 +131,14 @@ def expected_service_date(month: str, day: int) -> str:
     return f"{int(y):04d}/{int(mo):02d}/{int(day):02d}"
 
 
+# カイポケの中で同じ方の名前が字形違いで出る組 (11/4 本番: 実績の CSV は「齊藤」・記録書Ⅱの画面は「齋藤」)。
+# 患者様の照合のときだけ同じ字とみなす。ほかの字は、本番の例を確かめてから足す。
+_NAME_VARIANTS = str.maketrans({"齋": "齊"})  # 齋 → 齊
+
+
 def normalize_person_name(value) -> str:
     """名前の空白 (半角・全角) を除く。'青栁 あい' → '青栁あい'"""
-    return re.sub(r"[\s\u3000]", "", str(value or ""))
+    return re.sub(r"[\s\u3000]", "", str(value or "")).translate(_NAME_VARIANTS)
 
 
 def check_edit_screen(screen: dict, month: str, item: dict, doc_id: str, patient: str) -> str:
