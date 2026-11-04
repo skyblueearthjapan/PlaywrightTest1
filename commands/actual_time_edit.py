@@ -618,8 +618,10 @@ def _detail(user: str, item: dict, status: str, reason: str = None, **extra) -> 
         d["reason"] = reason
     if item.get("care_record"):
         # 記録書Ⅱの既定は「実績が書けていないので触らない」。そろえたときは _with_care_record が上書きする
+        # 実績が停止・user_not_found などで飛んだときは、元の理由が分かるように actual_skipped:<理由>
         d["care_record_status"] = ST_SKIPPED
-        d["care_record_reason"] = "actual_not_applied"
+        d["care_record_reason"] = (f"actual_skipped:{reason}" if status == ST_SKIPPED and reason
+                                   else "actual_not_applied")
     d.update({k: v for k, v in extra.items() if v not in (None, [], "")})
     return d
 
@@ -658,7 +660,7 @@ def _with_care_record(page, user: str, item: dict, d: dict, month: str, dry_run:
     if c.get("reason"):
         d["care_record_reason"] = c["reason"]
     extra = {k: c[k] for k in ("observed", "observed_record", "observed_after", "screen", "messages",
-                               "message", "back_reason", "back_messages") if c.get(k)}
+                               "message", "back_reason", "back_messages", "fields", "form_diff") if c.get(k)}
     if extra:
         d["care_record_detail"] = extra
     return d

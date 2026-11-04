@@ -8,11 +8,13 @@
 1 件の手順:
   月間スケジュール一覧で実績の行 (日付・実績の開始/終了・職員1) を特定
   → 同じ行の記録書のマーク (div.record-time a[onclick^=submitForm123]) を押す
-  → 記録書Ⅱの編集画面 (/bizhnc/careRecordEdit/) で 訪問日 (serviceDate)・職員1・旧の時刻 を照らす
-  → 4 つの時刻だけを選ぶ (ほかの欄には触らない)
+  → 記録書Ⅱの編集画面 (/bizhnc/careRecordEdit/) で 記録書の番号・利用者 (userSurname+userName)・
+    訪問日 (serviceDate)・職員1・旧の時刻 を照らす
+  → 4 つの時刻だけを選ぶ (ほかの欄には触らない)。選ぶ前と後でフォーム全体を比べ、時刻の 4 つ以外が変われば戻す
   → dry_run: 時刻を元へ戻し、保存せず「戻る」(#backButton)
      本番: 「保存する」(#editButton) → confirm('入力した内容で変更しますか？') を OK
            → 月間スケジュールへ戻り、同じ行の記録書Ⅱの時刻 (span.time-difference-care-record-document2) を読み直す
+           → もう一度その記録書Ⅱを開き、時刻が新しい値で、ほかの欄が保存前と同じか確かめて「戻る」
 
 記録書Ⅱが無い訪問は作らない (skipped / no_care_record)。
 
@@ -129,17 +131,32 @@ def expected_service_date(month: str, day: int) -> str:
     return f"{int(y):04d}/{int(mo):02d}/{int(day):02d}"
 
 
-def check_edit_screen(screen: dict, month: str, item: dict, doc_id: str = "") -> str:
+def normalize_person_name(value) -> str:
+    """名前の空白 (半角・全角) を除く。'青栁 あい' → '青栁あい'"""
+    return re.sub(r"[\s\u3000]", "", str(value or ""))
+
+
+def check_edit_screen(screen: dict, month: str, item: dict, doc_id: str, patient: str) -> str:
     """開いた記録書Ⅱの編集画面が、項目の訪問のものか照らす。
 
     None = 照らし合わせが通り、旧の時刻のまま (書き換えてよい)。
     それ以外は理由コード:
-      doc_mismatch (開いた記録書の番号が押したマークと違う) / date_mismatch / staff_mismatch /
+      doc_unreadable (記録書の番号が読めない) / doc_mismatch (押したマークと違う) /
+      patient_unreadable / patient_mismatch (画面の利用者名と patient が空白を除いて完全一致しない) /
+      date_mismatch / staff_mismatch /
       time_unreadable / already_applied (すでに新しい時刻) / time_mismatch (旧の時刻と違う)
     """
     shown_doc = str(screen.get("doc_id") or "").strip()
-    if doc_id and shown_doc and shown_doc != str(doc_id):
+    if not shown_doc:
+        return "doc_unreadable"
+    if shown_doc != str(doc_id or "").strip():
         return "doc_mismatch"
+    shown_patient = normalize_person_name(
+        f"{screen.get('user_surname') or ''}{screen.get('user_name') or ''}")
+    if not shown_patient:
+        return "patient_unreadable"
+    if shown_patient != normalize_person_name(patient):
+        return "patient_mismatch"
     if normalize_service_date(screen.get("service_date")) != expected_service_date(month, item["day"]):
         return "date_mismatch"
     if not _staff_text_matches(item["staff1"], screen.get("staff_text") or ""):
@@ -156,6 +173,8 @@ def check_edit_screen(screen: dict, month: str, item: dict, doc_id: str = "") ->
 
 # 戻るときのダイアログ: 「登録せずに戻る」側だと文言から分かるものだけ OK する
 _DISCARD_WORDS = ("せずに", "破棄", "保存されません", "登録されません", "反映されません", "失われ", "消えます")
+# 保存・変更・登録を尋ねる文は、ほかの言葉があっても OK しない
+_SAVE_ASK_WORDS = ("保存しますか", "変更しますか", "登録しますか")
 
 
 def back_dialog_action(dialog_type: str, message: str) -> str:
@@ -164,11 +183,14 @@ def back_dialog_action(dialog_type: str, message: str) -> str:
     - beforeunload: accept = 保存せずにページを離れる
     - alert: OK しか無い (文言は記録する)
     - confirm: 「保存せず」の文言のときだけ OK。それ以外は保存になるおそれがあるのでキャンセルし、失敗で止める
+      「保存しますか」「変更しますか」「登録しますか」を含む文は OK しない
     """
     t = (dialog_type or "").lower()
+    msg = message or ""
     if t in ("beforeunload", "alert"):
         return "accept"
-    if t == "confirm" and any(w in (message or "") for w in _DISCARD_WORDS):
+    if (t == "confirm" and not any(w in msg for w in _SAVE_ASK_WORDS)
+            and any(w in msg for w in _DISCARD_WORDS)):
         return "accept"
     return "dismiss_unknown"
 
@@ -182,6 +204,19 @@ def save_dialog_action(dialog_type: str, message: str) -> str:
     if t == "alert":
         return "accept"
     return "dismiss_unknown"
+
+
+def form_diff(before: dict, after: dict, ignore=()) -> dict:
+    """フォームの値 (名前 → 値、同名は配列) を比べる。{名前: [前, 後]} (無い欄は None)"""
+    before, after = before or {}, after or {}
+    out = {}
+    for k in sorted(set(before) | set(after)):
+        if k in ignore:
+            continue
+        b, a = before.get(k), after.get(k)
+        if b != a:
+            out[k] = [b, a]
+    return out
 
 
 def validate_request(month, items):
@@ -218,7 +253,7 @@ def validate_request(month, items):
         if day is None:
             bad.append("date")
         bad.extend(k for k, v in times.items() if not v)
-        for a, b in (("actual_start", "actual_end"), ("new_start", "new_end")):
+        for a, b in (("actual_start", "actual_end"), ("old_start", "old_end"), ("new_start", "new_end")):
             if times[a] and times[b] and times[a] >= times[b]:
                 bad.append(f"{a}<{b}")
         if bad:
@@ -238,6 +273,14 @@ def validate_request(month, items):
 _RECORD_ANCHOR = "div.record-time a[onclick^='submitForm123']"
 _TIME_NAMES = ["visitYmdStartHour", "visitYmdStartMin", "visitYmdEndHour", "visitYmdEndMin"]
 _EDIT_SCREEN_MARK = "select[name='visitYmdStartHour']"
+_FORM_SELECTOR = "#careRecordUpdateForm"
+# 保存で変わって当然の隠し値。保存の後に開き直して比べるときだけ除く (時刻を選ぶ前後の比べには使わない)
+_SAVE_VOLATILE_NAMES = frozenset({
+    "updateDateAndTimeDocument2",      # 最終更新日時
+    "updateUserFullNameDocument2",     # 最終更新者
+    "org.apache.struts.taglib.html.TOKEN",
+    "_csrf", "csrfToken", "token",
+})
 
 _READ_EDIT_SCREEN_JS = """(names) => {
   const byName = n => document.querySelector(`[name="${n}"]`);
@@ -247,15 +290,35 @@ _READ_EDIT_SCREEN_JS = """(names) => {
   const sels = names.map(n => document.querySelector(`select[name="${n}"]`));
   const upd = byName('updateDateAndTimeDocument2');
   const sd = byName('serviceDate');
+  const us = document.querySelector('input[name="userSurname"]');
+  const un = document.querySelector('input[name="userName"]');
   return {
     url: location.href,
     service_date: sd ? sd.value : '',
+    user_surname: us ? us.value : '',
+    user_name: un ? un.value : '',
     staff_text: so ? so.text.trim() : '',
     doc_id: docSel ? (docSel.value || '') : '',
     times: sels.map(el => el ? el.value : null),
     time_disabled: sels.some(el => !el || el.disabled),
     updated_at: upd ? upd.value : '',
   };
+}"""
+
+_READ_FORM_JS = """(sel) => {
+  const f = document.querySelector(sel);
+  if (!f) return null;
+  const out = {};
+  for (const [k, v] of new FormData(f)) {
+    const s = typeof v === 'string' ? v : ((v && v.name) || '');
+    if (Object.prototype.hasOwnProperty.call(out, k)) {
+      if (!Array.isArray(out[k])) out[k] = [out[k]];
+      out[k].push(s);
+    } else {
+      out[k] = s;
+    }
+  }
+  return out;
 }"""
 
 _PAGE_ERRORS_JS = """() => Array.from(document.querySelectorAll(
@@ -274,6 +337,14 @@ def _on_edit_screen(page) -> bool:
 
 def _read_edit_screen(page) -> dict:
     return page.evaluate(_READ_EDIT_SCREEN_JS, _TIME_NAMES) or {}
+
+
+def _read_form(page):
+    """フォーム #careRecordUpdateForm の全項目 (new FormData・同名は配列)。読めなければ None"""
+    try:
+        return page.evaluate(_READ_FORM_JS, _FORM_SELECTOR)
+    except Exception:
+        return None
 
 
 def _page_errors(page) -> list:
@@ -375,9 +446,11 @@ def _back_to_schedule(page, user: str, month: str) -> tuple:
 def _save(page) -> tuple:
     """「保存する」を押し、確認 (入力した内容で変更しますか？) を OK する。
 
-    (確認を OK したか, 分からないダイアログがあったか, 出たダイアログの文言)
+    (確認を OK したか, 確認の前に分からないダイアログがあったか,
+     確認を OK した後に分からないダイアログがあったか (保存済みの可能性あり), 出たダイアログの文言)
     """
-    messages, state = [], {"confirmed": False, "unknown": False}
+    messages = []
+    state = {"confirmed": False, "unknown_before": False, "unknown_after": False}
 
     def on_dialog(dialog):
         messages.append(f"[{dialog.type}] {dialog.message}")
@@ -388,7 +461,7 @@ def _save(page) -> tuple:
         elif act == "accept":
             dialog.accept()
         else:
-            state["unknown"] = True
+            state["unknown_after" if state["confirmed"] else "unknown_before"] = True
             dialog.dismiss()
 
     page.on("dialog", on_dialog)
@@ -405,7 +478,7 @@ def _save(page) -> tuple:
             page.remove_listener("dialog", on_dialog)
         except Exception:
             pass
-    return state["confirmed"], state["unknown"], messages
+    return state["confirmed"], state["unknown_before"], state["unknown_after"], messages
 
 
 def _save_artifacts(page, prefix: str) -> None:
@@ -413,6 +486,24 @@ def _save_artifacts(page, prefix: str) -> None:
         save_artifacts(page, Path("artifacts"), prefix)
     except Exception:
         pass
+
+
+def _open_record(page, target: dict, rec_onclick: str) -> tuple:
+    """一覧の行の記録書のマークを押して編集画面を開く。(理由コード or None, 補足)"""
+    idx = target.get("rec_idx", -1)
+    # 押す前に、nth の要素が読んだものと同じかを確かめる (描画の入れ替わり対策)
+    link = page.locator(_RECORD_ANCHOR).nth(idx)
+    try:
+        if idx < 0 or (link.get_attribute("onclick") or "") != rec_onclick:
+            return "entry_not_found", "一覧が読み直しの間に変わりました"
+        _click_with_scroll(page, link)
+    except Exception as e:
+        return "open_failed", str(e)[:200]
+    _wait_load(page)
+    if not _wait_visible(page, page.locator(_EDIT_SCREEN_MARK), timeout_ms=20000, label="記録書Ⅱの編集画面"):
+        _save_artifacts(page, "care_record_open_failed")
+        return "open_failed", None
+    return None, None
 
 
 def _detail(user: str, item: dict, status: str, reason: str = None, **extra) -> dict:
@@ -488,20 +579,9 @@ def edit_care_record_time(page, user: str, item: dict, month: str, dry_run: bool
         print(f"    一覧の記録書Ⅱの時刻 {observed_record} が旧の時刻と違います → 触らない")
         return _detail(user, item, ST_FAILED, "record_time_mismatch", observed_record=observed_record)
 
-    # 押す前に、nth の要素が読んだものと同じかを確かめる (描画の入れ替わり対策)
-    link = page.locator(_RECORD_ANCHOR).nth(target.get("rec_idx", -1))
-    try:
-        if target.get("rec_idx", -1) < 0 or (link.get_attribute("onclick") or "") != rec_onclick:
-            return _detail(user, item, ST_FAILED, "entry_not_found",
-                           message="一覧が読み直しの間に変わりました")
-        _click_with_scroll(page, link)
-    except Exception as e:
-        return _detail(user, item, ST_FAILED, "open_failed", message=str(e)[:200])
-
-    _wait_load(page)
-    if not _wait_visible(page, page.locator(_EDIT_SCREEN_MARK), timeout_ms=20000, label="記録書Ⅱの編集画面"):
-        _save_artifacts(page, "care_record_open_failed")
-        return _detail(user, item, ST_FAILED, "open_failed")
+    why, note = _open_record(page, target, rec_onclick)
+    if why:
+        return _detail(user, item, ST_FAILED, why, message=note)
 
     def back_and_fail(reason, **extra):
         why_back, msgs = _back_to_schedule(page, user, month)
@@ -514,7 +594,7 @@ def edit_care_record_time(page, user: str, item: dict, month: str, dry_run: bool
         return _detail(user, item, ST_FAILED, reason, observed_record=observed_record, **extra)
 
     screen = _read_edit_screen(page)
-    why = check_edit_screen(screen, month, item, doc_id)
+    why = check_edit_screen(screen, month, item, doc_id, user)
     if why == "already_applied":
         why_back, msgs = _back_to_schedule(page, user, month)
         if why_back:
@@ -529,24 +609,43 @@ def edit_care_record_time(page, user: str, item: dict, month: str, dry_run: bool
         print("    時刻の欄が無い・ロックされています → 保存せず戻る")
         return back_and_fail("locked")
 
+    def restore_old():
+        try:
+            _set_care_times(page, old[0], old[1])
+        except Exception as e:
+            print(f"    時刻を元へ戻せませんでした: {e}")
+
+    before = _read_form(page)
+    if not before:
+        print("    フォームを読めません → 保存せず戻る")
+        return back_and_fail("form_unreadable")
+
     try:
         _set_care_times(page, new[0], new[1])
     except Exception as e:
         print(f"    時刻の選択でエラー: {e}")
     if _times_now(page) != new:
         print(f"    時刻を入れられませんでした: {_times_now(page)}")
-        try:
-            _set_care_times(page, old[0], old[1])
-        except Exception:
-            pass
+        restore_old()
         return back_and_fail("time_set_failed")
+
+    # 時刻を選んだ後のフォームを読み比べ、時刻の 4 つ以外が変わっていたら戻す (dry_run でも同じ)
+    after = _read_form(page)
+    if not after:
+        print("    時刻を選んだ後のフォームを読めません → 時刻を戻して保存せず戻る")
+        restore_old()
+        return back_and_fail("form_unreadable")
+    diff = form_diff(before, after)
+    others = [k for k in diff if k not in _TIME_NAMES]
+    if others:
+        print(f"    時刻のほかの欄が変わりました {others} → 時刻を戻して保存せず戻る")
+        restore_old()
+        return back_and_fail("other_field_changed", fields=others,
+                             form_diff={k: diff[k] for k in others})
 
     if dry_run:
         # 保存しない。変更の確認ダイアログを避けるため、時刻を元へ戻してから戻る
-        try:
-            _set_care_times(page, old[0], old[1])
-        except Exception as e:
-            print(f"    時刻を元へ戻せませんでした: {e}")
+        restore_old()
         why_back, msgs = _back_to_schedule(page, user, month)
         if why_back:
             print(f"    dry_run: 保存せずに戻れません ({why_back}) {msgs}")
@@ -554,11 +653,16 @@ def edit_care_record_time(page, user: str, item: dict, month: str, dry_run: bool
             return _detail(user, item, ST_FAILED, why_back, back_messages=msgs,
                            observed_record=observed_record)
         print("    dry_run: 保存せずに戻りました")
-        return _detail(user, item, ST_DRY_RUN_OK, observed_record=observed_record, back_messages=msgs)
+        return _detail(user, item, ST_DRY_RUN_OK, observed_record=observed_record, back_messages=msgs,
+                       form_diff=diff)
 
-    confirmed, unknown, messages = _save(page)
-    if unknown or not confirmed:
-        reason = "save_dialog_unknown" if unknown else "save_not_confirmed"
+    confirmed, unknown_before, unknown_after, messages = _save(page)
+    if unknown_after:
+        print(f"    保存の確認を OK した後に分からないダイアログが出ました {messages} → 保存済みの可能性あり")
+        _save_artifacts(page, "care_record_save_unknown")
+        return back_and_fail("save_maybe_saved", messages=messages)
+    if unknown_before or not confirmed:
+        reason = "save_dialog_unknown" if unknown_before else "save_not_confirmed"
         print(f"    保存の確認が想定と違います ({reason}) {messages} → 保存せず戻る")
         _save_artifacts(page, "care_record_save_unknown")
         return back_and_fail(reason, messages=messages)
@@ -576,20 +680,53 @@ def edit_care_record_time(page, user: str, item: dict, month: str, dry_run: bool
                        messages=messages, back_messages=back_msgs, observed_record=observed_record)
 
     # 一覧を読み直して確かめる (行の鍵は実績の時刻のまま)
-    got = ("", "")
+    got, t = ("", ""), None
     for attempt in range(3):
         entries = collect_actual_entries(page)
         t, _ = find_target(entries, day, item["actual_start"], item["staff1"], item["actual_end"])
         got = parse_record_time(t.get("record_time") or "") if t else ("", "")
         if got == new:
             print("    一覧で記録書Ⅱの新しい時刻を確認しました")
-            return _detail(user, item, ST_SUCCESS, observed_record=observed_record, messages=messages)
+            break
         if attempt < 2:
             _wait_load(page, 5000)
             page.wait_for_timeout(1500)
-    print(f"    一覧で記録書Ⅱの新しい時刻を確認できません (読めた時刻 {got})")
-    return _detail(user, item, ST_FAILED, "verify_failed", observed_record=observed_record,
-                   observed_after="-".join(got) if got[0] else "", messages=messages)
+    if got != new:
+        print(f"    一覧で記録書Ⅱの新しい時刻を確認できません (読めた時刻 {got})")
+        return _detail(user, item, ST_FAILED, "verify_failed", observed_record=observed_record,
+                       observed_after="-".join(got) if got[0] else "", messages=messages)
+
+    # もう一度その記録書Ⅱを開き、時刻が新しい値で、ほかの欄が保存前と同じか確かめる (保存済み)
+    saved = dict(observed_record=observed_record, observed_after="-".join(got), messages=messages)
+    why, note = _open_record(page, t, rec_onclick)
+    if why:
+        print(f"    確かめるために記録書Ⅱを開き直せません ({why})")
+        return _detail(user, item, ST_FAILED, "verify_failed", message=f"開き直せません ({why}) {note or ''}".strip(),
+                       **saved)
+    reopened = _read_edit_screen(page)
+    form_after = _read_form(page)
+    ident = check_edit_screen(reopened, month, item, doc_id, user)
+    diff = form_diff(before, form_after, ignore=_SAVE_VOLATILE_NAMES) if form_after else {}
+    others = [k for k in diff if k not in _TIME_NAMES]
+    why_back, back_msgs = _back_to_schedule(page, user, month)
+    if why_back:
+        print(f"    確かめた後に月間スケジュールへ戻れません ({why_back})")
+        _save_artifacts(page, "care_record_back_failed")
+        saved.update(back_reason=why_back, back_messages=back_msgs)
+    if ident != "already_applied" or not form_after:
+        # already_applied = 番号・利用者・訪問日・職員1 が合い、時刻が新しい値
+        print(f"    開き直した記録書Ⅱを確かめられません ({ident or 'time_not_new'}): {_screen_summary(reopened)}")
+        return _detail(user, item, ST_FAILED, "verify_failed", screen=_screen_summary(reopened),
+                       message=("フォームを読めません" if not form_after else f"開き直した画面: {ident or 'time_not_new'}"),
+                       **saved)
+    if others:
+        print(f"    保存の後、時刻のほかの欄が変わっています {others} (保存済み)")
+        return _detail(user, item, ST_FAILED, "verify_other_field_changed", fields=others, form_diff=diff, **saved)
+    if why_back:
+        return _detail(user, item, ST_FAILED, "verify_failed", form_diff=diff,
+                       message="保存と時刻は確認済み・戻れない", **saved)
+    print("    開き直して、時刻が新しい値でほかの欄が変わっていないことを確認しました")
+    return _detail(user, item, ST_SUCCESS, form_diff=diff, **saved)
 
 
 # =============================================================================

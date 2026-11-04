@@ -1339,6 +1339,8 @@ def api_actual_time_apply():
         return jsonify({"success": False, "error": "dry_run は true/false で指定してください"}), 400
     job_id = str(data.get("job_id") or "") or None
     headed = data.get("headed", True)
+    if not isinstance(headed, bool):
+        return jsonify({"success": False, "error": "headed は true/false で指定してください"}), 400
 
     with job_state_lock:
         if current_task["running"]:
@@ -1464,6 +1466,8 @@ def api_care_record_time_apply():
         return jsonify({"success": False, "error": "dry_run は true/false で指定してください"}), 400
     job_id = str(data.get("job_id") or "") or None
     headed = data.get("headed", True)
+    if not isinstance(headed, bool):
+        return jsonify({"success": False, "error": "headed は true/false で指定してください"}), 400
 
     with job_state_lock:
         if current_task["running"]:

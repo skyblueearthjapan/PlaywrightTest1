@@ -46,10 +46,35 @@ ITEM = {
 }
 
 
+PATIENT = "青栁 あい"
+DOC = "1196884700"
+
+
 def screen(date="2026/10/01", staff="熊澤 妙子", times=("14", "33", "15", "33"),
-           doc_id="1196884700", disabled=False):
+           doc_id=DOC, disabled=False, surname="青栁", name="あい"):
     return {"service_date": date, "staff_text": staff, "times": list(times),
-            "doc_id": doc_id, "time_disabled": disabled, "updated_at": "x"}
+            "doc_id": doc_id, "time_disabled": disabled, "updated_at": "x",
+            "user_surname": surname, "user_name": name}
+
+
+NEW_SCREEN = screen(times=("14", "53", "15", "33"))
+
+
+def form(start=("14", "33"), end=("15", "33"), **over):
+    """#careRecordUpdateForm を new FormData で読んだ形 (同名は配列)"""
+    f = {"visitYmdStartHour": start[0], "visitYmdStartMin": start[1],
+         "visitYmdEndHour": end[0], "visitYmdEndMin": end[1],
+         "serviceCode": "1101", "careDocument2Dto.staffMemberInternalId": "77",
+         "observation": "落ち着いて過ごされている", "vital": ["36.5", "120"],
+         "updateDateAndTimeDocument2": "2026/10/01 18:00", "updateUserFullNameDocument2": "熊澤 妙子"}
+    f.update(over)
+    return f
+
+
+FORM_OLD = form()
+FORM_NEW = form(start=("14", "53"))
+FORM_SAVED = form(start=("14", "53"), updateDateAndTimeDocument2="2026/11/04 21:00",
+                  updateUserFullNameDocument2="RPA")
 
 
 class TestPure(unittest.TestCase):
@@ -87,17 +112,43 @@ class TestPure(unittest.TestCase):
         self.assertEqual(crt.expected_service_date("2026-10", 1), "2026/10/01")
 
     def test_check_edit_screen(self):
-        chk = crt.check_edit_screen
-        self.assertIsNone(chk(screen(), "2026-10", ITEM, "1196884700"))
-        self.assertIsNone(chk(screen(doc_id=""), "2026-10", ITEM, "1196884700"))
-        self.assertEqual(chk(screen(doc_id="9"), "2026-10", ITEM, "1196884700"), "doc_mismatch")
-        self.assertEqual(chk(screen(date="2026/10/02"), "2026-10", ITEM), "date_mismatch")
-        self.assertEqual(chk(screen(date=""), "2026-10", ITEM), "date_mismatch")
-        self.assertEqual(chk(screen(staff="高岡はるか"), "2026-10", ITEM), "staff_mismatch")
-        self.assertEqual(chk(screen(staff="熊澤妙子(重複)"), "2026-10", ITEM), None)
-        self.assertEqual(chk(screen(times=("14", "", "15", "33")), "2026-10", ITEM), "time_unreadable")
-        self.assertEqual(chk(screen(times=("14", "53", "15", "33")), "2026-10", ITEM), "already_applied")
-        self.assertEqual(chk(screen(times=("14", "30", "15", "33")), "2026-10", ITEM), "time_mismatch")
+        def chk(scr, doc=DOC, patient=PATIENT):
+            return crt.check_edit_screen(scr, "2026-10", ITEM, doc, patient)
+        self.assertIsNone(chk(screen()))
+        self.assertEqual(chk(screen(doc_id="")), "doc_unreadable")
+        self.assertEqual(chk(screen(doc_id="9")), "doc_mismatch")
+        self.assertEqual(chk(screen(date="2026/10/02")), "date_mismatch")
+        self.assertEqual(chk(screen(date="")), "date_mismatch")
+        self.assertEqual(chk(screen(staff="高岡はるか")), "staff_mismatch")
+        self.assertEqual(chk(screen(staff="熊澤妙子(重複)")), None)
+        self.assertEqual(chk(screen(times=("14", "", "15", "33"))), "time_unreadable")
+        self.assertEqual(chk(screen(times=("14", "53", "15", "33"))), "already_applied")
+        self.assertEqual(chk(screen(times=("14", "30", "15", "33"))), "time_mismatch")
+
+    def test_check_edit_screen_patient(self):
+        def chk(scr, patient):
+            return crt.check_edit_screen(scr, "2026-10", ITEM, DOC, patient)
+        self.assertIsNone(chk(screen(), "青栁あい"))
+        self.assertIsNone(chk(screen(), "青栁\u3000あい"))
+        self.assertIsNone(chk(screen(surname=" 青栁 ", name="あい "), "青栁 あい"))
+        self.assertEqual(chk(screen(), "青栁"), "patient_mismatch")          # 姓だけでは一致にしない
+        self.assertEqual(chk(screen(), "青柳 あい"), "patient_mismatch")     # 異体字は吸収しない
+        self.assertEqual(chk(screen(surname="", name=""), PATIENT), "patient_unreadable")
+        self.assertEqual(chk(screen(surname=" ", name="\u3000"), PATIENT), "patient_unreadable")
+        # 患者様の照合は時刻より先 (別の方の記録書を already_applied にしない)
+        self.assertEqual(chk(screen(surname="山田", times=("14", "53", "15", "33")), PATIENT), "patient_mismatch")
+        # 番号は患者様より先
+        self.assertEqual(chk(screen(doc_id="", surname=""), PATIENT), "doc_unreadable")
+
+    def test_form_diff(self):
+        self.assertEqual(crt.form_diff(FORM_OLD, dict(FORM_OLD)), {})
+        d = crt.form_diff(FORM_OLD, FORM_NEW)
+        self.assertEqual(d, {"visitYmdStartMin": ["33", "53"]})
+        d = crt.form_diff(FORM_OLD, form(vital=["36.5"], extra="1"))
+        self.assertEqual(d, {"vital": [["36.5", "120"], ["36.5"]], "extra": [None, "1"]})
+        d = crt.form_diff(FORM_NEW, FORM_SAVED, ignore=crt._SAVE_VOLATILE_NAMES)
+        self.assertEqual(d, {})
+        self.assertIn("updateDateAndTimeDocument2", crt.form_diff(FORM_NEW, FORM_SAVED))
 
     def test_dialog_actions(self):
         self.assertEqual(crt.back_dialog_action("confirm", "入力内容を登録せずに終了しますか？"), "accept")
@@ -106,6 +157,11 @@ class TestPure(unittest.TestCase):
         self.assertEqual(crt.back_dialog_action("beforeunload", ""), "accept")
         self.assertEqual(crt.back_dialog_action("alert", "x"), "accept")
         self.assertEqual(crt.back_dialog_action("prompt", "x"), "dismiss_unknown")
+        # 保存・変更・登録を尋ねる文は、「せずに」などがあっても OK しない
+        for msg in ["保存せずに戻ると変更が失われます。保存しますか？",
+                    "入力した内容で変更しますか？（変更せずに戻るにはキャンセル）",
+                    "破棄して登録しますか？"]:
+            self.assertEqual(crt.back_dialog_action("confirm", msg), "dismiss_unknown", msg)
         self.assertEqual(crt.save_dialog_action("confirm", "入力した内容で変更しますか？"), "accept_save")
         self.assertEqual(crt.save_dialog_action("confirm", "削除しますか？"), "dismiss_unknown")
         self.assertEqual(crt.save_dialog_action("alert", "必須です"), "accept")
@@ -137,6 +193,8 @@ class TestValidate(unittest.TestCase):
         self.assertTrue(v("2026-10", [self._item(old_end="x")])[1])
         self.assertTrue(v("2026-10", [self._item(new_start="16:00")])[1])
         self.assertTrue(v("2026-10", [self._item(actual_start="16:00")])[1])
+        self.assertTrue(v("2026-10", [self._item(old_start="15:33")])[1])
+        self.assertTrue(v("2026-10", [self._item(old_start="16:00")])[1])
         with mock.patch.object(crt, "MAX_ITEMS", 1):
             self.assertTrue(v("2026-10", [self._item(), self._item()])[1])
         items, errs = v("2026-10", [self._item(), self._item(staff1="")])
@@ -175,11 +233,14 @@ class TestEditFlow(unittest.TestCase):
             "_collect_with_retry": mock.Mock(return_value=entries),
             "collect_actual_entries": mock.Mock(return_value=after if after is not None else entries),
             "_click_with_scroll": mock.Mock(), "_wait_visible": mock.Mock(return_value=True),
-            "_read_edit_screen": mock.Mock(return_value=screen()),
+            # 1 回目 = 開いたとき、2 回目 = 保存の後に開き直したとき
+            "_read_edit_screen": mock.Mock(side_effect=[screen(), NEW_SCREEN]),
+            # 1 回目 = 時刻を選ぶ前、2 回目 = 選んだ後、3 回目 = 保存の後に開き直したとき
+            "_read_form": mock.Mock(side_effect=[FORM_OLD, FORM_NEW, FORM_SAVED]),
             "_set_care_times": mock.Mock(),
             "_times_now": mock.Mock(return_value=("14:53", "15:33")),
             "_back_to_schedule": mock.Mock(return_value=(None, [])),
-            "_save": mock.Mock(return_value=(True, False, ["[confirm] 入力した内容で変更しますか？"])),
+            "_save": mock.Mock(return_value=(True, False, False, ["[confirm] 入力した内容で変更しますか？"])),
             "_page_errors": mock.Mock(return_value=[]),
             "_save_artifacts": mock.Mock(),
         }
@@ -187,7 +248,7 @@ class TestEditFlow(unittest.TestCase):
         if onclick is None:
             onclick = entries[0]["record_onclick"] if entries else ""
         with mock.patch.multiple(crt, **p):
-            d = crt.edit_care_record_time(FakePage(onclick), "青栁", item, "2026-10", dry_run=dry_run)
+            d = crt.edit_care_record_time(FakePage(onclick), PATIENT, item, "2026-10", dry_run=dry_run)
         return d, p
 
     def test_no_care_record_is_skipped(self):
@@ -233,7 +294,10 @@ class TestEditFlow(unittest.TestCase):
         for scr, reason in [(screen(staff="高岡はるか"), "staff_mismatch"),
                             (screen(date="2026/10/02"), "date_mismatch"),
                             (screen(times=("14", "40", "15", "33")), "time_mismatch"),
-                            (screen(doc_id="1"), "doc_mismatch")]:
+                            (screen(doc_id="1"), "doc_mismatch"),
+                            (screen(doc_id=""), "doc_unreadable"),
+                            (screen(surname="山田", name="花子"), "patient_mismatch"),
+                            (screen(surname="", name=""), "patient_unreadable")]:
             d, m = self._run(es, _read_edit_screen=mock.Mock(return_value=scr))
             self.assertEqual((d["status"], d["reason"]), ("failed", reason))
             m["_set_care_times"].assert_not_called()
@@ -245,6 +309,13 @@ class TestEditFlow(unittest.TestCase):
         es[0].update(record_onclick="submitForm123(11834626, 1196884700);", rec_idx=0)
         d, m = self._run(es, _read_edit_screen=mock.Mock(return_value=screen(times=("14", "53", "15", "33"))))
         self.assertEqual((d["status"], d["reason"]), ("skipped", "already_applied"))
+        m["_save"].assert_not_called()
+
+    def test_form_unreadable(self):
+        d, m = self._run([entry(1, "14:53", "15:33", "熊澤妙子", record="14:33 ～ 15:33")],
+                         _read_form=mock.Mock(return_value=None))
+        self.assertEqual((d["status"], d["reason"]), ("failed", "form_unreadable"))
+        m["_set_care_times"].assert_not_called()
         m["_save"].assert_not_called()
 
     def test_locked(self):
@@ -266,6 +337,34 @@ class TestEditFlow(unittest.TestCase):
         self.assertEqual([c.args[1:] for c in m["_set_care_times"].call_args_list],
                          [("14:53", "15:33"), ("14:33", "15:33")])
         m["_back_to_schedule"].assert_called_once()
+        self.assertEqual(d["form_diff"], {"visitYmdStartMin": ["33", "53"]})
+
+    def _other_field_changed(self, dry_run):
+        changed = form(start=("14", "53"), observation="", vital=["36.5"])
+        d, m = self._run([entry(1, "14:53", "15:33", "熊澤妙子", record="14:33 ～ 15:33")], dry_run=dry_run,
+                         _read_form=mock.Mock(side_effect=[FORM_OLD, changed]))
+        self.assertEqual((d["status"], d["reason"]), ("failed", "other_field_changed"))
+        self.assertEqual(d["fields"], ["observation", "vital"])
+        self.assertEqual(d["form_diff"]["observation"], ["落ち着いて過ごされている", ""])
+        self.assertNotIn("visitYmdStartMin", d["form_diff"])
+        m["_save"].assert_not_called()
+        # 時刻を元へ戻してから戻る
+        self.assertEqual([c.args[1:] for c in m["_set_care_times"].call_args_list],
+                         [("14:53", "15:33"), ("14:33", "15:33")])
+        m["_back_to_schedule"].assert_called_once()
+
+    def test_other_field_changed_live(self):
+        self._other_field_changed(dry_run=False)
+
+    def test_other_field_changed_dry_run(self):
+        self._other_field_changed(dry_run=True)
+
+    def test_form_unreadable_after_set(self):
+        d, m = self._run([entry(1, "14:53", "15:33", "熊澤妙子", record="14:33 ～ 15:33")],
+                         _read_form=mock.Mock(side_effect=[FORM_OLD, None]))
+        self.assertEqual(d["reason"], "form_unreadable")
+        m["_save"].assert_not_called()
+        self.assertEqual(m["_set_care_times"].call_args_list[-1].args[1:], ("14:33", "15:33"))
 
     def test_dry_run_unknown_back_dialog(self):
         d, m = self._run([entry(1, "14:53", "15:33", "熊澤妙子", record="14:33 ～ 15:33")], dry_run=True,
@@ -280,6 +379,57 @@ class TestEditFlow(unittest.TestCase):
         self.assertEqual(d["status"], "success")
         self.assertEqual(d["observed_record"], "14:33-15:33")
         m["_save"].assert_called_once()
+        # 開き直して確かめ、戻った (保存の後の戻る + 開き直した後の戻る)
+        self.assertEqual(m["_click_with_scroll"].call_count, 2)
+        self.assertEqual(m["_back_to_schedule"].call_count, 2)
+        # 時刻以外の差は無い (最終更新日時・更新者は除外リスト)
+        self.assertEqual(d["form_diff"], {"visitYmdStartMin": ["33", "53"]})
+
+    def _live_after(self):
+        es = [entry(1, "14:53", "15:33", "熊澤妙子", record="14:33 ～ 15:33")]
+        after = [entry(1, "14:53", "15:33", "熊澤妙子", record="14:53 ～ 15:33")]
+        return es, after
+
+    def test_live_verify_other_field_changed(self):
+        es, after = self._live_after()
+        saved = dict(FORM_SAVED, observation="")
+        d, m = self._run(es, after=after, _read_form=mock.Mock(side_effect=[FORM_OLD, FORM_NEW, saved]))
+        self.assertEqual((d["status"], d["reason"]), ("failed", "verify_other_field_changed"))
+        self.assertEqual(d["fields"], ["observation"])
+        self.assertEqual(d["form_diff"]["observation"], ["落ち着いて過ごされている", ""])
+        self.assertEqual(m["_back_to_schedule"].call_count, 2)
+
+    def test_live_verify_reopened_time_not_new(self):
+        es, after = self._live_after()
+        d, m = self._run(es, after=after, _read_edit_screen=mock.Mock(side_effect=[screen(), screen()]))
+        self.assertEqual((d["status"], d["reason"]), ("failed", "verify_failed"))
+        self.assertEqual(m["_back_to_schedule"].call_count, 2)
+
+    def test_live_verify_reopened_other_patient(self):
+        es, after = self._live_after()
+        d, m = self._run(es, after=after, _read_edit_screen=mock.Mock(
+            side_effect=[screen(), screen(surname="山田", times=("14", "53", "15", "33"))]))
+        self.assertEqual((d["status"], d["reason"]), ("failed", "verify_failed"))
+
+    def test_live_verify_reopen_failed(self):
+        es, after = self._live_after()
+        d, m = self._run(es, after=after, _wait_visible=mock.Mock(side_effect=[True, False]))
+        self.assertEqual((d["status"], d["reason"]), ("failed", "verify_failed"))
+        self.assertIn("開き直せません", d["message"])
+
+    def test_live_verify_back_failed(self):
+        es, after = self._live_after()
+        d, m = self._run(es, after=after,
+                         _back_to_schedule=mock.Mock(side_effect=[(None, []), ("back_failed", [])]))
+        self.assertEqual((d["status"], d["reason"]), ("failed", "verify_failed"))
+        self.assertEqual(d["back_reason"], "back_failed")
+
+    def test_live_save_maybe_saved(self):
+        d, m = self._run([entry(1, "14:53", "15:33", "熊澤妙子", record="14:33 ～ 15:33")],
+                         _save=mock.Mock(return_value=(True, False, True,
+                                                       ["[confirm] 入力した内容で変更しますか？", "[confirm] ?"])))
+        self.assertEqual((d["status"], d["reason"]), ("failed", "save_maybe_saved"))
+        m["_back_to_schedule"].assert_called_once()
 
     def test_live_verify_failed(self):
         d, m = self._run([entry(1, "14:53", "15:33", "熊澤妙子", record="14:33 ～ 15:33")])
@@ -288,7 +438,7 @@ class TestEditFlow(unittest.TestCase):
 
     def test_live_unknown_save_dialog(self):
         d, m = self._run([entry(1, "14:53", "15:33", "熊澤妙子", record="14:33 ～ 15:33")],
-                         _save=mock.Mock(return_value=(False, True, ["[confirm] ?"])))
+                         _save=mock.Mock(return_value=(False, True, False, ["[confirm] ?"])))
         self.assertEqual((d["status"], d["reason"]), ("failed", "save_dialog_unknown"))
         m["_back_to_schedule"].assert_called_once()
 
@@ -357,6 +507,25 @@ class TestWithActual(unittest.TestCase):
         ed.assert_not_called()
         self.assertEqual((d["care_record_status"], d["care_record_reason"]), ("skipped", "actual_not_applied"))
 
+    def test_actual_skipped_keeps_reason(self):
+        it = self._item()
+        for reason in ("stopped", "user_not_found", "dialog_left_open", "edit_screen_left_open"):
+            d = ate._detail("青栁", it, "skipped", reason)
+            with mock.patch.object(crt, "edit_care_record_time") as ed:
+                d = ate._with_care_record(mock.Mock(), "青栁", it, d, "2026-10", False)
+            ed.assert_not_called()
+            self.assertEqual((d["care_record_status"], d["care_record_reason"]),
+                             ("skipped", f"actual_skipped:{reason}"))
+
+    def test_care_record_fields_passed_through(self):
+        it = self._item()
+        d = ate._detail("青栁", it, "success")
+        with mock.patch.object(crt, "edit_care_record_time", return_value={
+                "status": "failed", "reason": "other_field_changed", "fields": ["vital"],
+                "form_diff": {"vital": ["1", "2"]}}):
+            d = ate._with_care_record(mock.Mock(), "青栁", it, d, "2026-10", False)
+        self.assertEqual(d["care_record_detail"], {"fields": ["vital"], "form_diff": {"vital": ["1", "2"]}})
+
     def test_actual_ok_but_care_record_failed_kept_separately(self):
         it = self._item()
         d = ate._detail("青栁", it, "skipped", "already_applied")
@@ -410,6 +579,7 @@ class TestWithActual(unittest.TestCase):
                          [None, "edit_screen_left_open"])
         self.assertEqual(res["care_record"]["failed"], 1)
         self.assertEqual(res["care_record"]["skipped"], 1)
+        self.assertEqual(res["details"][1]["care_record_reason"], "actual_skipped:edit_screen_left_open")
 
 
 class TestRunCareRecordOnly(unittest.TestCase):
@@ -459,6 +629,14 @@ class TestApi(unittest.TestCase):
         r = self.client.post("/api/care-record-time/apply", headers=self.headers,
                              json={"month": "2026-10", "dry_run": "false", "items": [self.ITEM]})
         self.assertEqual(r.status_code, 400)
+        for url in ("/api/care-record-time/apply", "/api/actual-time/apply"):
+            item = self.ITEM if "care" in url else {
+                "user_name": "A", "date": "1", "old_start": "9:00", "staff1": "S",
+                "new_start": "9:05", "new_end": "9:40"}
+            for bad in ("false", 0, None):
+                r = self.client.post(url, headers=self.headers,
+                                     json={"month": "2026-10", "headed": bad, "items": [item]})
+                self.assertEqual(r.status_code, 400, (url, bad))
 
     def test_409_when_running(self):
         with self.api.job_state_lock:
