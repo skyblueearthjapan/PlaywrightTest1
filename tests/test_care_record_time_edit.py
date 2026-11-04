@@ -125,16 +125,6 @@ class TestPure(unittest.TestCase):
         self.assertEqual(chk(screen(times=("14", "53", "15", "33"))), "already_applied")
         self.assertEqual(chk(screen(times=("14", "30", "15", "33"))), "time_mismatch")
 
-    def test_check_edit_screen_two_staff_row(self):
-        # 2 名訪問: 記録書Ⅱの職員が実績の行の 2 人目なら通す。行に無い職員は通さない
-        def chk(scr, row_staff):
-            return crt.check_edit_screen(scr, "2026-10", ITEM, DOC, PATIENT, row_staff=row_staff)
-        self.assertIsNone(chk(screen(staff="高岡はるか"), ["熊澤妙子", "高岡はるか"]))
-        self.assertEqual(chk(screen(staff="高岡はるか"), ["熊澤妙子"]), "staff_mismatch")
-        self.assertEqual(chk(screen(staff="高岡はるか"), ["熊澤妙子", "", None]), "staff_mismatch")
-        self.assertEqual(chk(screen(staff="山田花子"), ["熊澤妙子", "高岡はるか"]), "staff_mismatch")
-        self.assertEqual(chk(screen(staff=""), ["熊澤妙子", "高岡はるか"]), "staff_mismatch")
-
     def test_check_edit_screen_patient(self):
         def chk(scr, patient):
             return crt.check_edit_screen(scr, "2026-10", ITEM, DOC, patient)
@@ -394,24 +384,6 @@ class TestEditFlow(unittest.TestCase):
         self.assertEqual(m["_back_to_schedule"].call_count, 2)
         # 時刻以外の差は無い (最終更新日時・更新者は除外リスト)
         self.assertEqual(d["form_diff"], {"visitYmdStartMin": ["33", "53"]})
-
-    def test_live_two_staff_record_by_second_staff(self):
-        # 2 名訪問: 実績の行の職員1 は熊澤さん、記録書Ⅱは 2 人目の高岡さんが書いた (11/5 増島様 10/1)
-        es = [entry(1, "14:53", "15:33", "熊澤妙子", record="14:33 ～ 15:33")]
-        after = [entry(1, "14:53", "15:33", "熊澤妙子", record="14:53 ～ 15:33")]
-        for e in es + after:
-            e["staff_all"] = ["熊澤妙子", "高岡はるか"]
-        scr = [screen(staff="高岡 はるか"), screen(staff="高岡 はるか", times=("14", "53", "15", "33"))]
-        d, m = self._run(es, after=after, _read_edit_screen=mock.Mock(side_effect=scr))
-        self.assertEqual(d["status"], "success")
-        m["_save"].assert_called_once()
-
-    def test_two_staff_other_person_not_saved(self):
-        es = [entry(1, "14:53", "15:33", "熊澤妙子", record="14:33 ～ 15:33")]
-        es[0]["staff_all"] = ["熊澤妙子", "高岡はるか"]
-        d, m = self._run(es, _read_edit_screen=mock.Mock(side_effect=[screen(staff="山田花子")]))
-        self.assertEqual(d["reason"], "staff_mismatch")
-        m["_save"].assert_not_called()
 
     def _live_after(self):
         es = [entry(1, "14:53", "15:33", "熊澤妙子", record="14:33 ～ 15:33")]

@@ -141,15 +141,14 @@ def normalize_person_name(value) -> str:
     return re.sub(r"[\s\u3000]", "", str(value or "")).translate(_NAME_VARIANTS)
 
 
-def check_edit_screen(screen: dict, month: str, item: dict, doc_id: str, patient: str,
-                      row_staff=None) -> str:
+def check_edit_screen(screen: dict, month: str, item: dict, doc_id: str, patient: str) -> str:
     """開いた記録書Ⅱの編集画面が、項目の訪問のものか照らす。
 
     None = 照らし合わせが通り、旧の時刻のまま (書き換えてよい)。
     それ以外は理由コード:
       doc_unreadable (記録書の番号が読めない) / doc_mismatch (押したマークと違う) /
       patient_unreadable / patient_mismatch (画面の利用者名と patient が空白を除いて完全一致しない) /
-      date_mismatch / staff_mismatch (画面の職員が staff1 とも、実績の行の職員 row_staff のどれとも合わない) /
+      date_mismatch / staff_mismatch /
       time_unreadable / already_applied (すでに新しい時刻) / time_mismatch (旧の時刻と違う)
     """
     shown_doc = str(screen.get("doc_id") or "").strip()
@@ -165,11 +164,7 @@ def check_edit_screen(screen: dict, month: str, item: dict, doc_id: str, patient
         return "patient_mismatch"
     if normalize_service_date(screen.get("service_date")) != expected_service_date(month, item["day"]):
         return "date_mismatch"
-    # 2 名訪問では、記録書Ⅱを書いたのが実績の行の 2 人目のこともある (11/5 増島様 10/1)。
-    # 行は患者様・日・実績の時刻・staff1 で 1 件に決めてあるので、その行の職員なら通す。
-    shown_staff = screen.get("staff_text") or ""
-    candidates = [item["staff1"]] + [s for s in (row_staff or []) if str(s or "").strip()]
-    if not any(_staff_text_matches(s, shown_staff) for s in candidates):
+    if not _staff_text_matches(item["staff1"], screen.get("staff_text") or ""):
         return "staff_mismatch"
     times = selects_to_hhmm(screen.get("times"))
     if times is None:
@@ -628,7 +623,7 @@ def edit_care_record_time(page, user: str, item: dict, month: str, dry_run: bool
         return _detail(user, item, ST_FAILED, reason, observed_record=observed_record, **extra)
 
     screen = _read_edit_screen(page)
-    why = check_edit_screen(screen, month, item, doc_id, user, row_staff=target.get("staff_all"))
+    why = check_edit_screen(screen, month, item, doc_id, user)
     if why == "already_applied":
         why_back, msgs = _back_to_schedule(page, user, month)
         if why_back:
@@ -739,7 +734,7 @@ def edit_care_record_time(page, user: str, item: dict, month: str, dry_run: bool
                        **saved)
     reopened = _read_edit_screen(page)
     form_after = _read_form(page)
-    ident = check_edit_screen(reopened, month, item, doc_id, user, row_staff=target.get("staff_all"))
+    ident = check_edit_screen(reopened, month, item, doc_id, user)
     diff = form_diff(before, form_after, ignore=_SAVE_VOLATILE_NAMES) if form_after else {}
     # カイポケの保存は入力欄の前後の空白を取り除く (#editButton の trimAllForInputText)。
     # 前後の空白だけの違いは記録の中身の変化ではないので除く (11/4 本番: 観察記録の末尾の改行)。
