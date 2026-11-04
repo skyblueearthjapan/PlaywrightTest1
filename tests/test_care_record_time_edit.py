@@ -694,3 +694,11 @@ def test_same_after_trim_treats_trailing_newline_as_same():
     assert _same_after_trim(["a ", "b"], ["a", "b"])
     assert not _same_after_trim("abc", "abd")
     assert not _same_after_trim("00", None)
+
+
+def test_person_name_variants_sai():
+    """11/4 本番: 同じ方が CSV は「齊藤」・記録書Ⅱの画面は「齋藤」。"""
+    from commands.care_record_time_edit import normalize_person_name
+
+    assert normalize_person_name("齊藤　奈己") == normalize_person_name("齋藤 奈己")
+    assert normalize_person_name("斉藤 奈己") != normalize_person_name("齊藤 奈己")
