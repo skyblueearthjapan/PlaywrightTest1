@@ -12,6 +12,9 @@
   → 編集ダイアログ → 予定・実績が「実績」か確認 → 時刻を入れる
   → 「職員情報入力」 → 担当 (職員1〜3・職種・同行) が元のままか確認 (違えば戻す)
   → dry_run: 登録せず閉じる / 本番: 登録 → 一覧を読み直して新しい時刻を確認
+  → 項目に care_record (記録書Ⅱの旧の時刻) があれば、続けて同じ行の記録書Ⅱの
+    「実際の訪問時間」も新しい時刻へそろえる (commands/care_record_time_edit.py)。
+    結果は care_record_status / care_record_reason に別に持つ。
 
 使い方 (API から呼ばれる):
     run_actual_time_edit(items, month="2026-10", dry_run=True)
@@ -264,6 +267,16 @@ def validate_request(month, items):
             bad.append("new_end")
         if new_start and new_end and new_start >= new_end:
             bad.append("new_start<new_end")
+        # 任意: 記録書Ⅱの旧の時刻。あれば実績の後に記録書Ⅱも新しい時刻へそろえる
+        care_record = None
+        cr = it.get("care_record")
+        if cr is not None:
+            if not isinstance(cr, dict):
+                bad.append("care_record")
+            else:
+                care_record = {"old_start": normalize_hhmm(cr.get("old_start")),
+                               "old_end": normalize_hhmm(cr.get("old_end"))}
+                bad.extend(f"care_record.{k}" for k, v in care_record.items() if not v)
         if bad:
             errors.append(f"{prefix}: 不正な項目 {bad}")
             continue
@@ -276,6 +289,7 @@ def validate_request(month, items):
             "staff1": staff1,
             "new_start": new_start,
             "new_end": new_end,
+            "care_record": care_record,
         })
     if errors:
         return [], errors
@@ -305,6 +319,7 @@ _EDIT_ANCHOR = "a[onclick*='showHNC097807Edit']"
 _COLLECT_JS = """() => {
   const norm = t => (t || '').replace(/\\s+/g, ' ').trim();
   const anchors = Array.from(document.querySelectorAll("a[onclick*='showHNC097807Edit']"));
+  const recLinks = Array.from(document.querySelectorAll("div.record-time a[onclick^='submitForm123']"));
   const out = [];
   anchors.forEach((a, idx) => {
     const oc = a.getAttribute('onclick') || '';
@@ -313,6 +328,15 @@ _COLLECT_JS = """() => {
     const area = a.closest('div.service-detail-area');
     const ach = area ? area.querySelector('div.achievement-service') : null;
     const rec = area ? area.querySelector('div.record-time') : null;
+    // 記録書Ⅱのマーク (同じ行の div.record-time)。area が無いときだけ <tr> から 1 つに決まる場合に読む
+    let recBox = rec;
+    if (!area) {
+      const tr = a.closest('tr');
+      const boxes = tr ? tr.querySelectorAll('div.record-time') : [];
+      if (boxes.length === 1) recBox = boxes[0];
+    }
+    const recA = recBox ? recBox.querySelector("a[onclick^='submitForm123']") : null;
+    const recSpan = recBox ? recBox.querySelector('span.time-difference-care-record-document2') : null;
     const td = a.closest('td');
     let day = '';
     let sib = td ? td.previousElementSibling : null;
@@ -338,6 +362,9 @@ _COLLECT_JS = """() => {
       record: rec ? norm(rec.textContent) : '',
       area_text: area ? norm(area.textContent) : '',
       staff1: staff[0] || '', staff_all: staff,
+      record_onclick: recA ? (recA.getAttribute('onclick') || '') : '',
+      rec_idx: recA ? recLinks.indexOf(recA) : -1,
+      record_time: recSpan ? norm(recSpan.textContent) : (recBox ? norm(recBox.textContent) : ''),
     });
   });
   return out;
@@ -589,7 +616,51 @@ def _detail(user: str, item: dict, status: str, reason: str = None, **extra) -> 
     }
     if reason:
         d["reason"] = reason
+    if item.get("care_record"):
+        # 記録書Ⅱの既定は「実績が書けていないので触らない」。そろえたときは _with_care_record が上書きする
+        d["care_record_status"] = ST_SKIPPED
+        d["care_record_reason"] = "actual_not_applied"
     d.update({k: v for k, v in extra.items() if v not in (None, [], "")})
+    return d
+
+
+# 実績がこの結果なら、行は新しい時刻になっている → 記録書Ⅱもそろえる
+_ACTUAL_AT_NEW = {(ST_SUCCESS, None), (ST_SKIPPED, "already_applied"), (ST_SKIPPED, "no_change")}
+
+
+def _with_care_record(page, user: str, item: dict, d: dict, month: str, dry_run: bool) -> dict:
+    """実績の結果 d の後に、同じ行の記録書Ⅱを新しい時刻へそろえ、d に care_record_* を足す。
+
+    実績が書けた (dry_run なら dry_run_ok) ときだけ動く。行の鍵の実績の時刻は、
+    本番で書いた後は新しい時刻、dry_run では旧の時刻のまま。
+    """
+    cr = item.get("care_record")
+    if not cr:
+        return d
+    if (d["status"], d.get("reason")) in _ACTUAL_AT_NEW:
+        key = (item["new_start"], item["new_end"])
+    elif d["status"] == ST_DRY_RUN_OK:
+        key = (item["old_start"], item["old_end"])
+    else:
+        return d
+    from commands import care_record_time_edit as crt
+    cr_item = {"item_id": item.get("item_id"), "day": item["day"], "staff1": item["staff1"],
+               "actual_start": key[0], "actual_end": key[1],
+               "old_start": cr["old_start"], "old_end": cr["old_end"],
+               "new_start": item["new_start"], "new_end": item["new_end"]}
+    try:
+        c = crt.edit_care_record_time(page, user, cr_item, month, dry_run=dry_run)
+    except Exception as e:
+        print(f"    記録書Ⅱでエラー: {e}")
+        c = {"status": ST_ERROR, "reason": "exception", "message": str(e)[:300]}
+    d["care_record_status"] = c["status"]
+    d.pop("care_record_reason", None)
+    if c.get("reason"):
+        d["care_record_reason"] = c["reason"]
+    extra = {k: c[k] for k in ("observed", "observed_record", "observed_after", "screen", "messages",
+                               "message", "back_reason", "back_messages") if c.get(k)}
+    if extra:
+        d["care_record_detail"] = extra
     return d
 
 
@@ -756,6 +827,11 @@ def edit_actual_time(page, user: str, item: dict, dry_run: bool = True) -> dict:
                    observed=observed_for_day(entries, day), messages=messages)
 
 
+def _on_care_record_screen(page) -> bool:
+    from commands import care_record_time_edit as crt
+    return crt._on_edit_screen(page)
+
+
 # =============================================================================
 # 実行
 # =============================================================================
@@ -776,15 +852,21 @@ def run_actual_time_edit(items: list, month: str, dry_run: bool = True, headless
         "error": 0,
         "details": [],
     }
+    if any(it.get("care_record") for it in items):
+        result["care_record"] = {k: 0 for k in ("success", "dry_run_ok", "skipped", "failed", "error")}
 
     def record(d):
         result["details"].append(d)
         result[d["status"]] = result.get(d["status"], 0) + 1
+        if "care_record_status" in d:
+            cs = result["care_record"]
+            cs[d["care_record_status"]] = cs.get(d["care_record_status"], 0) + 1
         if progress_callback:
             progress_callback({
                 "processed": len(result["details"]), "total": result["total"],
                 "current_name": d["user"],
                 **{k: result[k] for k in ("success", "dry_run_ok", "skipped", "failed", "error")},
+                **({"care_record": dict(result["care_record"])} if "care_record" in result else {}),
             })
 
     print(f"\n=== 実績時刻の書き換え開始 (month={month}, {len(items)}件, "
@@ -838,9 +920,15 @@ def run_actual_time_edit(items: list, month: str, dry_run: bool = True, headless
                             record(_detail(user, it, ST_SKIPPED, "user_not_found"))
                             continue
                         d = edit_actual_time(page, user, it, dry_run=dry_run)
+                        d = _with_care_record(page, user, it, d, month, dry_run)
                         record(d)
                         if d.get("reason") == "dialog_left_open":
                             stop_reason = "dialog_left_open"
+                            stopped = True
+                        elif it.get("care_record") and _on_care_record_screen(page):
+                            # 記録書Ⅱの編集画面から戻れなかった → 次の行と取り違えないよう全体を止める
+                            print("    記録書Ⅱの編集画面から戻れません → 処理を止めます")
+                            stop_reason = "edit_screen_left_open"
                             stopped = True
                     except Exception as e:
                         print(f"    エラー: {e}")

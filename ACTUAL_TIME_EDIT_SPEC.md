@@ -142,3 +142,60 @@
 1. `dry_run: true` で全件を投げ、`dry_run_ok` 以外を確認する
 2. `dry_run: false` で投げ、`/api/actual-time/result` を数十秒おきにポーリングする
 3. `failed` / `error` の行は人が確かめる。`already_applied` は成功と同じ扱いでよい
+
+## 記録書Ⅱの時刻も同じ時刻にそろえる（2026-11-04 追加）
+
+設計: CareFlow02 `docs/plans/kaipoke-kiroku2-time-design-2026-11-04.md`。実装: `commands/care_record_time_edit.py`。
+
+### 1 件の手順（記録書Ⅱ）
+
+1. 実績の行を **日付・実績の開始/終了・職員1** で特定し、同じ行の `div.record-time a[onclick^=submitForm123]` を押して記録書Ⅱの編集画面（`/bizhnc/careRecordEdit/`）を開く。マークが無い行は `no_care_record`（記録書Ⅱは作らない）
+2. 一覧の記録書Ⅱの時刻（`span.time-difference-care-record-document2`）がすでに新しい時刻なら `already_applied`、旧の時刻と違えば `record_time_mismatch`（開かない）
+3. 編集画面で照らす: 記録書の番号（`select#visitDateItemList` の値＝マークの 2 番目の引数）・訪問日（隠し値 `serviceDate`）・職員1（`careDocument2Dto.staffMemberInternalId` の選ばれた文字）・旧の時刻（4 つの select）。違えば保存せずに戻る
+4. 時刻だけを選ぶ（`visitYmdStartHour`・`visitYmdStartMin`・`visitYmdEndHour`・`visitYmdEndMin`）
+5. dry_run: 時刻を元へ戻してから `#backButton`。本番: `#editButton` → confirm「入力した内容で変更しますか？」を OK → 月間スケジュールへ戻り、同じ行の記録書Ⅱの時刻が新しい時刻か読み直す
+6. 編集画面から戻れなかったら、その回の残りは `edit_screen_left_open` で止める（`stopped: true`）
+
+### 実績と続けて（POST /api/actual-time/apply）
+
+`items[].care_record: {"old_start": "14:33", "old_end": "15:33"}`（いまの記録書Ⅱの時刻）を付けると、実績が
+`success`／`dry_run_ok`／`already_applied`／`no_change` のときに続けて記録書Ⅱを `new_start`〜`new_end` へそろえる。
+実績が失敗した行の記録書Ⅱは触らない。結果の 1 件に `care_record_status`・`care_record_reason`
+（・`care_record_detail`）を別に持ち、`result.care_record` に記録書Ⅱの件数（success/dry_run_ok/skipped/failed/error）が付く。
+
+### 記録書Ⅱだけ（POST /api/care-record-time/apply・GET /api/care-record-time/result）
+
+常に非同期（202）。409・400・`dry_run`（既定 true）・`job_id`・`headed`・`credentials`・ポーリングの形は actual-time と同じ。
+
+```json
+{ "month": "2026-10", "dry_run": true, "job_id": "...",
+  "items": [{ "item_id": "visit-1", "date": "2026-10-01", "patient": "青栁○○", "staff1": "熊澤妙子",
+              "actual_start": "14:53", "actual_end": "15:33",
+              "old_start": "14:33", "old_end": "15:33",
+              "new_start": "14:53", "new_end": "15:33" }] }
+```
+
+`actual_*` はいまのカイポケの実績（行の鍵）、`old_*` はいまの記録書Ⅱ、`new_*` はそろえる時刻。全部必須。
+`details[]` は `item_id, user, date, staff1, actual_start, actual_end, old_start, old_end, new_start, new_end, status, reason`
+と、あれば `observed`・`observed_record`（一覧で読めた記録書Ⅱの旧の時刻）・`observed_after`・`screen`・`messages`・`back_reason`・`back_messages`。
+
+### 記録書Ⅱの reason
+
+| reason | status | 説明 |
+|--------|--------|------|
+| `no_care_record` | skipped | その実績の行に記録書Ⅱが無い（作らない） |
+| `already_applied` | skipped | 記録書Ⅱはすでに新しい時刻 |
+| `no_change` | skipped | 旧と新が同じ |
+| `actual_not_applied` | skipped | （実績と続けてのとき）実績が書けていないので触らない |
+| `edit_screen_left_open` | failed／skipped | 編集画面が開いたまま。その回の残りは全部これで未処理 |
+| `entry_not_found` / `end_mismatch` / `ambiguous` | failed | 実績の行を 1 件に決められない |
+| `record_link_mismatch` | failed | 記録書のマークの利用者番号が実績の行と違う |
+| `record_time_mismatch` | failed | 一覧の記録書Ⅱの時刻が旧の時刻と違う（開かない） |
+| `open_failed` | failed | 編集画面が開かない |
+| `doc_mismatch` / `date_mismatch` / `staff_mismatch` / `time_mismatch` / `time_unreadable` | failed | 編集画面が項目と違う（保存せず戻った） |
+| `locked` | failed | 時刻の select が無い・disabled |
+| `time_set_failed` | failed | 時刻を選べない |
+| `back_dialog_unknown` / `back_failed` / `user_lost` / `month_lost` | failed | 保存せずに戻れない・戻った後の利用者や月が合わない（`back_messages` 付き） |
+| `save_dialog_unknown` / `save_not_confirmed` / `save_failed` | failed | 保存の確認が想定と違う・保存でエラー（保存せず戻った） |
+| `verify_failed` | failed | 保存後に一覧で新しい時刻を確認できない（**保存済みの可能性あり**） |
+| `exception` | error | 予期しない例外 |

@@ -16,6 +16,8 @@ VNC/noVNC経由でブラウザ画面をリアルタイム配信します。
     GET  /api/apply/result  - 差分適用結果取得（ポーリング用）
     POST /api/actual-time/apply  - 実績時刻の書き換え（常に非同期・202）
     GET  /api/actual-time/result - 実績時刻の書き換え結果取得（ポーリング用）
+    POST /api/care-record-time/apply  - 記録書Ⅱの時刻の書き換え（常に非同期・202）
+    GET  /api/care-record-time/result - 記録書Ⅱの時刻の書き換え結果取得（ポーリング用）
     POST /api/allocate - 配置エンジン実行
     GET  /api/status  - サーバー状態確認
 
@@ -1425,6 +1427,131 @@ def api_actual_time_result():
                         "result": store["result"], "completed_at": store.get("completed_at")})
     return jsonify({"success": False, "status": "no_result", "job_id": store.get("job_id"),
                     "message": "actual-time 結果がありません。"})
+
+
+# care-record-time(記録書Ⅱの時刻の書き換え)結果ストア (actual-time と同じ流儀)
+care_record_time_result_store = {
+    "result": None,
+    "completed_at": None,
+    "error": None,
+    "job_id": None,
+}
+care_record_time_progress = {}
+
+
+@app.route('/api/care-record-time/apply', methods=['POST'])
+def api_care_record_time_apply():
+    """記録書Ⅱの「実際の訪問時間」だけを書き換える API (実績はそろえ済みの分のあとから)
+
+    月間スケジュールの実績の行 (日付・実績の時刻・職員1) の記録書Ⅱを開き、時刻だけを選ぶ。
+    常に非同期: 202 を返し、結果は /api/care-record-time/result でポーリングする。
+
+    payload: { "month": "2026-10", "dry_run": true(既定),
+               "items": [{item_id, date, patient, staff1, actual_start, actual_end,
+                          old_start, old_end, new_start, new_end}],
+               "job_id": "...", "headed": true, "credentials": {...}(任意) }
+    """
+    global current_task, care_record_time_result_store, care_record_time_progress
+    from commands.care_record_time_edit import validate_request, run_care_record_time_edit
+
+    data = request.get_json(silent=True) or {}
+    month = data.get("month")
+    items, errors = validate_request(month, data.get("items"))
+    if errors:
+        return jsonify({"success": False, "error": "入力が不正です", "errors": errors[:50]}), 400
+    dry_run = data.get("dry_run", True)
+    if not isinstance(dry_run, bool):
+        return jsonify({"success": False, "error": "dry_run は true/false で指定してください"}), 400
+    job_id = str(data.get("job_id") or "") or None
+    headed = data.get("headed", True)
+
+    with job_state_lock:
+        if current_task["running"]:
+            return jsonify({
+                "success": False,
+                "error": "別のタスクが実行中です",
+                "current_task": dict(current_task),
+            }), 409
+        current_task = {
+            "running": True,
+            "command": "care_record_time",
+            "started_at": datetime.now().isoformat(),
+        }
+        care_record_time_result_store = {
+            "result": None, "completed_at": None, "error": None, "job_id": job_id,
+        }
+        care_record_time_progress = {"processed": 0, "total": len(items),
+                                     "updated_at": datetime.now().isoformat()}
+
+    try:
+        apply_request_credentials(data)
+        clear_stop()
+        add_log(f"care-record-time 開始 (month={month}, {len(items)}件, dry_run={dry_run}, job_id={job_id})")
+
+        def on_progress(p):
+            with job_state_lock:
+                care_record_time_progress.update(p)
+                care_record_time_progress["updated_at"] = datetime.now().isoformat()
+
+        def run_care_record_time_async():
+            global current_task, care_record_time_result_store
+            try:
+                result = run_care_record_time_edit(items, month, dry_run=dry_run,
+                                                   headless=not headed, progress_callback=on_progress)
+                add_log(f"care-record-time 完了: success={result.get('success')} "
+                        f"dry_run_ok={result.get('dry_run_ok')} failed={result.get('failed')}")
+                with job_state_lock:
+                    care_record_time_result_store = {
+                        "result": result, "completed_at": datetime.now().isoformat(),
+                        "error": None, "job_id": job_id,
+                    }
+            except Exception as e:
+                add_log(f"care-record-time エラー: {e}")
+                import traceback
+                traceback.print_exc()
+                with job_state_lock:
+                    care_record_time_result_store = {
+                        "result": None, "completed_at": datetime.now().isoformat(),
+                        "error": str(e), "job_id": job_id,
+                    }
+            finally:
+                with job_state_lock:
+                    current_task = {"running": False, "command": None, "started_at": None}
+
+        threading.Thread(target=run_care_record_time_async, daemon=True).start()
+        return jsonify({"success": True, "async": True, "job_id": job_id,
+                        "total": len(items), "dry_run": dry_run}), 202
+
+    except Exception as e:
+        add_log(f"care-record-time 開始エラー: {e}")
+        with job_state_lock:
+            current_task = {"running": False, "command": None, "started_at": None}
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/care-record-time/result', methods=['GET'])
+def api_care_record_time_result():
+    """記録書Ⅱの時刻の書き換えの結果取得（ポーリング用・actual-time/result と同型）"""
+    with job_state_lock:
+        running = (
+            current_task.get("running", False)
+            and str(current_task.get("command") or "").startswith("care_record_time")
+        )
+        started_at = current_task.get("started_at")
+        store = dict(care_record_time_result_store)
+        progress = dict(care_record_time_progress)
+
+    if running:
+        return jsonify({"success": True, "status": "running", "job_id": store.get("job_id"),
+                        "started_at": started_at, "progress": progress})
+    if store.get("error"):
+        return jsonify({"success": False, "status": "error", "job_id": store.get("job_id"),
+                        "error": store["error"], "completed_at": store.get("completed_at")})
+    if store.get("result"):
+        return jsonify({"success": True, "status": "completed", "job_id": store.get("job_id"),
+                        "result": store["result"], "completed_at": store.get("completed_at")})
+    return jsonify({"success": False, "status": "no_result", "job_id": store.get("job_id"),
+                    "message": "care-record-time 結果がありません。"})
 
 
 @app.route('/api/config', methods=['GET', 'POST'])
