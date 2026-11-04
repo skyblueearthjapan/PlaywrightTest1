@@ -125,6 +125,34 @@ class TestPure(unittest.TestCase):
         self.assertEqual(chk(screen(times=("14", "53", "15", "33"))), "already_applied")
         self.assertEqual(chk(screen(times=("14", "30", "15", "33"))), "time_mismatch")
 
+    def test_check_edit_screen_record_staff(self):
+        # 2 人目の職員の記録書Ⅱは record_staff で名指ししたときだけ、かつ実績の行にいる人だけ通す
+        def chk(scr, row_staff, rs=None):
+            it = dict(ITEM, **({"record_staff": rs} if rs else {}))
+            return crt.check_edit_screen(scr, "2026-10", it, DOC, PATIENT, row_staff=row_staff)
+        two = ["熊澤妙子", "高岡はるか"]
+        self.assertEqual(chk(screen(staff="高岡はるか"), two), "staff_mismatch")              # 名指しなし
+        self.assertIsNone(chk(screen(staff="高岡 はるか"), two, "高岡はるか"))
+        self.assertEqual(chk(screen(staff="高岡はるか"), ["熊澤妙子"], "高岡はるか"), "staff_mismatch")  # 行にいない
+        self.assertEqual(chk(screen(staff="高岡はるか"), None, "高岡はるか"), "staff_mismatch")
+        self.assertEqual(chk(screen(staff="山田花子"), two, "高岡はるか"), "staff_mismatch")   # 画面が別人
+        self.assertEqual(chk(screen(staff=""), two, "高岡はるか"), "staff_mismatch")
+        self.assertIsNone(chk(screen(), two, "高岡はるか"))                                  # 職員1 はそのまま通る
+
+    def test_validate_record_staff_and_reversed_old(self):
+        base = {"date": "2026-10-06", "patient": "仙石 夏菜子", "staff1": "川名 千恵",
+                "actual_start": "17:32", "actual_end": "18:03", "old_start": "17:32", "old_end": "17:05",
+                "new_start": "17:32", "new_end": "18:03"}
+        items, errs = crt.validate_request("2026-10", [dict(base, record_staff=" 高岡 はるか ")])
+        self.assertEqual(errs, [])
+        self.assertEqual((items[0]["old_end"], items[0]["record_staff"]), ("17:05", "高岡 はるか"))
+        items, errs = crt.validate_request("2026-10", [base])
+        self.assertNotIn("record_staff", items[0])
+        _, errs = crt.validate_request("2026-10", [dict(base, new_end="17:00")])
+        self.assertTrue(errs)
+        _, errs = crt.validate_request("2026-10", [dict(base, actual_end="17:00")])
+        self.assertTrue(errs)
+
     def test_check_edit_screen_patient(self):
         def chk(scr, patient):
             return crt.check_edit_screen(scr, "2026-10", ITEM, DOC, patient)
@@ -193,8 +221,9 @@ class TestValidate(unittest.TestCase):
         self.assertTrue(v("2026-10", [self._item(old_end="x")])[1])
         self.assertTrue(v("2026-10", [self._item(new_start="16:00")])[1])
         self.assertTrue(v("2026-10", [self._item(actual_start="16:00")])[1])
-        self.assertTrue(v("2026-10", [self._item(old_start="15:33")])[1])
-        self.assertTrue(v("2026-10", [self._item(old_start="16:00")])[1])
+        # いまの記録書Ⅱ (old) の順が逆・同じでも受け付ける (入れ間違いをそろえるため・照合にだけ使う)
+        self.assertFalse(v("2026-10", [self._item(old_start="15:33")])[1])
+        self.assertFalse(v("2026-10", [self._item(old_start="16:00")])[1])
         with mock.patch.object(crt, "MAX_ITEMS", 1):
             self.assertTrue(v("2026-10", [self._item(), self._item()])[1])
         items, errs = v("2026-10", [self._item(), self._item(staff1="")])
@@ -384,6 +413,18 @@ class TestEditFlow(unittest.TestCase):
         self.assertEqual(m["_back_to_schedule"].call_count, 2)
         # 時刻以外の差は無い (最終更新日時・更新者は除外リスト)
         self.assertEqual(d["form_diff"], {"visitYmdStartMin": ["33", "53"]})
+
+    def test_live_record_staff_second_staff_saves(self):
+        es = [entry(1, "14:53", "15:33", "熊澤妙子", record="14:33 ～ 15:33")]
+        after = [entry(1, "14:53", "15:33", "高岡はるか", record="14:53 ～ 15:33")]  # 保存で職員名１が入れ替わる
+        es[0]["staff_all"] = ["熊澤妙子", "高岡はるか"]
+        after[0]["staff_all"] = ["高岡はるか", "熊澤妙子"]
+        scr = [screen(staff="高岡はるか"), screen(staff="高岡はるか", times=("14", "53", "15", "33"))]
+        d, m = self._run(es, after=after, item=dict(ITEM, record_staff="高岡はるか"),
+                         _read_edit_screen=mock.Mock(side_effect=scr))
+        self.assertEqual(d["status"], "success")
+        m["_save"].assert_called_once()
+        self.assertEqual(m["_click_with_scroll"].call_count, 2)   # 入れ替わった行を見つけて開き直した
 
     def _live_after(self):
         es = [entry(1, "14:53", "15:33", "熊澤妙子", record="14:33 ～ 15:33")]
