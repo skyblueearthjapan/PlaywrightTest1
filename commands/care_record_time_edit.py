@@ -275,12 +275,26 @@ _TIME_NAMES = ["visitYmdStartHour", "visitYmdStartMin", "visitYmdEndHour", "visi
 _EDIT_SCREEN_MARK = "select[name='visitYmdStartHour']"
 _FORM_SELECTOR = "#careRecordUpdateForm"
 # 保存で変わって当然の隠し値。保存の後に開き直して比べるときだけ除く (時刻を選ぶ前後の比べには使わない)
-_SAVE_VOLATILE_NAMES = frozenset({
-    "updateDateAndTimeDocument2",      # 最終更新日時
-    "updateUserFullNameDocument2",     # 最終更新者
-    "org.apache.struts.taglib.html.TOKEN",
-    "_csrf", "csrfToken", "token",
-})
+class _VolatileNames:
+    """保存で変わって当然の隠し値 (保存後の比べから除く)。
+
+    11/4 本番の 1 件目で、保存後に tokenValue (開くたびに変わる) と
+    updateDateAndTimePhoto1 (写真の最終更新日時) だけが変わったことを確かめた。
+    最終更新の日時・更新者 (updateDateAndTime*・updateUserFullName*) は前方一致で除く。
+    """
+
+    _EXACT = frozenset({
+        "tokenValue",
+        "org.apache.struts.taglib.html.TOKEN",
+        "_csrf", "csrfToken", "token",
+    })
+    _PREFIXES = ("updateDateAndTime", "updateUserFullName")
+
+    def __contains__(self, name) -> bool:
+        return name in self._EXACT or str(name).startswith(self._PREFIXES)
+
+
+_SAVE_VOLATILE_NAMES = _VolatileNames()
 
 _READ_EDIT_SCREEN_JS = """(names) => {
   const byName = n => document.querySelector(`[name="${n}"]`);

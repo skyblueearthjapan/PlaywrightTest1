@@ -672,3 +672,15 @@ class TestApi(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_volatile_names_cover_token_and_update_stamps():
+    """11/4 本番の 1 件目: 保存後に変わったのは tokenValue と updateDateAndTimePhoto1 だけ。"""
+    from commands.care_record_time_edit import _SAVE_VOLATILE_NAMES, form_diff
+
+    before = {"tokenValue": "a", "updateDateAndTimePhoto1": "2026/10/02 15:28:54",
+              "updateDateAndTimeDocument2": "x", "visitYmdStartMin": "33", "consciousness": "00"}
+    after = {"tokenValue": "b", "updateDateAndTimePhoto1": "2026/11/04 21:58:50",
+             "updateDateAndTimeDocument2": "y", "visitYmdStartMin": "53", "consciousness": "00"}
+    assert form_diff(before, after, ignore=_SAVE_VOLATILE_NAMES) == {"visitYmdStartMin": ["33", "53"]}
+    assert "consciousness" not in _SAVE_VOLATILE_NAMES
