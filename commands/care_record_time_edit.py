@@ -206,6 +206,15 @@ def save_dialog_action(dialog_type: str, message: str) -> str:
     return "dismiss_unknown"
 
 
+def _same_after_trim(a, b) -> bool:
+    """前後の空白を除くと同じか (文字列・同名の配列)。"""
+    def t(v):
+        if isinstance(v, list):
+            return [str(x).strip() for x in v]
+        return None if v is None else str(v).strip()
+    return t(a) == t(b)
+
+
 def form_diff(before: dict, after: dict, ignore=()) -> dict:
     """フォームの値 (名前 → 値、同名は配列) を比べる。{名前: [前, 後]} (無い欄は None)"""
     before, after = before or {}, after or {}
@@ -543,7 +552,8 @@ def _detail(user: str, item: dict, status: str, reason: str = None, **extra) -> 
 def _screen_summary(screen: dict) -> dict:
     t = selects_to_hhmm(screen.get("times"))
     return {"service_date": screen.get("service_date"), "staff": screen.get("staff_text"),
-            "time": "-".join(t) if t else screen.get("times"), "doc_id": screen.get("doc_id")}
+            "time": "-".join(t) if t else screen.get("times"), "doc_id": screen.get("doc_id"),
+            "patient": f"{screen.get('user_surname') or ''} {screen.get('user_name') or ''}".strip()}
 
 
 def edit_care_record_time(page, user: str, item: dict, month: str, dry_run: bool = True) -> dict:
@@ -721,7 +731,9 @@ def edit_care_record_time(page, user: str, item: dict, month: str, dry_run: bool
     form_after = _read_form(page)
     ident = check_edit_screen(reopened, month, item, doc_id, user)
     diff = form_diff(before, form_after, ignore=_SAVE_VOLATILE_NAMES) if form_after else {}
-    others = [k for k in diff if k not in _TIME_NAMES]
+    # カイポケの保存は入力欄の前後の空白を取り除く (#editButton の trimAllForInputText)。
+    # 前後の空白だけの違いは記録の中身の変化ではないので除く (11/4 本番: 観察記録の末尾の改行)。
+    others = [k for k in diff if k not in _TIME_NAMES and not _same_after_trim(*diff[k])]
     why_back, back_msgs = _back_to_schedule(page, user, month)
     if why_back:
         print(f"    確かめた後に月間スケジュールへ戻れません ({why_back})")

@@ -684,3 +684,13 @@ def test_volatile_names_cover_token_and_update_stamps():
              "updateDateAndTimeDocument2": "y", "visitYmdStartMin": "53", "consciousness": "00"}
     assert form_diff(before, after, ignore=_SAVE_VOLATILE_NAMES) == {"visitYmdStartMin": ["33", "53"]}
     assert "consciousness" not in _SAVE_VOLATILE_NAMES
+
+
+def test_same_after_trim_treats_trailing_newline_as_same():
+    """11/4 本番: カイポケの保存が観察記録の末尾の改行を取り除いた (中身は同じ)。"""
+    from commands.care_record_time_edit import _same_after_trim
+
+    assert _same_after_trim("abc\n", "abc")
+    assert _same_after_trim(["a ", "b"], ["a", "b"])
+    assert not _same_after_trim("abc", "abd")
+    assert not _same_after_trim("00", None)
