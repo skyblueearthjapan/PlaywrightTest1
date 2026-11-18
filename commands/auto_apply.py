@@ -38,11 +38,13 @@ try:
         parse_month,
         goto_monthly_schedule,
         set_service_month,
+        verify_service_month,
     )
 except ImportError as _pw_import_err:  # pragma: no cover
     sync_playwright = None
     create_browser_context = setup_monthly_schedule_page = ensure_session = None
     save_artifacts = parse_month = goto_monthly_schedule = set_service_month = None
+    verify_service_month = None
     print(f"[warn] Playwright未導入のため実行機能は無効です: {_pw_import_err}", file=sys.stderr)
 from lib.diff_engine import load_correction_sheet, Correction, parse_time
 from lib.stop_signal import is_stop_requested, clear_stop
@@ -1931,63 +1933,73 @@ def delete_schedule_entry(page, day: int, start_time: str, dry_run: bool = False
 # 新規追加: 保険種別フォーム入力
 # =============================================================================
 
-def _recover_schedule_page(page, month_str: str = None) -> None:
-    """追加失敗後のリカバリ: モーダルを閉じてスケジュールページを復帰させる"""
-    print("  ※ 追加失敗後のリカバリ開始")
+MONTHLY_SCHEDULE_URL = "https://r.kaipoke.biz/bizhnc/monthlyShiftsList?isFromMenuBizhnc=true"
 
-    # Step 1: モーダルをJSで強制的に閉じる
+
+def _recover_schedule_page(page, month_str: str = None, context=None) -> bool:
+    """失敗後の立て直し: 月間スケジュールのページを開き直し、提供月を合わせて確かめる
+
+    2026-11-19 (設計 B-1): 以前は開いていた窓を JavaScript でページから取り除いていた。
+    12/1 齊藤様の失敗の後、そのページのまま進んだため利用者の選択欄まで働かなくなり、
+    続く 72 件が全部飛ばされた。ページの部品は取り除かず、ページごと開き直す。
+
+    呼び出し元は、この後に利用者を選び直してから次の 1 件へ進むこと。
+
+    Args:
+        month_str: 提供月 ("2026-12")。None なら月は合わせない
+        context: ブラウザコンテキスト。渡されたらセッション切れのときに再ログインする
+
+    Returns:
+        bool: 開き直して提供月を確かめられたら True
+    """
+    print("  ※ 立て直し開始: 月間スケジュールのページを開き直します")
+
+    # Step 1: 編集の窓が開いていれば、ふつうの手順で閉じる (ページの部品は取り除かない)
     try:
-        page.evaluate("""
-            (() => {
-                // モーダルとオーバーレイを全て除去
-                document.querySelectorAll('.modal-backdrop, .ui-widget-overlay').forEach(e => e.remove());
-                document.querySelectorAll('.modal, .ui-dialog, [role="dialog"]').forEach(e => {
-                    e.style.display = 'none';
-                    e.remove();
-                });
-                // body のスクロールロックを解除
-                document.body.style.overflow = '';
-                document.body.classList.remove('modal-open');
-            })()
-        """)
-        page.wait_for_timeout(1000)
+        modal_open = False
+        for sel in ("input#btnRegisPop", "input#inPopupBtnDel"):
+            try:
+                if page.locator(sel).is_visible(timeout=500):
+                    modal_open = True
+                    break
+            except Exception:
+                continue
+        if modal_open:
+            close_edit_dialog(page)
     except Exception as e:
-        print(f"    モーダル強制閉じ: {e}")
+        print(f"    窓を閉じる途中で例外 (開き直しで捨てるので続けます): {e}")
 
-    # Step 2: スケジュールページが表示されているか確認
     try:
-        add_btn = page.locator("button[title='新規追加']").first
-        if add_btn.is_visible(timeout=3000):
-            print("  ※ リカバリ完了: スケジュールページ確認OK")
-            return
-    except Exception:
-        pass
+        # Step 2: セッションが切れていれば再ログインして月間スケジュールまで戻る
+        if context is not None and month_str:
+            if not ensure_session(page, context, month_str):
+                print("  ※ 立て直し失敗: セッションを戻せません")
+                return False
 
-    # Step 3: エラーページの場合、正しいURLで再ナビゲーション
-    print("  ※ スケジュールページが見つかりません。再ナビゲーション...")
-    try:
-        page.goto(
-            "https://r.kaipoke.biz/bizhnc/monthlyShiftsList?isFromMenuBizhnc=true",
-            timeout=30000,
-        )
-        page.wait_for_load_state("networkidle", timeout=10000)
+        # Step 3: ページごと開き直す (壊れた DOM を捨てる)
+        page.goto(MONTHLY_SCHEDULE_URL, timeout=30000)
+        try:
+            page.wait_for_load_state("networkidle", timeout=10000)
+        except Exception:
+            pass
         page.wait_for_timeout(2000)
 
-        # ナビゲーション後にスケジュールページが表示されたか検証
-        add_btn = page.locator("button[title='新規追加']").first
-        if not add_btn.is_visible(timeout=5000):
-            print("  ※ リカバリ失敗: スケジュールページが表示されません")
-            return
-
-        # 月を再設定
+        # Step 4: 提供月を合わせて確かめる (初めのセットアップと同じ関数)
         if month_str:
-            print(f"  ※ サービス提供月を再設定: {month_str}")
             set_service_month(page, month_str)
             page.wait_for_timeout(1000)
+            verify_service_month(page, month_str)  # 月が違えば RuntimeError
 
-        print("  ※ リカバリ完了: スケジュールページへ直接遷移")
+        # Step 5: 利用者の選択欄が働く状態か
+        if _get_user_dropdown(page) is None:
+            print("  ※ 立て直し失敗: 利用者の選択欄が見つかりません")
+            return False
+
+        print("  ※ 立て直し完了: 月間スケジュールを開き直しました")
+        return True
     except Exception as e:
-        print(f"  ※ リカバリ失敗: {e}")
+        print(f"  ※ 立て直し失敗: {e}")
+        return False
 
 
 def click_new_add_button(page) -> bool:
@@ -2090,13 +2102,21 @@ def resolve_medical_selects(service_type=None) -> dict:
     }
 
 
+SELECT_OPTION_WAIT_MS = 45000
+
+
 def _select_value_and_wait(page, select_locator, value: str, field_name: str) -> bool:
     """value 指定で select してAJAX完了まで待機 (Kaipoke JSF対応)."""
     try:
-        for _ in range(10):
-            if len(select_locator.locator("option").all()) > 1:
-                break
-            page.wait_for_timeout(500)
+        # 2026-11-19 (設計 B-4): 職員資格の選択肢が 30 秒出ずに失敗したことがある
+        # (12/1 齊藤様・カイポケの応答の遅れ)。選ぶ値の選択肢が出るまで最大 45 秒待つ。
+        try:
+            select_locator.locator('option[value="%s"]' % value).first.wait_for(
+                state="attached", timeout=SELECT_OPTION_WAIT_MS)
+        except Exception:
+            print("    %s: 選択肢 (value=%s) が %d 秒待っても出ません" % (
+                field_name, value, SELECT_OPTION_WAIT_MS // 1000))
+            return False
         select_locator.select_option(value=value)
         try:
             page.wait_for_load_state("networkidle", timeout=5000)
@@ -3031,6 +3051,37 @@ def apply_correction(page, correction: Correction, dry_run: bool = False, month_
 # メインエンジン: 2フェーズ処理
 # =============================================================================
 
+def _select_user_with_recovery(page, user_name: str, month_str: str = None,
+                               context=None) -> bool:
+    """利用者を選ぶ。失敗したら 1 回だけページを開き直して選び直す (設計 B-2)"""
+    if select_user(page, user_name):
+        return True
+    print(f"  ※ 利用者 '{user_name}' を選べません → ページを開き直して選び直します")
+    if not _recover_schedule_page(page, month_str, context=context):
+        print("  ※ 開き直しに失敗しました")
+    return select_user(page, user_name)
+
+
+class _SelectFailureTracker:
+    """利用者の選択の失敗 (開き直した後も) が続いた人数を数える (設計 B-3)
+
+    limit 人続いたら、ページが壊れているとみなして送信を止める。
+    1 人でも選べたら数え直す。
+    """
+
+    def __init__(self, limit: int = 2):
+        self.limit = limit
+        self.consecutive = 0
+
+    def record(self, selected: bool) -> bool:
+        """選択の結果を記録し、止めるべきなら True を返す"""
+        if selected:
+            self.consecutive = 0
+            return False
+        self.consecutive += 1
+        return self.consecutive >= self.limit
+
+
 def run_auto_apply(
     correction_sheet: str,
     month: str = "2026-04",
@@ -3206,7 +3257,35 @@ def run_auto_apply(
                         day = c.date_from or c.date_to
                         print(f"  [ソート済] {user_name} {day}日 {c.action} ({c.business_type})")
 
-                for user_name, user_corrections in users.items():
+                def _skip_phase1(user, cs, reason):
+                    for c in cs:
+                        result["skipped"] += 1
+                        result["details"].append({
+                            "user": user,
+                            "date": c.date_from or c.date_to,
+                            "action": c.action,
+                            "business_type": c.business_type,
+                            "status": "skipped",
+                            "reason": reason,
+                        })
+                        _report_progress("phase1", user)
+
+                # 利用者の選択の失敗が続いたら止める (設計 B-3)。
+                # 12/1 は 1 件の失敗の後、続く 72 件が全部「利用者が見つかりません」で飛んだ。
+                select_failures = _SelectFailureTracker(limit=2)
+                user_items = list(users.items())
+
+                def _stop_page_broken(after_index):
+                    print("\n※ 利用者の選択が続けて失敗しました。ページが壊れているとみなし、"
+                          "送信を止めます (残りは送らずに未送信のまま残します)")
+                    result["stopped"] = True
+                    result["stop_reason"] = "page_broken"
+                    for rest_user, rest_cs in user_items[after_index + 1:]:
+                        _skip_phase1(rest_user, rest_cs, "not_attempted_page_broken")
+
+                for user_index, (user_name, user_corrections) in enumerate(user_items):
+                    if result.get("stop_reason") == "page_broken":
+                        break  # 前の利用者の途中で止めた (残りは _stop_page_broken で記録済み)
                     if is_stop_requested():
                         print(f"\n非常停止が要求されました！Phase 1を中断します。")
                         result["stopped"] = True
@@ -3214,22 +3293,16 @@ def run_auto_apply(
 
                     print(f"\n--- 利用者: {user_name} ({len(user_corrections)}件) ---")
 
-                    if not select_user(page, user_name):
+                    selected = _select_user_with_recovery(page, user_name, month, context)
+                    if not selected:
                         print(f"  利用者の選択に失敗: {user_name}")
-                        for c in user_corrections:
-                            result["skipped"] += 1
-                            result["details"].append({
-                                "user": user_name,
-                                "date": c.date_from or c.date_to,
-                                "action": c.action,
-                                "business_type": c.business_type,
-                                "status": "skipped",
-                                "reason": "user_not_found",
-                            })
-                            _report_progress("phase1", user_name)
+                        _skip_phase1(user_name, user_corrections, "user_not_found")
+                        if select_failures.record(False):
+                            _stop_page_broken(user_index)
+                            break
                         continue
 
-                    for correction in user_corrections:
+                    for correction_index, correction in enumerate(user_corrections):
                         if is_stop_requested():
                             result["stopped"] = True
                             break
@@ -3241,19 +3314,17 @@ def run_auto_apply(
                         # ここを外すと別人の予定を消し書きする恐れがある。
                         if not _check_current_user(page, user_name):
                             print(f"  ※ 画面の利用者が '{user_name}' ではありません → 選択し直します")
-                            if not select_user(page, user_name):
+                            reselected = _select_user_with_recovery(page, user_name, month, context)
+                            if not reselected:
+                                # 開き直しても選べない利用者は、残りの修正もまとめて飛ばす
                                 print(f"  利用者の再選択に失敗: {user_name}")
-                                result["skipped"] += 1
-                                result["details"].append({
-                                    "user": user_name,
-                                    "date": correction.date_from or correction.date_to,
-                                    "action": correction.action,
-                                    "business_type": correction.business_type,
-                                    "status": "skipped",
-                                    "reason": "user_not_found",
-                                })
-                                _report_progress("phase1", user_name)
-                                continue
+                                _skip_phase1(user_name, user_corrections[correction_index:],
+                                             "user_not_found")
+                                if select_failures.record(False):
+                                    _stop_page_broken(user_index)
+                                break
+                        # 画面の利用者を確かめられたので、続けての失敗を数え直す
+                        select_failures.record(True)
 
                         max_retries = 1
                         for attempt in range(max_retries + 1):
@@ -3320,7 +3391,20 @@ def run_auto_apply(
             # ========================================
             # Phase 2: イベント追加（職員別タブ）
             # ========================================
-            if event_corrections and not result.get("stopped"):
+            if event_corrections and result.get("stop_reason") == "page_broken":
+                # ページが壊れて止めたときは Phase 2 も行わない。件数が合うよう飛ばしとして残す
+                for c in event_corrections:
+                    result["skipped"] += 1
+                    result["details"].append({
+                        "staff": c.staff1_to,
+                        "date": c.date_to,
+                        "action": "event_add",
+                        "business_type": c.business_type,
+                        "status": "skipped",
+                        "reason": "not_attempted_page_broken",
+                    })
+                    _report_progress("phase2", c.staff1_to)
+            elif event_corrections and not result.get("stopped"):
                 print(f"\n{'='*50}")
                 print(f"Phase 2: イベント追加 ({len(event_corrections)}件)")
                 print(f"{'='*50}")
