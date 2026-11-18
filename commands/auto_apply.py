@@ -21,6 +21,7 @@ import sys
 import re
 import datetime
 import threading
+import time
 import unicodedata
 from pathlib import Path
 
@@ -106,6 +107,21 @@ def _pop_reason():
     reason = getattr(_last_failure_reason, "value", None)
     _last_failure_reason.value = None
     return reason
+
+
+# --- ページを開き直せたか (2026-11-19 レビューの指摘) ---------------------------
+# 開き直しに失敗したページは、提供月も利用者も確かめられていない。
+# この印が立っている間は書き込まず、利用者を選ぶ前に必ず開き直す。
+_page_state = threading.local()
+
+
+def _page_unverified() -> bool:
+    """開き直しに失敗したまま (提供月を確かめられていない) なら True"""
+    return getattr(_page_state, "unverified", False)
+
+
+def _set_page_unverified(value: bool) -> None:
+    _page_state.unverified = value
 
 
 def _normalize_staff_text(text: str) -> str:
@@ -1969,6 +1985,8 @@ def _recover_schedule_page(page, month_str: str = None, context=None) -> bool:
     except Exception as e:
         print(f"    窓を閉じる途中で例外 (開き直しで捨てるので続けます): {e}")
 
+    # 開き直しが終わるまでは、提供月を確かめられていないページとして扱う
+    _set_page_unverified(True)
     try:
         # Step 2: セッションが切れていれば再ログインして月間スケジュールまで戻る
         if context is not None and month_str:
@@ -1995,6 +2013,7 @@ def _recover_schedule_page(page, month_str: str = None, context=None) -> bool:
             print("  ※ 立て直し失敗: 利用者の選択欄が見つかりません")
             return False
 
+        _set_page_unverified(False)
         print("  ※ 立て直し完了: 月間スケジュールを開き直しました")
         return True
     except Exception as e:
@@ -2107,13 +2126,27 @@ SELECT_OPTION_WAIT_MS = 45000
 
 def _select_value_and_wait(page, select_locator, value: str, field_name: str) -> bool:
     """value 指定で select してAJAX完了まで待機 (Kaipoke JSF対応)."""
+    if not value:
+        print("    %s: 選ぶ値が空です → 選びません" % field_name)
+        return False
     try:
         # 2026-11-19 (設計 B-4): 職員資格の選択肢が 30 秒出ずに失敗したことがある
         # (12/1 齊藤様・カイポケの応答の遅れ)。選ぶ値の選択肢が出るまで最大 45 秒待つ。
-        try:
-            select_locator.locator('option[value="%s"]' % value).first.wait_for(
-                state="attached", timeout=SELECT_OPTION_WAIT_MS)
-        except Exception:
+        # 値は CSS に埋め込まず、引数として渡して比べる (引用符などで壊れないように)。
+        # 選択欄は AJAX で描き直されることがあるので、毎回 locator から引き直して確かめる。
+        found = False
+        deadline = time.monotonic() + SELECT_OPTION_WAIT_MS / 1000
+        while True:
+            try:
+                found = bool(select_locator.evaluate(
+                    "(sel, v) => Array.from(sel.options).some(o => o.value === v)",
+                    value, timeout=2000))
+            except Exception:
+                found = False
+            if found or time.monotonic() >= deadline:
+                break
+            page.wait_for_timeout(500)
+        if not found:
             print("    %s: 選択肢 (value=%s) が %d 秒待っても出ません" % (
                 field_name, value, SELECT_OPTION_WAIT_MS // 1000))
             return False
@@ -2123,7 +2156,9 @@ def _select_value_and_wait(page, select_locator, value: str, field_name: str) ->
         except Exception:
             pass
         page.wait_for_timeout(1000)
-        label = select_locator.locator('option[value="%s"]' % value).first.text_content() or value
+        label = select_locator.evaluate(
+            "(sel, v) => { const o = Array.from(sel.options).find(o => o.value === v);"
+            " return o ? o.textContent : null; }", value) or value
         print("    %s: %s (value=%s)" % (field_name, label.strip(), value))
         return True
     except Exception as e:
@@ -2852,7 +2887,7 @@ def add_event_entry(page, correction: Correction, dry_run: bool = False) -> bool
 # =============================================================================
 
 def _apply_move_with_reorder(page, correction: Correction, dry_run: bool = False,
-                             month_str: str = None) -> bool:
+                             month_str: str = None, context=None) -> bool:
     """削除と再追加が伴う変更 (日付変更 / 時間変更) を、消失させない順序で適用する
 
     2026-09-03の本番事故: 削除→追加の追加側が失敗し、旧行は既に消えていたため
@@ -2879,7 +2914,12 @@ def _apply_move_with_reorder(page, correction: Correction, dry_run: bool = False
     if add_first:
         print("  ※ 新旧が別の行になるため、先に追加してから旧行を削除します (消失防止)")
         if not add_schedule_entry(page, correction, dry_run):
-            _recover_schedule_page(page, month_str)
+            if not _recover_schedule_page(page, month_str, context=context):
+                # 提供月を確かめられないページでは何もしない (呼び出し元が開き直す)
+                print("  ※ 追加に失敗し、ページの開き直しにも失敗しました。"
+                      "旧行は削除していません (データ消失なし)")
+                _set_reason("recovery_failed")
+                return False
             print("  ※ 追加に失敗しました。旧行は削除していません (データ消失なし)")
             # リカバリでページが遷移している可能性があるため利用者を選び直す (C-2)
             if not select_user(page, correction.user_name):
@@ -2897,7 +2937,12 @@ def _apply_move_with_reorder(page, correction: Correction, dry_run: bool = False
                                      end_time=correction.end_time_from):
             print("  ※ 警告: 追加は成功しましたが旧行の削除に失敗しました。"
                   "この利用者には新旧2件が残っています。手動で旧行を削除してください")
-            _set_reason("old_row_remains_duplicate")
+            if getattr(_last_failure_reason, "value", None) == "ambiguous_entry":
+                # 消す候補が 2 行以上あって押さなかった。どれを消すか人が見る
+                print("  ※ 旧行の候補が 2 行以上あるため消していません (ambiguous_entry)")
+                _set_reason("old_row_remains_ambiguous")
+            else:
+                _set_reason("old_row_remains_duplicate")
             return False
         return True
 
@@ -2926,7 +2971,13 @@ def _apply_move_with_reorder(page, correction: Correction, dry_run: bool = False
         _clear_delete_done(correction)
         return True
 
-    _recover_schedule_page(page, month_str)
+    if not _recover_schedule_page(page, month_str, context=context):
+        # 提供月を確かめられないページでロールバックを書き込まない
+        print("  ※ 中止: 追加に失敗し、ページの開き直しにも失敗しました。ロールバックしません。"
+              "旧行は削除済みのため、元の予定を手動で復元してください")
+        _set_reason("recovery_failed")
+        _clear_delete_done(correction)
+        return False
     # リカバリは画面遷移を伴うことがあり、利用者が変わったまま書き込むと
     # 別人の予定を作ってしまう。再選択できなければ一切書き込まない (C-2)。
     if not select_user(page, correction.user_name):
@@ -2967,13 +3018,15 @@ def _apply_move_with_reorder(page, correction: Correction, dry_run: bool = False
                     else "add_failed_rolled_back")
     else:
         print("  ※ ロールバック失敗: 元の予定が失われました。手動で復元してください")
-        _recover_schedule_page(page, month_str)
+        # 失敗すれば印が立ち、次の 1 件の前に呼び出し元が開き直す
+        _recover_schedule_page(page, month_str, context=context)
         _set_reason("add_failed_row_lost")
     _clear_delete_done(correction)
     return False
 
 
-def apply_correction(page, correction: Correction, dry_run: bool = False, month_str: str = None) -> bool:
+def apply_correction(page, correction: Correction, dry_run: bool = False, month_str: str = None,
+                     context=None) -> bool:
     """
     1件の修正を適用（スケジュール系のみ。イベントは別フロー）
 
@@ -3006,7 +3059,7 @@ def apply_correction(page, correction: Correction, dry_run: bool = False, month_
               f"{correction.date_from}日 → {correction.date_to}日 [{biz_type}] ===")
         # Kaipokeは日付変更時に登録ボタンが無効化されるため、削除と再追加で処理
         print(f"  ※ 日付変更のため、削除と再追加で処理します")
-        return _apply_move_with_reorder(page, correction, dry_run, month_str)
+        return _apply_move_with_reorder(page, correction, dry_run, month_str, context=context)
 
     else:  # edit
         # 変更は医療保険・介護保険共通（上部フィールドはREAD-ONLY）
@@ -3021,7 +3074,7 @@ def apply_correction(page, correction: Correction, dry_run: bool = False, month_
                 print(f"  ※ 時間変更があるため、削除と再追加で処理します")
             if correction.grade_change:
                 print("  ※ 請求区分（正看/准看）が変わるため、削除→再追加で処理します")
-            return _apply_move_with_reorder(page, correction, dry_run, month_str)
+            return _apply_move_with_reorder(page, correction, dry_run, month_str, context=context)
 
         # スタッフのみ変更の場合は通常の編集フロー
         day = int(correction.date_from) if correction.date_from.isdigit() else 1
@@ -3053,12 +3106,20 @@ def apply_correction(page, correction: Correction, dry_run: bool = False, month_
 
 def _select_user_with_recovery(page, user_name: str, month_str: str = None,
                                context=None) -> bool:
-    """利用者を選ぶ。失敗したら 1 回だけページを開き直して選び直す (設計 B-2)"""
-    if select_user(page, user_name):
-        return True
-    print(f"  ※ 利用者 '{user_name}' を選べません → ページを開き直して選び直します")
+    """利用者を選ぶ。失敗したら 1 回だけページを開き直して選び直す (設計 B-2)
+
+    前の開き直しに失敗したまま (提供月を確かめていない) なら、選ぶ前に開き直す。
+    開き直しに失敗したら選ばずに False を返す (提供月を確かめないまま書き込まない)。
+    """
+    if not _page_unverified():
+        if select_user(page, user_name):
+            return True
+        print(f"  ※ 利用者 '{user_name}' を選べません → ページを開き直して選び直します")
+    else:
+        print("  ※ 前の開き直しに失敗したままです → 利用者を選ぶ前にページを開き直します")
     if not _recover_schedule_page(page, month_str, context=context):
-        print("  ※ 開き直しに失敗しました")
+        print("  ※ 開き直しに失敗しました → 利用者を選びません")
+        return False
     return select_user(page, user_name)
 
 
@@ -3220,6 +3281,8 @@ def run_auto_apply(
                     "success": 0, "failed": 0, "skipped": 0,
                 })
             setup_monthly_schedule_page(page, context, month)
+            # 新しいページを開いたので、前の送信で立った印を持ち越さない
+            _set_page_unverified(False)
             if progress_callback:
                 progress_callback({
                     "processed": 0, "total": _total_count,
@@ -3312,8 +3375,10 @@ def run_auto_apply(
 
                         # リカバリ等でページが別利用者に飛んでいないか確認 (C-2)。
                         # ここを外すと別人の予定を消し書きする恐れがある。
-                        if not _check_current_user(page, user_name):
-                            print(f"  ※ 画面の利用者が '{user_name}' ではありません → 選択し直します")
+                        # 前の 1 件で開き直しに失敗していたら、画面の利用者が合って見えても
+                        # 提供月を確かめていないので、必ず選び直す (開き直しから)。
+                        if _page_unverified() or not _check_current_user(page, user_name):
+                            print(f"  ※ 画面の利用者が '{user_name}' と確かめられません → 選択し直します")
                             reselected = _select_user_with_recovery(page, user_name, month, context)
                             if not reselected:
                                 # 開き直しても選べない利用者は、残りの修正もまとめて飛ばす
@@ -3327,6 +3392,7 @@ def run_auto_apply(
                         select_failures.record(True)
 
                         max_retries = 1
+                        retry_user_lost = False
                         for attempt in range(max_retries + 1):
                             # 試行ごとに前試行の理由をクリアする (L-2)
                             _pop_reason()
@@ -3336,9 +3402,18 @@ def run_auto_apply(
                                     print(f"  リトライ ({attempt}/{max_retries})")
                                     if not ensure_session(page, context, month):
                                         raise RuntimeError("セッション復旧に失敗")
-                                    select_user(page, user_name)
+                                    # やり直しでも、利用者を確かめてから書き込む
+                                    if not (_select_user_with_recovery(page, user_name, month, context)
+                                            and _check_current_user(page, user_name)):
+                                        print(f"  ※ やり直しで利用者 '{user_name}' を確かめられません"
+                                              " → この利用者の残りを飛ばします")
+                                        _skip_phase1(user_name, user_corrections[correction_index:],
+                                                     "user_not_confirmed_on_retry")
+                                        retry_user_lost = True
+                                        break
 
-                                success = apply_correction(page, correction, dry_run, month_str=month)
+                                success = apply_correction(page, correction, dry_run, month_str=month,
+                                                           context=context)
                                 if success:
                                     result["success"] += 1
                                     result["details"].append({
@@ -3384,6 +3459,12 @@ def run_auto_apply(
                                     "status": "error",
                                     "reason": str(e),
                                 })
+
+                        if retry_user_lost:
+                            # _skip_phase1 で進み具合も報告済み
+                            if select_failures.record(False):
+                                _stop_page_broken(user_index)
+                            break
 
                         _report_progress("phase1", user_name)
                         page.wait_for_timeout(1000)

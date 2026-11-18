@@ -113,7 +113,7 @@ class TestGradeChangeRouting(unittest.TestCase):
         """apply_correction を、外部依存を全部差し替えて実行する"""
         calls = {"reorder": 0, "edit_staff": 0, "click_entry": 0, "register": 0}
 
-        def fake_reorder(page, c, dry_run=False, month_str=None):
+        def fake_reorder(page, c, dry_run=False, month_str=None, context=None):
             calls["reorder"] += 1
             return True
 
@@ -195,7 +195,7 @@ class TestSameKeyReorder(unittest.TestCase):
         with mock.patch.object(aa, "delete_schedule_entry", fake_delete), \
                 mock.patch.object(aa, "add_schedule_entry", fake_add), \
                 mock.patch.object(aa, "_schedule_entry_exists", exists), \
-                mock.patch.object(aa, "_recover_schedule_page", lambda page, m=None: None), \
+                mock.patch.object(aa, "_recover_schedule_page", lambda page, m=None, context=None: True), \
                 mock.patch.object(aa, "select_user", lambda page, name: True):
             ok = aa._apply_move_with_reorder(FakePage(), correction, dry_run=False,
                                              month_str="2026-09")
