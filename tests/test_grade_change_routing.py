@@ -117,7 +117,7 @@ class TestGradeChangeRouting(unittest.TestCase):
             calls["reorder"] += 1
             return True
 
-        def fake_click_entry(page, day, start_time, staff_name=None):
+        def fake_click_entry(page, day, start_time, staff_name=None, end_time=None):
             calls["click_entry"] += 1
             return True
 
@@ -184,7 +184,7 @@ class TestSameKeyReorder(unittest.TestCase):
                      delete_ok=True, order=None):
         order = [] if order is None else order
 
-        def fake_delete(page, day, start_time, dry_run=False, staff_name=None):
+        def fake_delete(page, day, start_time, dry_run=False, staff_name=None, end_time=None):
             order.append(("delete", day, start_time, staff_name))
             return delete_ok
 

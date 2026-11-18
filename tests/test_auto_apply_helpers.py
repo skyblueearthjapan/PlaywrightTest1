@@ -454,13 +454,180 @@ class TestClickScheduleEntry(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(self.clicked, [])
 
-    def test_no_staff_name_keeps_first_match(self):
+    def test_no_staff_name_two_matches_is_refused(self):
+        # 2026-11-19 (A-2): 職員指定なしで同時刻が2件 → 先頭を押さず ambiguous_entry
         page = FakePage([
             visit_row(7, "16:45 ～ 17:20", ["熊澤妙子"], detail_id="OLD"),
             visit_row(7, "16:45 ～ 17:20", ["高岡はるか"], detail_id="NEW"),
         ])
-        self.assertTrue(aa.click_schedule_entry(page, 7, "16:45"))
+        self.assertFalse(aa.click_schedule_entry(page, 7, "16:45"))
+        self.assertEqual(self.clicked, [])
+        self.assertEqual(_pop_reason(), "ambiguous_entry")
+
+    # --- 2026-11-19 川上様 12/24: 終わりの時刻に当てて新しい行を消した ---------
+
+    def test_end_time_of_new_row_is_not_a_start_match(self):
+        # 追加→削除の途中: 新しい行 10:25～11:00 が上、元の行 11:00～11:35 が下。
+        # 「11:00 を消す」は元の行だけを選ぶ (同じ職員でも)。
+        page = FakePage([
+            visit_row(24, "10:25 ～ 11:00", ["熊澤妙子"], detail_id="NEW"),
+            visit_row(24, "11:00 ～ 11:35", ["熊澤妙子"], detail_id="OLD"),
+        ])
+        self.assertTrue(aa.click_schedule_entry(page, 24, "11:00", staff_name="熊澤妙子"))
         self.assertIn("'OLD'", self.clicked_onclick())
+
+    def test_end_time_of_new_row_is_not_a_start_match_without_end(self):
+        page = FakePage([
+            visit_row(24, "10:25 ～ 11:00", ["熊澤妙子"], detail_id="NEW"),
+            visit_row(24, "11:00 ～ 11:35", ["熊澤妙子"], detail_id="OLD"),
+        ])
+        self.assertTrue(aa.click_schedule_entry(page, 24, "11:00"))
+        self.assertIn("'OLD'", self.clicked_onclick())
+
+    def test_end_time_must_match_when_given(self):
+        page = FakePage([visit_row(24, "11:00 ～ 11:35", ["熊澤妙子"])])
+        ok = aa.click_schedule_entry(page, 24, "11:00", staff_name="熊澤妙子",
+                                     end_time="11:30")
+        self.assertFalse(ok)
+        self.assertEqual(self.clicked, [])
+        self.assertEqual(_pop_reason(), "entry_not_found")
+
+    def test_end_time_picks_between_same_start_rows(self):
+        page = FakePage([
+            visit_row(24, "11:00 ～ 11:30", ["熊澤妙子"], detail_id="A"),
+            visit_row(24, "11:00 ～ 11:35", ["熊澤妙子"], detail_id="B"),
+        ])
+        self.assertTrue(aa.click_schedule_entry(page, 24, "11:00", staff_name="熊澤妙子",
+                                                end_time="11:35"))
+        self.assertIn("'B'", self.clicked_onclick())
+
+    def test_two_identical_rows_same_staff_are_refused(self):
+        page = FakePage([
+            visit_row(24, "11:00 ～ 11:35", ["熊澤妙子"], detail_id="A"),
+            visit_row(24, "11:00 ～ 11:35", ["熊澤妙子"], detail_id="B"),
+        ])
+        ok = aa.click_schedule_entry(page, 24, "11:00", staff_name="熊澤妙子",
+                                     end_time="11:35")
+        self.assertFalse(ok)
+        self.assertEqual(self.clicked, [])
+        self.assertEqual(_pop_reason(), "ambiguous_entry")
+
+    def test_delete_keeps_ambiguous_reason(self):
+        page = FakePage([
+            visit_row(24, "11:00 ～ 11:35", ["熊澤妙子"], detail_id="A"),
+            visit_row(24, "11:00 ～ 11:35", ["熊澤妙子"], detail_id="B"),
+        ])
+        ok = aa.delete_schedule_entry(page, 24, "11:00", staff_name="熊澤妙子",
+                                      end_time="11:35")
+        self.assertFalse(ok)
+        self.assertEqual(self.clicked, [])
+        self.assertEqual(_pop_reason(), "ambiguous_entry")
+
+
+class TestParseEntryTimes(unittest.TestCase):
+    def test_service_area_text(self):
+        self.assertEqual(aa._parse_entry_times("精神基本療養費Ⅰ・正看\n10:25 ～ 11:00"),
+                         ("10:25", "11:00"))
+
+    def test_spacing_and_separators(self):
+        for text in ("10:25～11:00", "10:25 ~ 11:00", "10:25　〜　11:00",
+                     "１０：２５ ～ １１：００", " 10:25\n～\n11:00 "):
+            with self.subTest(text=text):
+                self.assertEqual(aa._parse_entry_times(text), ("10:25", "11:00"))
+
+    def test_single_digit_hour_is_zero_padded(self):
+        self.assertEqual(aa._parse_entry_times("9:05 ～ 9:40"), ("09:05", "09:40"))
+        self.assertEqual(aa._norm_hhmm("9:05"), "09:05")
+        self.assertEqual(aa._norm_hhmm("09:05"), "09:05")
+        self.assertIsNone(aa._norm_hhmm(""))
+        self.assertIsNone(aa._norm_hhmm("-"))
+        self.assertIsNone(aa._norm_hhmm(None))
+
+    def test_no_end(self):
+        self.assertEqual(aa._parse_entry_times("10:25"), ("10:25", None))
+
+    def test_unparseable(self):
+        self.assertIsNone(aa._parse_entry_times(""))
+        self.assertIsNone(aa._parse_entry_times("精神基本療養費Ⅰ・正看"))
+        self.assertIsNone(aa._parse_entry_times(None))
+
+
+class TestTimeTextMatches(unittest.TestCase):
+    def test_start_only_compares_first_time(self):
+        self.assertTrue(aa._time_text_matches("11:00 ～ 11:35", "11:00"))
+        self.assertFalse(aa._time_text_matches("10:25 ～ 11:00", "11:00"))
+
+    def test_h_mm_request_matches_hh_mm_text(self):
+        self.assertTrue(aa._time_text_matches("09:05 ～ 09:40", "9:05", "9:40"))
+        self.assertTrue(aa._time_text_matches("9:05 ～ 9:40", "09:05", "09:40"))
+
+    def test_end_mismatch_excluded(self):
+        self.assertFalse(aa._time_text_matches("11:00 ～ 11:35", "11:00", "11:30"))
+        # 終了が読めない行は、終了を指定されたら合わない
+        self.assertFalse(aa._time_text_matches("11:00", "11:00", "11:35"))
+
+    def test_unreadable_end_request_means_start_only(self):
+        for end in (None, "", "-"):
+            with self.subTest(end=end):
+                self.assertTrue(aa._time_text_matches("11:00 ～ 11:35", "11:00", end))
+
+    def test_unparseable_text_falls_back_to_start_substring_only(self):
+        # 時刻として読めない文字だけ部分一致。読める文字の終わりの時刻には当てない。
+        self.assertFalse(aa._time_text_matches("", "11:00"))
+        self.assertFalse(aa._time_text_matches("精神基本療養費Ⅰ", "11:00"))
+        self.assertFalse(aa._time_text_matches("10:25 ～ 11:00", "11:00"))
+
+
+class TestSelectTarget(unittest.TestCase):
+    def cand(self, time_text, staff, tag):
+        return {"time_text": time_text, "staff_text": staff, "tag": tag}
+
+    def test_kawakami_case(self):
+        cands = [self.cand("精神基本療養費Ⅰ・正看\n10:25 ～ 11:00", "熊澤妙子", "NEW"),
+                 self.cand("精神基本療養費Ⅰ・正看\n11:00 ～ 11:35", "熊澤妙子", "OLD")]
+        target, reason, _ = aa._select_target(cands, "11:00", "11:35", "熊澤妙子")
+        self.assertIsNone(reason)
+        self.assertEqual(target["tag"], "OLD")
+
+    def test_ambiguous(self):
+        cands = [self.cand("11:00 ～ 11:35", "熊澤妙子", "A"),
+                 self.cand("11:00 ～ 11:35", "熊澤妙子", "B")]
+        self.assertEqual(aa._select_target(cands, "11:00", "11:35", "熊澤妙子")[:2],
+                         (None, "ambiguous_entry"))
+        self.assertEqual(aa._select_target(cands, "11:00", "11:35", None)[:2],
+                         (None, "ambiguous_entry"))
+
+    def test_no_time_match_without_staff_is_refused(self):
+        # 以前は「最初のエントリをクリック」していた
+        cands = [self.cand("09:00 ～ 09:30", "高岡はるか", "A"),
+                 self.cand("10:00 ～ 10:30", "熊澤妙子", "B")]
+        self.assertEqual(aa._select_target(cands, "11:00")[:2], (None, "entry_not_found"))
+
+    def test_single_candidate_without_time_text_kept(self):
+        cands = [self.cand("", "", "ONLY")]
+        target, reason, _ = aa._select_target(cands, "11:00")
+        self.assertIsNone(reason)
+        self.assertEqual(target["tag"], "ONLY")
+
+
+class TestCountPlanEntries(unittest.TestCase):
+    """A-3: 消した後の確かめも開始(と終了)で数える"""
+
+    def test_does_not_count_row_ending_at_start_time(self):
+        page = FakePage([
+            visit_row(24, "10:25 ～ 11:00", ["熊澤妙子"], detail_id="NEW"),
+            visit_row(24, "11:00 ～ 11:35", ["熊澤妙子"], detail_id="OLD"),
+        ])
+        self.assertEqual(aa._count_plan_entries(page, 24, "11:00"), 1)
+        self.assertEqual(aa._count_plan_entries(page, 24, "11:00", end_time="11:35"), 1)
+        self.assertEqual(aa._count_plan_entries(page, 24, "11:00", end_time="11:30"), 0)
+        self.assertEqual(aa._count_plan_entries(page, 24, "10:25", "熊澤妙子"), 1)
+
+    def test_after_old_row_deleted_count_is_zero(self):
+        page = FakePage([visit_row(24, "10:25 ～ 11:00", ["熊澤妙子"], detail_id="NEW")])
+        self.assertEqual(aa._count_plan_entries(page, 24, "11:00", end_time="11:35"), 0)
+        self.assertFalse(aa._schedule_entry_exists(page, 24, "11:00", "熊澤妙子",
+                                                   end_time="11:35"))
 
 
 class TestApplyMoveGuards(unittest.TestCase):

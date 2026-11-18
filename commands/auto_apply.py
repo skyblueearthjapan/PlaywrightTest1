@@ -556,6 +556,98 @@ def _entry_time_text(link) -> str:
     return ""
 
 
+# --- 予定の時刻の読み分け (2026-11-19) -----------------------------------------
+# 12/24 川上様: 11:00〜11:35 を 10:25〜11:00 へずらす修正で、「11:00」を含む行として
+# 新しい行 (終わりが 11:00) を消した。開始は先頭の時刻だけ、終了は「～」の後だけと比べる。
+_HHMM_RE = re.compile(r"(\d{1,2})\s*:\s*(\d{2})")
+_RANGE_SEP_RE = re.compile(r"[~〜～]")
+
+
+def _norm_hhmm(value):
+    """"9:05" / "09:05" / "０９：０５" → "09:05"。読めなければ None"""
+    if not value:
+        return None
+    m = _HHMM_RE.search(unicodedata.normalize("NFKC", str(value)))
+    if not m:
+        return None
+    return f"{int(m.group(1)):02d}:{m.group(2)}"
+
+
+def _parse_entry_times(text):
+    """service-detail-area の文字から (開始, 終了) を取り出す (どちらも "HH:MM")
+
+    例: "精神基本療養費Ⅰ・正看\\n10:25 ～ 11:00" → ("10:25", "11:00")
+    開始 = 最初の時刻、終了 = 開始より後ろの「～」の直後の時刻 (無ければ None)。
+    時刻が 1 つも無ければ None を返す。
+    """
+    if not text:
+        return None
+    norm = unicodedata.normalize("NFKC", text)
+    first = _HHMM_RE.search(norm)
+    if not first:
+        return None
+    start = f"{int(first.group(1)):02d}:{first.group(2)}"
+    end = None
+    sep = _RANGE_SEP_RE.search(norm, first.end())
+    if sep:
+        m = re.match(r"\s*(\d{1,2})\s*:\s*(\d{2})", norm[sep.end():])
+        if m:
+            end = f"{int(m.group(1)):02d}:{m.group(2)}"
+    return (start, end)
+
+
+def _time_text_matches(text, start_time, end_time=None) -> bool:
+    """行の時刻の文字が、開始 (と、渡されれば終了) に合うか
+
+    - 開始は先頭の時刻とだけ比べる (終わりの時刻には当てない)
+    - end_time が読める値なら、終了も一致する行だけを残す
+    - 時刻として読めない文字のときだけ、従来の部分一致 (開始の文字) に倒す
+    """
+    parsed = _parse_entry_times(text or "")
+    if parsed is None:
+        return bool(start_time) and str(start_time) in (text or "")
+    start = _norm_hhmm(start_time)
+    if start is None or parsed[0] != start:
+        return False
+    end = _norm_hhmm(end_time)
+    if end is not None and parsed[1] != end:
+        return False
+    return True
+
+
+def _select_target(candidates, start_time, end_time=None, staff_name=None):
+    """候補 (time_text / staff_text を持つ dict) から押してよい 1 行を選ぶ
+
+    Returns:
+        (target, reason, time_matched)
+        target: 押す候補 (選べなければ None)
+        reason: 選べない理由 ("entry_not_found" / "ambiguous_entry")
+        time_matched: 時刻で絞った後の候補 (ログ用)
+
+    2 行以上残ったら押さない (ambiguous_entry)。誤って消すより残して人が見るほうが安全。
+    """
+    time_matched = [c for c in candidates
+                    if _time_text_matches(c.get("time_text", ""), start_time, end_time)]
+    if staff_name:
+        if not time_matched:
+            return None, "entry_not_found", time_matched
+        staff_matched = [c for c in time_matched
+                         if _staff_text_matches(staff_name, c.get("staff_text", ""))]
+        if not staff_matched:
+            return None, "entry_not_found", time_matched
+        if len(staff_matched) > 1:
+            return None, "ambiguous_entry", time_matched
+        return staff_matched[0], None, time_matched
+    if time_matched:
+        if len(time_matched) > 1:
+            return None, "ambiguous_entry", time_matched
+        return time_matched[0], None, time_matched
+    if len(candidates) == 1 and not (candidates[0].get("time_text") or "").strip():
+        # 職員指定なし・候補1件・時間テキストが取れない → 従来どおり唯一の候補を採用
+        return candidates[0], None, time_matched
+    return None, "entry_not_found", time_matched
+
+
 def _plan_detail_areas(row) -> list:
     """行(tr)の「予定側」の service-detail-area のみを返す（実績側は除外）
 
@@ -655,9 +747,13 @@ def _collect_entry_candidates(page, day_str: str) -> list:
     return candidate_links
 
 
-def click_schedule_entry(page, day: int, start_time: str, staff_name: str = None) -> bool:
+def click_schedule_entry(page, day: int, start_time: str, staff_name: str = None,
+                         end_time: str = None) -> bool:
     """
-    指定した日付・開始時間（＋職員）のスケジュールエントリをクリック
+    指定した日付・開始時間（＋終了時間・職員）のスケジュールエントリをクリック
+
+    2026-11-19: 開始は行の先頭の時刻だけと比べ、end_time を渡せば終了も比べる。
+    時刻と職員で絞っても 2 行以上残るときは押さない (reason=ambiguous_entry)。
 
     Strategy 1: 行の日にち列(td.tac.nowrap)の完全一致で行を特定し、
                 行内のaタグ(onclick付き)をクリック
@@ -707,58 +803,36 @@ def click_schedule_entry(page, day: int, start_time: str, staff_name: str = None
         # 2026-09-03のレビュー指摘: 1件だけの時に素通りさせると、
         # 別時刻・別職員の行を掴んで削除し、職員で絞った検証は
         # 「消えた」と答えてしまう（＝取り違えたまま成功扱い）。
-        print(f"    {day}日に{len(candidate_links)}件のエントリを発見 → 時間 '{start_time}' で絞り込み")
-        # 完全一致: "HH:MM" が time_text の先頭または "～" の後に出現
-        pattern = r'(?:^|\s)' + re.escape(start_time) + r'(?:\s|～|$)'
-        time_matched = [c for c in candidate_links if re.search(pattern, c["time_text"])]
-        matched_label = "時間一致"
-        if not time_matched:
-            # 正規表現でマッチしなかった場合、部分一致にフォールバック
-            time_matched = [c for c in candidate_links if start_time in c["time_text"]]
-            matched_label = "時間一致(部分)"
+        time_label = start_time + (f"～{end_time}" if _norm_hhmm(end_time) else "")
+        print(f"    {day}日に{len(candidate_links)}件のエントリを発見 → 時間 '{time_label}' で絞り込み")
+        # 開始は先頭の時刻だけ、終了は「～」の後だけと比べる (_time_text_matches)。
+        # 2 行以上残ったら押さない (_select_target)。
+        target, reason, time_matched = _select_target(
+            candidate_links, start_time, end_time, staff_name)
 
         def _observed(cands):
             return [f"{c['time_text'].strip().replace(chr(10), ' ')}"
                     f"/{c['staff_text'].strip()}" for c in cands]
 
-        if staff_name:
-            # 職員が判っている場合は、時間・職員のどちらも一致しない限りクリックしない
-            if not time_matched:
-                print(f"    警告: 時間 '{start_time}' に一致する行がありません → クリックしない")
-                print(f"    候補の時間/職員: {_observed(candidate_links)}")
-                _save_debug_on_failure(page, day, start_time)
-                _set_reason("entry_not_found")
-                return False
-            staff_matched = [c for c in time_matched
-                             if _staff_text_matches(staff_name, c["staff_text"])]
-            if not staff_matched:
+        if target is None:
+            if reason == "ambiguous_entry":
+                print(f"    警告: 時間 '{time_label}'"
+                      + (f"・職員 '{staff_name}'" if staff_name else "")
+                      + " に合う行が2件以上あります → どれも押さない")
+                print(f"    時間一致行の時間/職員: {_observed(time_matched)}")
+            elif staff_name and time_matched:
                 print(f"    警告: 時間一致 {len(time_matched)} 件のうち"
                       f"職員 '{staff_name}' の行がありません → クリックしない")
                 print(f"    時間一致行の時間/職員: {_observed(time_matched)}")
-                _save_debug_on_failure(page, day, start_time)
-                _set_reason("entry_not_found")
-                return False
-            if len(staff_matched) > 1:
-                print(f"    警告: 職員 '{staff_name}' の一致が{len(staff_matched)}件 "
-                      f"→ 最初のエントリをクリック")
-            target = staff_matched[0]
-            print(f"    {matched_label}+職員一致: {target['time_text'].strip()} "
-                  f"/ {target['staff_text'].strip()}")
-        elif time_matched:
-            if len(time_matched) > 1:
-                print(f"    警告: 時間一致が{len(time_matched)}件ありますが職員指定なし "
-                      f"→ 最初のエントリをクリック")
-            target = time_matched[0]
-            print(f"    {matched_label}: {target['time_text'].strip()}")
-        elif len(candidate_links) == 1 and not candidate_links[0]["time_text"].strip():
-            # 職員指定なし・候補1件・時間テキストが取れない → 従来どおり唯一の候補を採用
-            print(f"    {day}日に1件のエントリを発見（時間テキストなし）")
-            target = candidate_links[0]
-        else:
-            # 時間で絞り込めなかった場合は最初の1件をクリック（従来動作・職員指定なし時のみ）
-            print(f"    警告: 時間での絞り込み失敗。最初のエントリをクリック")
-            print(f"    候補の時間/職員: {_observed(candidate_links)}")
-            target = candidate_links[0]
+            else:
+                print(f"    警告: 時間 '{time_label}' に一致する行がありません → クリックしない")
+                print(f"    候補の時間/職員: {_observed(candidate_links)}")
+            _save_debug_on_failure(page, day, start_time)
+            _set_reason(reason)
+            return False
+
+        print(f"    時間一致{'+職員一致' if staff_name else ''}: "
+              f"{target['time_text'].strip()} / {target['staff_text'].strip()}")
 
         _click_with_scroll(page, target["link"])
         page.wait_for_timeout(2000)
@@ -1625,13 +1699,16 @@ def close_edit_dialog(page) -> bool:
         return False
 
 
-def _count_plan_entries(page, day: int, start_time: str, staff_name: str = None) -> int:
+def _count_plan_entries(page, day: int, start_time: str, staff_name: str = None,
+                        end_time: str = None) -> int:
     """指定日・指定開始時間の「予定側」エントリ件数を数える (クリックしない).
 
     2026-09-03のレビュー指摘への対応:
       - 実績側(02)の service-detail-area を数えると、実績があるだけで
         「まだ残っている」と誤判定するため予定側だけを見る (_plan_detail_areas)。
       - staff_name 指定時は職員1が一致する行のみ数える。
+    2026-11-19: 部分一致をやめ、click_schedule_entry と同じ物差し (_time_text_matches)
+    で数える。終わりの時刻が start_time と同じ別の行を数えない。
     """
     day_str = str(day)
     count = 0
@@ -1645,7 +1722,7 @@ def _count_plan_entries(page, day: int, start_time: str, staff_name: str = None)
                 if staff_name and not _staff_text_matches(staff_name, _row_staff_text(row)):
                     continue
                 for a in _plan_detail_areas(row):
-                    if start_time in (a.inner_text() or ""):
+                    if _time_text_matches(a.inner_text() or "", start_time, end_time):
                         count += 1
             except Exception:
                 continue
@@ -1654,7 +1731,8 @@ def _count_plan_entries(page, day: int, start_time: str, staff_name: str = None)
     return count
 
 
-def _schedule_entry_exists(page, day: int, start_time: str, staff_name: str = None) -> bool:
+def _schedule_entry_exists(page, day: int, start_time: str, staff_name: str = None,
+                           end_time: str = None) -> bool:
     """指定日の行に start_time のエントリが残っているか (削除検証用・クリックしない).
 
     2026-08-21 C2実機テストで発覚: 削除ボタンのクリックが無反応でも成功扱いになり、
@@ -1664,11 +1742,11 @@ def _schedule_entry_exists(page, day: int, start_time: str, staff_name: str = No
     2026-09-03: staff_name 指定時は職員1が一致する行のみ数える。
     同日同時刻に別職員の新行が既にある場合に、偽の「まだ残っている」を出さないため。
     """
-    return _count_plan_entries(page, day, start_time, staff_name) > 0
+    return _count_plan_entries(page, day, start_time, staff_name, end_time=end_time) > 0
 
 
 def delete_schedule_entry(page, day: int, start_time: str, dry_run: bool = False,
-                          staff_name: str = None) -> bool:
+                          staff_name: str = None, end_time: str = None) -> bool:
     """
     スケジュールエントリを削除（医療保険・介護保険共通）
 
@@ -1676,12 +1754,16 @@ def delete_schedule_entry(page, day: int, start_time: str, dry_run: bool = False
 
     Args:
         staff_name: 指定すると同日同時刻の別行を誤って削除しない（旧行の職員1を渡す）
+        end_time: 指定すると終了の時刻も合う行だけを消す（旧行の終了を渡す）
     """
-    print(f"  削除: {day}日 {start_time}")
+    print(f"  削除: {day}日 {start_time}" + (f"～{end_time}" if end_time else ""))
 
-    if not click_schedule_entry(page, day, start_time, staff_name=staff_name):
+    if not click_schedule_entry(page, day, start_time, staff_name=staff_name,
+                                end_time=end_time):
         print("    予定が見つかりません")
-        _set_reason("entry_not_found")
+        # ambiguous_entry など click_schedule_entry が積んだ理由を上書きしない
+        if getattr(_last_failure_reason, "value", None) is None:
+            _set_reason("entry_not_found")
         return False
 
     if dry_run:
@@ -1692,7 +1774,7 @@ def delete_schedule_entry(page, day: int, start_time: str, dry_run: bool = False
     # 削除前の同時刻・予定側の行数を記録 (M-1)。
     # 職員テキストが読めない等で職員フィルタが空振りしても、
     # 「行数が減っていない = 実際には消えていない」を検出できるようにする。
-    count_before = _count_plan_entries(page, day, start_time)
+    count_before = _count_plan_entries(page, day, start_time, end_time=end_time)
     print(f"    削除前の同時刻エントリ数: {count_before}")
 
     try:
@@ -1799,8 +1881,9 @@ def delete_schedule_entry(page, day: int, start_time: str, dry_run: bool = False
         deleted = False
         count_after = count_before
         for check in range(4):
-            count_after = _count_plan_entries(page, day, start_time)
-            gone = not _schedule_entry_exists(page, day, start_time, staff_name)
+            count_after = _count_plan_entries(page, day, start_time, end_time=end_time)
+            gone = not _schedule_entry_exists(page, day, start_time, staff_name,
+                                              end_time=end_time)
             decreased = count_after < count_before if count_before > 0 else True
             if gone and decreased:
                 deleted = True
@@ -2790,7 +2873,8 @@ def _apply_move_with_reorder(page, correction: Correction, dry_run: bool = False
             pass
         page.wait_for_timeout(3000)
         if not delete_schedule_entry(page, day_from, correction.start_time_from, dry_run,
-                                     staff_name=staff_from):
+                                     staff_name=staff_from,
+                                     end_time=correction.end_time_from):
             print("  ※ 警告: 追加は成功しましたが旧行の削除に失敗しました。"
                   "この利用者には新旧2件が残っています。手動で旧行を削除してください")
             _set_reason("old_row_remains_duplicate")
@@ -2806,7 +2890,8 @@ def _apply_move_with_reorder(page, correction: Correction, dry_run: bool = False
     else:
         print("  ※ 新旧が同一の行になるため、削除→再追加で処理します")
         if not delete_schedule_entry(page, day_from, correction.start_time_from, dry_run,
-                                     staff_name=staff_from):
+                                     staff_name=staff_from,
+                                     end_time=correction.end_time_from):
             return False
         # delete_schedule_entry は実在検証つきなので、True = 旧行はもう無い。
         _mark_delete_done(correction)
@@ -2885,7 +2970,8 @@ def apply_correction(page, correction: Correction, dry_run: bool = False, month_
         print(f"\n=== 削除: {correction.user_name} {correction.date_from}日 [{biz_type}] ===")
         day = int(correction.date_from) if correction.date_from.isdigit() else 1
         return delete_schedule_entry(page, day, correction.start_time_from, dry_run,
-                                     staff_name=correction.staff1_from or None)
+                                     staff_name=correction.staff1_from or None,
+                                     end_time=correction.end_time_from)
 
     elif action == "add":
         print(f"\n=== 追加: {correction.user_name} {correction.date_to}日 [{biz_type}] ===")
@@ -2920,9 +3006,11 @@ def apply_correction(page, correction: Correction, dry_run: bool = False, month_
         # スタッフのみ変更の場合は通常の編集フロー
         day = int(correction.date_from) if correction.date_from.isdigit() else 1
         if not click_schedule_entry(page, day, correction.start_time_from,
-                                    staff_name=correction.staff1_from or None):
+                                    staff_name=correction.staff1_from or None,
+                                    end_time=correction.end_time_from):
             print("  予定が見つかりません")
-            _set_reason("entry_not_found")
+            if getattr(_last_failure_reason, "value", None) is None:
+                _set_reason("entry_not_found")
             return False
 
         if correction.has_staff_change():
